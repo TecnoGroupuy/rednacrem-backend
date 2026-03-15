@@ -23,13 +23,33 @@ const cognitoClient = new CognitoIdentityProviderClient({
   region: process.env.AWS_REGION
 });
 
-function json(statusCode, payload) {
+function corsHeaders(event) {
+  const origin =
+    event?.headers?.origin ||
+    event?.headers?.Origin ||
+    "https://rednacrem.tri.uy";
+
+  return {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Headers": "authorization,content-type",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+  };
+}
+
+function json(event, statusCode, payload) {
   return {
     statusCode,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8"
-    },
-    body: JSON.stringify(payload, null, 2)
+    headers: corsHeaders(event),
+    body: JSON.stringify(payload)
+  };
+}
+
+function empty(event, statusCode = 204) {
+  return {
+    statusCode,
+    headers: corsHeaders(event),
+    body: ""
   };
 }
 
@@ -234,16 +254,16 @@ async function getCurrentDbUserFromEvent(event) {
   return { authUser, dbUser };
 }
 
-function requireAuthenticated(authUser) {
+function requireAuthenticated(event, authUser) {
   if (!authUser) {
-    return json(401, {
+    return json(event, 401, {
       ok: false,
       message: "Authorization header is required"
     });
   }
 
   if (!authUser.sub) {
-    return json(401, {
+    return json(event, 401, {
       ok: false,
       message: "JWT claims with sub are required"
     });
@@ -252,9 +272,9 @@ function requireAuthenticated(authUser) {
   return null;
 }
 
-function requireDbUser(dbUser) {
+function requireDbUser(event, dbUser) {
   if (!dbUser) {
-    return json(404, {
+    return json(event, 404, {
       ok: false,
       message: "User not found in database"
     });
@@ -263,9 +283,9 @@ function requireDbUser(dbUser) {
   return null;
 }
 
-function requireApproved(dbUser) {
+function requireApproved(event, dbUser) {
   if (!dbUser || dbUser.status !== "approved") {
-    return json(403, {
+    return json(event, 403, {
       ok: false,
       message: "User is not approved"
     });
@@ -274,9 +294,9 @@ function requireApproved(dbUser) {
   return null;
 }
 
-function requireRole(dbUser, allowedRoles) {
+function requireRole(event, dbUser, allowedRoles) {
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
-    return json(403, {
+    return json(event, 403, {
       ok: false,
       message: "Insufficient role permissions",
       requiredRoles: allowedRoles
@@ -670,8 +690,22 @@ export const handler = async (event) => {
   const method = getMethod(event);
   const segments = getPathSegments(path);
 
+  console.log("REQUEST", {
+    method,
+    path,
+    origin: event?.headers?.origin || event?.headers?.Origin || null,
+    hasAuthorization: Boolean(
+      event?.headers?.authorization || event?.headers?.Authorization
+    ),
+    authorizerKeys: Object.keys(event?.requestContext?.authorizer || {})
+  });
+
+  if (method === "OPTIONS") {
+    return empty(event, 204);
+  }
+
   if (method === "GET" && path.endsWith("/health")) {
-    return json(200, {
+    return json(event, 200, {
       ok: true,
       service: "rednacrem-backend",
       timestamp: new Date().toISOString(),
@@ -684,7 +718,7 @@ export const handler = async (event) => {
     try {
       const result = await checkDatabaseConnection();
 
-      return json(200, {
+      return json(event, 200, {
         ok: true,
         database: "connected",
         serverTime: result.server_time,
@@ -692,7 +726,7 @@ export const handler = async (event) => {
         method
       });
     } catch (error) {
-      return json(500, {
+      return json(event, 500, {
         ok: false,
         database: "disconnected",
         error: error.message,
@@ -705,15 +739,23 @@ export const handler = async (event) => {
   if (method === "GET" && (path.endsWith("/auth/me") || path.endsWith("/me"))) {
     const authUser = getAuthUser(event);
 
+    console.log("AUTH_ME", {
+      hasAuthUser: Boolean(authUser),
+      sub: authUser?.sub || null,
+      email: authUser?.email || null,
+      groups: authUser?.groups || [],
+      hasClaims: Boolean(authUser?.claims)
+    });
+
     if (!authUser) {
-      return json(401, {
+      return json(event, 401, {
         ok: false,
         message: "Authorization header is required"
       });
     }
 
     if (!authUser.sub) {
-      return json(401, {
+      return json(event, 401, {
         ok: false,
         message: "JWT claims with sub are required"
       });
@@ -723,7 +765,7 @@ export const handler = async (event) => {
       const dbUser = await getUserByCognitoSub(authUser.sub);
 
       if (!dbUser) {
-        return json(404, {
+        return json(event, 404, {
           ok: false,
           message: "User not found in database",
           cognitoSub: authUser.sub,
@@ -731,7 +773,7 @@ export const handler = async (event) => {
         });
       }
 
-      return json(200, {
+      return json(event, 200, {
         ok: true,
         user: {
           id: dbUser.id,
@@ -749,7 +791,7 @@ export const handler = async (event) => {
         claims: authUser.claims
       });
     } catch (error) {
-      return json(500, {
+      return json(event, 500, {
         ok: false,
         message: "Failed to load user from database",
         error: error.message
@@ -761,7 +803,7 @@ export const handler = async (event) => {
     const body = safeParseBody(event);
 
     if (body === null) {
-      return json(400, {
+      return json(event, 400, {
         ok: false,
         message: "Invalid JSON body"
       });
@@ -770,7 +812,7 @@ export const handler = async (event) => {
     const validation = validateVendorRegistrationPayload(body);
 
     if (!validation.valid) {
-      return json(422, {
+      return json(event, 422, {
         ok: false,
         message: "Validation failed",
         errors: validation.errors
@@ -781,19 +823,19 @@ export const handler = async (event) => {
       const result = await createVendorRegistrationRequest(validation.data);
 
       if (result.conflict) {
-        return json(409, {
+        return json(event, 409, {
           ok: false,
           message: result.message
         });
       }
 
-      return json(201, {
+      return json(event, 201, {
         ok: true,
         message: "Tu solicitud fue enviada. Un supervisor debe aprobarla.",
         request: result.request
       });
     } catch (error) {
-      return json(500, {
+      return json(event, 500, {
         ok: false,
         message: "Failed to create vendor registration request",
         error: error.message
@@ -805,26 +847,26 @@ export const handler = async (event) => {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
-      let authError = requireAuthenticated(authUser);
+      let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
 
-      let dbError = requireDbUser(dbUser);
+      let dbError = requireDbUser(event, dbUser);
       if (dbError) return dbError;
 
-      let statusError = requireApproved(dbUser);
+      let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(dbUser, ["supervisor", "superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
       if (roleError) return roleError;
 
       const requests = await listPendingVendorRequests();
 
-      return json(200, {
+      return json(event, 200, {
         ok: true,
         requests
       });
     } catch (error) {
-      return json(500, {
+      return json(event, 500, {
         ok: false,
         message: "Failed to list vendor requests",
         error: error.message
@@ -842,16 +884,16 @@ export const handler = async (event) => {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
-      let authError = requireAuthenticated(authUser);
+      let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
 
-      let dbError = requireDbUser(dbUser);
+      let dbError = requireDbUser(event, dbUser);
       if (dbError) return dbError;
 
-      let statusError = requireApproved(dbUser);
+      let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(dbUser, ["supervisor", "superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
       if (roleError) return roleError;
 
       const requestId = segments[2];
@@ -861,33 +903,33 @@ export const handler = async (event) => {
       });
 
       if (result.notFound) {
-        return json(404, {
+        return json(event, 404, {
           ok: false,
           message: "Solicitud no encontrada"
         });
       }
 
       if (result.invalidState) {
-        return json(409, {
+        return json(event, 409, {
           ok: false,
           message: result.message
         });
       }
 
       if (result.conflict) {
-        return json(409, {
+        return json(event, 409, {
           ok: false,
           message: result.message
         });
       }
 
-      return json(200, {
+      return json(event, 200, {
         ok: true,
         message: "Solicitud aprobada correctamente",
         user: result.user
       });
     } catch (error) {
-      return json(500, {
+      return json(event, 500, {
         ok: false,
         message: "Failed to approve vendor request",
         error: error.message
@@ -905,7 +947,7 @@ export const handler = async (event) => {
     const body = safeParseBody(event);
 
     if (body === null) {
-      return json(400, {
+      return json(event, 400, {
         ok: false,
         message: "Invalid JSON body"
       });
@@ -914,16 +956,16 @@ export const handler = async (event) => {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
-      let authError = requireAuthenticated(authUser);
+      let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
 
-      let dbError = requireDbUser(dbUser);
+      let dbError = requireDbUser(event, dbUser);
       if (dbError) return dbError;
 
-      let statusError = requireApproved(dbUser);
+      let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(dbUser, ["supervisor", "superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
       if (roleError) return roleError;
 
       const requestId = segments[2];
@@ -934,26 +976,26 @@ export const handler = async (event) => {
       });
 
       if (result.notFound) {
-        return json(404, {
+        return json(event, 404, {
           ok: false,
           message: "Solicitud no encontrada"
         });
       }
 
       if (result.invalidState) {
-        return json(409, {
+        return json(event, 409, {
           ok: false,
           message: result.message
         });
       }
 
-      return json(200, {
+      return json(event, 200, {
         ok: true,
         message: "Solicitud rechazada correctamente",
         request: result.request
       });
     } catch (error) {
-      return json(500, {
+      return json(event, 500, {
         ok: false,
         message: "Failed to reject vendor request",
         error: error.message
@@ -961,7 +1003,7 @@ export const handler = async (event) => {
     }
   }
 
-  return json(404, {
+  return json(event, 404, {
     ok: false,
     message: "Route not found",
     path,
