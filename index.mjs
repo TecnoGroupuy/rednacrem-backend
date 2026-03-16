@@ -2,7 +2,8 @@ import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
   AdminCreateUserCommand,
-  AdminAddUserToGroupCommand
+  AdminAddUserToGroupCommand,
+  ListUsersCommand
 } from "@aws-sdk/client-cognito-identity-provider";
 
 const VALID_USER_STATUSES = [
@@ -23,33 +24,13 @@ const cognitoClient = new CognitoIdentityProviderClient({
   region: process.env.AWS_REGION
 });
 
-function corsHeaders(event) {
-  const origin =
-    event?.headers?.origin ||
-    event?.headers?.Origin ||
-    "https://rednacrem.tri.uy";
-
-  return {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Headers": "authorization,content-type",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
-  };
-}
-
-function json(event, statusCode, payload) {
+function json(statusCode, payload) {
   return {
     statusCode,
-    headers: corsHeaders(event),
+    headers: {
+      "Content-Type": "application/json; charset=utf-8"
+    },
     body: JSON.stringify(payload)
-  };
-}
-
-function empty(event, statusCode = 204) {
-  return {
-    statusCode,
-    headers: corsHeaders(event),
-    body: ""
   };
 }
 
@@ -215,11 +196,152 @@ async function getUserByCognitoSub(cognitoSub) {
 
   try {
     await client.connect();
+    return await getUserByCognitoSubWithClient(client, cognitoSub);
+  } finally {
+    await client.end();
+  }
+}
 
+async function getUserByEmail(email) {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+    return await getUserByEmailWithClient(client, email);
+  } finally {
+    await client.end();
+  }
+}
+
+async function getUsersTableMetadata(client) {
+  const result = await client.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'users'
+    `
+  );
+
+  const columns = new Set(result.rows.map((row) => row.column_name));
+
+  return {
+    hasUsersTable: columns.size > 0,
+    hasCognitoSub: columns.has("cognito_sub"),
+    columns
+  };
+}
+
+function buildUserSelect(metadata) {
+  return `
+    SELECT
+      id,
+      ${metadata.hasCognitoSub ? "cognito_sub" : "NULL::text AS cognito_sub"},
+      email,
+      nombre,
+      apellido,
+      telefono,
+      role_key,
+      status,
+      created_at,
+      updated_at,
+      last_login_at
+    FROM users
+  `;
+}
+
+async function getUserByCognitoSubWithClient(client, cognitoSub) {
+  if (!cognitoSub) {
+    return null;
+  }
+
+  const metadata = await getUsersTableMetadata(client);
+  if (!metadata.hasUsersTable || !metadata.hasCognitoSub) {
+    return null;
+  }
+
+  const result = await client.query(
+    `
+    ${buildUserSelect(metadata)}
+    WHERE cognito_sub = $1
+    LIMIT 1
+    `,
+    [cognitoSub]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getUserByEmailWithClient(client, email) {
+  if (!email) {
+    return null;
+  }
+
+  const metadata = await getUsersTableMetadata(client);
+  if (!metadata.hasUsersTable) {
+    return null;
+  }
+
+  const result = await client.query(
+    `
+    ${buildUserSelect(metadata)}
+    WHERE lower(email) = lower($1)
+    LIMIT 1
+    `,
+    [email]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function syncUserCognitoSub(client, userId, cognitoSub) {
+  const metadata = await getUsersTableMetadata(client);
+
+  if (!metadata.hasUsersTable || !metadata.hasCognitoSub || !cognitoSub) {
+    return;
+  }
+
+  await client.query(
+    `
+    UPDATE users
+    SET cognito_sub = $2, updated_at = now()
+    WHERE id = $1
+      AND (cognito_sub IS NULL OR cognito_sub = '')
+    `,
+    [userId, cognitoSub]
+  );
+}
+
+async function getUserByAuthUser(authUser) {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+
+    let dbUser = await getUserByCognitoSubWithClient(client, authUser?.sub);
+
+    if (!dbUser && authUser?.email) {
+      dbUser = await getUserByEmailWithClient(client, authUser.email);
+
+      if (dbUser && authUser?.sub) {
+        await syncUserCognitoSub(client, dbUser.id, authUser.sub);
+        dbUser = await getUserByEmailWithClient(client, authUser.email);
+      }
+    }
+
+    return dbUser;
+  } finally {
+    await client.end();
+  }
+}
+
+async function insertApprovedVendorUser(client, input) {
+  const metadata = await getUsersTableMetadata(client);
+
+  if (metadata.hasCognitoSub) {
     const result = await client.query(
       `
-      SELECT
-        id,
+      INSERT INTO users (
         cognito_sub,
         email,
         nombre,
@@ -227,43 +349,77 @@ async function getUserByCognitoSub(cognitoSub) {
         telefono,
         role_key,
         status,
+        approved_by,
+        approved_at,
         created_at,
-        updated_at,
-        last_login_at
-      FROM users
-      WHERE cognito_sub = $1
-      LIMIT 1
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, 'vendedor', 'approved', $6, now(), now(), now())
+      RETURNING id, cognito_sub, email, nombre, apellido, telefono, role_key, status
       `,
-      [cognitoSub]
+      [
+        input.cognitoSub,
+        input.email,
+        input.nombre,
+        input.apellido,
+        input.telefono,
+        input.reviewerUserId
+      ]
     );
 
-    return result.rows[0] || null;
-  } finally {
-    await client.end();
+    return result.rows[0];
   }
+
+  const result = await client.query(
+    `
+    INSERT INTO users (
+      email,
+      nombre,
+      apellido,
+      telefono,
+      role_key,
+      status,
+      approved_by,
+      approved_at,
+      created_at,
+      updated_at
+    )
+    VALUES ($1, $2, $3, $4, 'vendedor', 'approved', $5, now(), now(), now())
+    RETURNING id, NULL::text AS cognito_sub, email, nombre, apellido, telefono, role_key, status
+    `,
+    [
+      input.email,
+      input.nombre,
+      input.apellido,
+      input.telefono,
+      input.reviewerUserId
+    ]
+  );
+
+  return result.rows[0];
 }
 
 async function getCurrentDbUserFromEvent(event) {
   const authUser = getAuthUser(event);
 
-  if (!authUser || !authUser.sub) {
+  if (!authUser || (!authUser.sub && !authUser.email)) {
     return { authUser, dbUser: null };
   }
 
-  const dbUser = await getUserByCognitoSub(authUser.sub);
+  const dbUser = await getUserByAuthUser(authUser);
   return { authUser, dbUser };
 }
 
 function requireAuthenticated(event, authUser) {
   if (!authUser) {
-    return json(event, 401, {
+    return json(401, {
       ok: false,
       message: "Authorization header is required"
     });
   }
 
   if (!authUser.sub) {
-    return json(event, 401, {
+    return json(401, {
       ok: false,
       message: "JWT claims with sub are required"
     });
@@ -274,7 +430,7 @@ function requireAuthenticated(event, authUser) {
 
 function requireDbUser(event, dbUser) {
   if (!dbUser) {
-    return json(event, 404, {
+    return json(404, {
       ok: false,
       message: "User not found in database"
     });
@@ -285,7 +441,7 @@ function requireDbUser(event, dbUser) {
 
 function requireApproved(event, dbUser) {
   if (!dbUser || dbUser.status !== "approved") {
-    return json(event, 403, {
+    return json(403, {
       ok: false,
       message: "User is not approved"
     });
@@ -296,7 +452,7 @@ function requireApproved(event, dbUser) {
 
 function requireRole(event, dbUser, allowedRoles) {
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
-    return json(event, 403, {
+    return json(403, {
       ok: false,
       message: "Insufficient role permissions",
       requiredRoles: allowedRoles
@@ -443,6 +599,31 @@ async function createCognitoVendorUser({ email, nombre, apellido }) {
   );
 }
 
+async function getCognitoUserByEmail(email) {
+  const userPoolId = process.env.COGNITO_USER_POOL_ID;
+
+  if (!userPoolId) {
+    throw new Error("COGNITO_USER_POOL_ID is required");
+  }
+
+  const result = await cognitoClient.send(
+    new ListUsersCommand({
+      UserPoolId: userPoolId,
+      Filter: `email = "${email}"`,
+      Limit: 1
+    })
+  );
+
+  return result.Users?.[0] || null;
+}
+
+function extractSubFromCognitoUser(cognitoUser) {
+  return (
+    cognitoUser?.Attributes?.find((attribute) => attribute.Name === "sub")?.Value ||
+    null
+  );
+}
+
 async function getCognitoSubByEmail(email) {
   const client = createDbClient();
 
@@ -507,6 +688,9 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
       apellido: requestRow.apellido
     });
 
+    const cognitoUser = await getCognitoUserByEmail(requestRow.email);
+    const cognitoSub = extractSubFromCognitoUser(cognitoUser);
+
     await client.query("BEGIN");
 
     const existingUserResult = await client.query(
@@ -527,33 +711,14 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
       };
     }
 
-    const insertedUser = await client.query(
-      `
-      INSERT INTO users (
-        email,
-        nombre,
-        apellido,
-        telefono,
-        role_key,
-        status,
-        approved_by,
-        approved_at,
-        created_at,
-        updated_at
-      )
-      VALUES ($1, $2, $3, $4, 'vendedor', 'approved', $5, now(), now(), now())
-      RETURNING id, email, nombre, apellido, telefono, role_key, status
-      `,
-      [
-        requestRow.email,
-        requestRow.nombre,
-        requestRow.apellido,
-        requestRow.telefono,
-        reviewerUserId
-      ]
-    );
-
-    const newUser = insertedUser.rows[0];
+    const newUser = await insertApprovedVendorUser(client, {
+      cognitoSub,
+      email: requestRow.email,
+      nombre: requestRow.nombre,
+      apellido: requestRow.apellido,
+      telefono: requestRow.telefono,
+      reviewerUserId
+    });
 
     await client.query(
       `
@@ -700,12 +865,8 @@ export const handler = async (event) => {
     authorizerKeys: Object.keys(event?.requestContext?.authorizer || {})
   });
 
-  if (method === "OPTIONS") {
-    return empty(event, 204);
-  }
-
   if (method === "GET" && path.endsWith("/health")) {
-    return json(event, 200, {
+    return json(200, {
       ok: true,
       service: "rednacrem-backend",
       timestamp: new Date().toISOString(),
@@ -718,7 +879,7 @@ export const handler = async (event) => {
     try {
       const result = await checkDatabaseConnection();
 
-      return json(event, 200, {
+      return json(200, {
         ok: true,
         database: "connected",
         serverTime: result.server_time,
@@ -726,7 +887,7 @@ export const handler = async (event) => {
         method
       });
     } catch (error) {
-      return json(event, 500, {
+      return json(500, {
         ok: false,
         database: "disconnected",
         error: error.message,
@@ -748,24 +909,24 @@ export const handler = async (event) => {
     });
 
     if (!authUser) {
-      return json(event, 401, {
+      return json(401, {
         ok: false,
         message: "Authorization header is required"
       });
     }
 
     if (!authUser.sub) {
-      return json(event, 401, {
+      return json(401, {
         ok: false,
         message: "JWT claims with sub are required"
       });
     }
 
     try {
-      const dbUser = await getUserByCognitoSub(authUser.sub);
+      const dbUser = await getUserByAuthUser(authUser);
 
       if (!dbUser) {
-        return json(event, 404, {
+        return json(404, {
           ok: false,
           message: "User not found in database",
           cognitoSub: authUser.sub,
@@ -773,7 +934,7 @@ export const handler = async (event) => {
         });
       }
 
-      return json(event, 200, {
+      return json(200, {
         ok: true,
         user: {
           id: dbUser.id,
@@ -791,7 +952,15 @@ export const handler = async (event) => {
         claims: authUser.claims
       });
     } catch (error) {
-      return json(event, 500, {
+      console.error("AUTH_ME_DB_ERROR", {
+        message: error.message,
+        code: error.code || null,
+        detail: error.detail || null,
+        authSub: authUser?.sub || null,
+        authEmail: authUser?.email || null
+      });
+
+      return json(500, {
         ok: false,
         message: "Failed to load user from database",
         error: error.message
@@ -803,7 +972,7 @@ export const handler = async (event) => {
     const body = safeParseBody(event);
 
     if (body === null) {
-      return json(event, 400, {
+      return json(400, {
         ok: false,
         message: "Invalid JSON body"
       });
@@ -812,7 +981,7 @@ export const handler = async (event) => {
     const validation = validateVendorRegistrationPayload(body);
 
     if (!validation.valid) {
-      return json(event, 422, {
+      return json(422, {
         ok: false,
         message: "Validation failed",
         errors: validation.errors
@@ -823,19 +992,19 @@ export const handler = async (event) => {
       const result = await createVendorRegistrationRequest(validation.data);
 
       if (result.conflict) {
-        return json(event, 409, {
+        return json(409, {
           ok: false,
           message: result.message
         });
       }
 
-      return json(event, 201, {
+      return json(201, {
         ok: true,
         message: "Tu solicitud fue enviada. Un supervisor debe aprobarla.",
         request: result.request
       });
     } catch (error) {
-      return json(event, 500, {
+      return json(500, {
         ok: false,
         message: "Failed to create vendor registration request",
         error: error.message
@@ -861,12 +1030,12 @@ export const handler = async (event) => {
 
       const requests = await listPendingVendorRequests();
 
-      return json(event, 200, {
+      return json(200, {
         ok: true,
         requests
       });
     } catch (error) {
-      return json(event, 500, {
+      return json(500, {
         ok: false,
         message: "Failed to list vendor requests",
         error: error.message
@@ -903,33 +1072,33 @@ export const handler = async (event) => {
       });
 
       if (result.notFound) {
-        return json(event, 404, {
+        return json(404, {
           ok: false,
           message: "Solicitud no encontrada"
         });
       }
 
       if (result.invalidState) {
-        return json(event, 409, {
+        return json(409, {
           ok: false,
           message: result.message
         });
       }
 
       if (result.conflict) {
-        return json(event, 409, {
+        return json(409, {
           ok: false,
           message: result.message
         });
       }
 
-      return json(event, 200, {
+      return json(200, {
         ok: true,
         message: "Solicitud aprobada correctamente",
         user: result.user
       });
     } catch (error) {
-      return json(event, 500, {
+      return json(500, {
         ok: false,
         message: "Failed to approve vendor request",
         error: error.message
@@ -947,7 +1116,7 @@ export const handler = async (event) => {
     const body = safeParseBody(event);
 
     if (body === null) {
-      return json(event, 400, {
+      return json(400, {
         ok: false,
         message: "Invalid JSON body"
       });
@@ -976,26 +1145,26 @@ export const handler = async (event) => {
       });
 
       if (result.notFound) {
-        return json(event, 404, {
+        return json(404, {
           ok: false,
           message: "Solicitud no encontrada"
         });
       }
 
       if (result.invalidState) {
-        return json(event, 409, {
+        return json(409, {
           ok: false,
           message: result.message
         });
       }
 
-      return json(event, 200, {
+      return json(200, {
         ok: true,
         message: "Solicitud rechazada correctamente",
         request: result.request
       });
     } catch (error) {
-      return json(event, 500, {
+      return json(500, {
         ok: false,
         message: "Failed to reject vendor request",
         error: error.message
@@ -1003,7 +1172,7 @@ export const handler = async (event) => {
     }
   }
 
-  return json(event, 404, {
+  return json(404, {
     ok: false,
     message: "Route not found",
     path,
