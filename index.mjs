@@ -5,6 +5,9 @@ import {
   AdminAddUserToGroupCommand,
   ListUsersCommand
 } from "@aws-sdk/client-cognito-identity-provider";
+import { AppError } from "./src/lib/errors.js";
+import { normalizePhone } from "./src/lib/validation.js";
+import { createManualUser, updateUser } from "./src/services/userService.js";
 
 const VALID_USER_STATUSES = [
   "pending",
@@ -18,6 +21,14 @@ const VALID_VENDOR_REQUEST_STATUSES = [
   "pending",
   "approved",
   "rejected"
+];
+
+const VALID_ROLES = [
+  "superadministrador",
+  "director",
+  "supervisor",
+  "operaciones",
+  "atencion_cliente"
 ];
 
 const cognitoClient = new CognitoIdentityProviderClient({
@@ -169,6 +180,125 @@ function normalizeEmail(email) {
 
 function normalizeText(value) {
   return String(value || "").trim();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
+}
+
+function isActiveFromStatus(status) {
+  return !["inactive", "blocked", "rejected"].includes(status);
+}
+
+function statusFromActivo(activo) {
+  return activo ? "approved" : "inactive";
+}
+
+function splitDisplayName(nombreCompleto) {
+  const normalized = normalizeText(nombreCompleto);
+  return {
+    nombre: normalized,
+    apellido: ""
+  };
+}
+
+function mapUserRowToApi(row) {
+  const nombreCompleto = [row.nombre, row.apellido].filter(Boolean).join(" ").trim();
+  const activo = row.activo !== undefined && row.activo !== null
+    ? Boolean(row.activo)
+    : isActiveFromStatus(row.status);
+
+  return {
+    id: row.id,
+    nombre: nombreCompleto || row.nombre || "",
+    email: row.email,
+    telefono: row.telefono || "",
+    rol: row.role_key,
+    role: row.role_key,
+    activo,
+    status: row.status,
+    ultimoAcceso: row.last_login_at || null,
+    last_login_at: row.last_login_at || null,
+    createdAt: row.created_at,
+    created_at: row.created_at
+  };
+}
+
+function validateSuperadminUserPayload(body, options = {}) {
+  const nombre = normalizeText(body?.nombre);
+  const apellido = normalizeText(body?.apellido);
+  const email = normalizeEmail(body?.email);
+  const telefono = normalizeText(body?.telefono);
+  const rol = normalizeText(body?.rol || body?.role);
+  const status = normalizeText(body?.status);
+  const reason = normalizeText(body?.reason);
+  const hasActivo = body?.activo !== undefined;
+  const activo = hasActivo ? Boolean(body.activo) : undefined;
+  const errors = {};
+
+  if (!options.partial || body?.nombre !== undefined) {
+    if (!nombre) {
+      errors.nombre = "El nombre es obligatorio";
+    }
+  }
+
+  if (!options.partial || body?.apellido !== undefined) {
+    if (!apellido) {
+      errors.apellido = "El apellido es obligatorio";
+    }
+  }
+
+  if (!options.partial || body?.email !== undefined) {
+    if (!email) {
+      errors.email = "El email es obligatorio";
+    } else if (!isValidEmail(email)) {
+      errors.email = "El email no es válido";
+    }
+  }
+
+  if (!options.partial || body?.telefono !== undefined) {
+    if (!telefono) {
+      errors.telefono = "El teléfono es obligatorio";
+    }
+  }
+
+  if (!options.partial || body?.rol !== undefined || body?.role !== undefined) {
+    if (!rol) {
+      errors.rol = "El rol es obligatorio";
+    } else if (!VALID_ROLES.includes(rol)) {
+      errors.rol = "El rol no es válido";
+    }
+  }
+
+  if (!options.partial || body?.status !== undefined) {
+    if (!status) {
+      errors.status = "El estado es obligatorio";
+    } else if (!VALID_USER_STATUSES.includes(status)) {
+      errors.status = "El estado no es válido";
+    }
+  }
+
+  if (reason && reason.length > 500) {
+    errors.reason = "El motivo no puede superar los 500 caracteres";
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { valid: false, errors };
+  }
+
+  return {
+    valid: true,
+    data: {
+      nombre,
+      apellido,
+      email,
+      telefono,
+      rol,
+      status,
+      reason,
+      activo
+    }
+  };
 }
 
 function validateVendorRegistrationPayload(body) {
@@ -408,6 +538,296 @@ async function getCurrentDbUserFromEvent(event) {
 
   const dbUser = await getUserByAuthUser(authUser);
   return { authUser, dbUser };
+}
+
+async function listSuperadminUsers() {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+
+    const metadata = await getUsersTableMetadata(client);
+    if (!metadata.hasUsersTable) {
+      throw new Error("users table does not exist");
+    }
+
+    const result = await client.query(
+      `
+      ${buildUserSelect(metadata)}
+      ORDER BY created_at DESC
+      `
+    );
+
+    return result.rows.map(mapUserRowToApi);
+  } finally {
+    await client.end();
+  }
+}
+
+async function findUserByIdWithClient(client, userId) {
+  const metadata = await getUsersTableMetadata(client);
+  if (!metadata.hasUsersTable) {
+    return null;
+  }
+
+  const result = await client.query(
+    `
+    ${buildUserSelect(metadata)}
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function findUserByEmailForSuperadmin(client, email, excludeUserId = null) {
+  const metadata = await getUsersTableMetadata(client);
+  if (!metadata.hasUsersTable) {
+    return null;
+  }
+
+  const values = [email];
+  let where = "WHERE lower(email) = lower($1)";
+
+  if (excludeUserId) {
+    values.push(excludeUserId);
+    where += ` AND id <> $${values.length}`;
+  }
+
+  const result = await client.query(
+    `
+    ${buildUserSelect(metadata)}
+    ${where}
+    LIMIT 1
+    `,
+    values
+  );
+
+  return result.rows[0] || null;
+}
+
+async function createSuperadminUserRecord(input, actorUserId) {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+    await client.query("BEGIN");
+
+    const existingUser = await findUserByEmailForSuperadmin(client, input.email);
+    if (existingUser) {
+      await client.query("ROLLBACK");
+      return { conflict: true, message: "Ya existe un usuario con ese email" };
+    }
+
+    const nameParts = splitDisplayName(input.nombre);
+    const status = statusFromActivo(input.activo ?? true);
+    const metadata = await getUsersTableMetadata(client);
+
+    const result = await client.query(
+      `
+      INSERT INTO users (
+        ${metadata.hasCognitoSub ? "cognito_sub," : ""}
+        email,
+        nombre,
+        apellido,
+        telefono,
+        role_key,
+        status,
+        created_by,
+        approved_by,
+        approved_at,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        ${metadata.hasCognitoSub ? "NULL," : ""}
+        $1, $2, $3, $4, $5, $6, $7,
+        ${status === "approved" ? "now()" : "NULL"},
+        now(), now()
+      )
+      RETURNING *
+      `,
+      [
+        input.email,
+        nameParts.nombre,
+        nameParts.apellido,
+        input.telefono || null,
+        input.rol,
+        status,
+        actorUserId
+      ]
+    );
+
+    const createdUser = result.rows[0];
+
+    await client.query(
+      `
+      INSERT INTO user_role_history (
+        user_id,
+        old_role,
+        new_role,
+        changed_by,
+        changed_at,
+        reason
+      )
+      VALUES ($1, $2, $3, $4, now(), $5)
+      `,
+      [
+        createdUser.id,
+        null,
+        input.rol,
+        actorUserId,
+        "Alta manual desde superadmin/users"
+      ]
+    );
+
+    await client.query(
+      `
+      INSERT INTO user_status_history (
+        user_id,
+        old_status,
+        new_status,
+        changed_by,
+        changed_at,
+        reason
+      )
+      VALUES ($1, $2, $3, $4, now(), $5)
+      `,
+      [
+        createdUser.id,
+        null,
+        status,
+        actorUserId,
+        "Alta manual desde superadmin/users"
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return { user: mapUserRowToApi(createdUser) };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+    throw error;
+  } finally {
+    await client.end();
+  }
+}
+
+async function updateSuperadminUserRecord(userId, input, actorUserId) {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+    await client.query("BEGIN");
+
+    const existingUser = await findUserByIdWithClient(client, userId);
+    if (!existingUser) {
+      await client.query("ROLLBACK");
+      return { notFound: true };
+    }
+
+    if (existingUser.id === actorUserId && input.rol && input.rol !== existingUser.role_key) {
+      await client.query("ROLLBACK");
+      return { forbidden: true, message: "No puedes cambiar tu propio rol" };
+    }
+
+    const duplicate = await findUserByEmailForSuperadmin(client, input.email, userId);
+    if (duplicate) {
+      await client.query("ROLLBACK");
+      return { conflict: true, message: "Ya existe un usuario con ese email" };
+    }
+
+    const nameParts = splitDisplayName(input.nombre);
+    const status = statusFromActivo(input.activo ?? isActiveFromStatus(existingUser.status));
+
+    const result = await client.query(
+      `
+      UPDATE users
+      SET
+        email = $2,
+        nombre = $3,
+        apellido = $4,
+        telefono = $5,
+        role_key = $6,
+        status = $7,
+        updated_at = now()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [
+        userId,
+        input.email,
+        nameParts.nombre,
+        nameParts.apellido,
+        input.telefono || null,
+        input.rol,
+        status
+      ]
+    );
+
+    const updatedUser = result.rows[0];
+
+    if (existingUser.role_key !== updatedUser.role_key) {
+      await client.query(
+        `
+        INSERT INTO user_role_history (
+          user_id,
+          old_role,
+          new_role,
+          changed_by,
+          changed_at,
+          reason
+        )
+        VALUES ($1, $2, $3, $4, now(), $5)
+        `,
+        [
+          updatedUser.id,
+          existingUser.role_key,
+          updatedUser.role_key,
+          actorUserId,
+          "Actualización desde superadmin/users"
+        ]
+      );
+    }
+
+    if (existingUser.status !== updatedUser.status) {
+      await client.query(
+        `
+        INSERT INTO user_status_history (
+          user_id,
+          old_status,
+          new_status,
+          changed_by,
+          changed_at,
+          reason
+        )
+        VALUES ($1, $2, $3, $4, now(), $5)
+        `,
+        [
+          updatedUser.id,
+          existingUser.status,
+          updatedUser.status,
+          actorUserId,
+          "Actualización desde superadmin/users"
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return { user: mapUserRowToApi(updatedUser) };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+    throw error;
+  } finally {
+    await client.end();
+  }
 }
 
 function requireAuthenticated(event, authUser) {
@@ -1043,6 +1463,179 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/superadmin/users")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const items = await listSuperadminUsers();
+
+      return json(200, { items });
+    } catch (error) {
+      console.error("SUPERADMIN_LIST_USERS_ERROR", {
+        message: error.message,
+        code: error.code || null
+      });
+
+      return json(500, {
+        ok: false,
+        message: "Failed to list users",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/superadmin/users")) {
+    const body = safeParseBody(event);
+
+    if (body === null) {
+      return json(400, {
+        ok: false,
+        message: "Invalid JSON body"
+      });
+    }
+
+    const validation = validateSuperadminUserPayload(body);
+    if (!validation.valid) {
+      return json(422, {
+        ok: false,
+        message: "Validation failed",
+        errors: validation.errors
+      });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const payload = {
+        nombre: validation.data.nombre,
+        apellido: validation.data.apellido,
+        email: validation.data.email,
+        telefono: normalizePhone(validation.data.telefono),
+        role: validation.data.rol,
+        status: validation.data.status,
+        reason: validation.data.reason || undefined
+      };
+
+      const createdUser = await createManualUser(payload, dbUser);
+      return json(201, mapUserRowToApi(createdUser));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return json(error.statusCode, {
+          ok: false,
+          message: error.message,
+          code: error.code,
+          details: error.details
+        });
+      }
+      console.error("SUPERADMIN_CREATE_USER_ERROR", {
+        message: error.message,
+        code: error.code || null
+      });
+
+      return json(500, {
+        ok: false,
+        message: "Failed to create user",
+        error: error.message
+      });
+    }
+  }
+
+  const superadminUserMatch = path.match(/\/superadmin\/users\/([^/]+)$/);
+
+  if (method === "PUT" && superadminUserMatch) {
+    const body = safeParseBody(event);
+
+    if (body === null) {
+      return json(400, {
+        ok: false,
+        message: "Invalid JSON body"
+      });
+    }
+
+    const validation = validateSuperadminUserPayload(body);
+    if (!validation.valid) {
+      return json(422, {
+        ok: false,
+        message: "Validation failed",
+        errors: validation.errors
+      });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const payload = {
+        userId: superadminUserMatch[1],
+        nombre: validation.data.nombre,
+        apellido: validation.data.apellido,
+        email: validation.data.email,
+        telefono: normalizePhone(validation.data.telefono),
+        role: validation.data.rol,
+        status: validation.data.status,
+        reason: validation.data.reason || undefined
+      };
+
+      const updatedUser = await updateUser(payload, dbUser);
+      return json(200, mapUserRowToApi(updatedUser));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return json(error.statusCode, {
+          ok: false,
+          message: error.message,
+          code: error.code,
+          details: error.details
+        });
+      }
+      console.error("SUPERADMIN_UPDATE_USER_ERROR", {
+        message: error.message,
+        code: error.code || null,
+        userId: superadminUserMatch[1]
+      });
+
+      return json(500, {
+        ok: false,
+        message: "Failed to update user",
+        error: error.message
+      });
+    }
+  }
+
   if (
     method === "POST" &&
     segments.length >= 4 &&
@@ -1178,4 +1771,12 @@ export const handler = async (event) => {
     path,
     method
   });
+};
+
+export const __testables = {
+  isActiveFromStatus,
+  statusFromActivo,
+  mapUserRowToApi,
+  validateSuperadminUserPayload,
+  requireRole
 };
