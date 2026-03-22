@@ -5978,7 +5978,11 @@ export const handler = async (event) => {
         ? Math.max(1, Number(maxIntentosRaw))
         : 3;
       const fechaVencimiento = body?.fecha_vencimiento || body?.fechaVencimiento || null;
-      const criterios = body?.criterios || null;
+      let criteriosRaw = body?.criterios || null;
+      if (typeof criteriosRaw === 'string') {
+        try { criteriosRaw = JSON.parse(criteriosRaw); } catch { criteriosRaw = {}; }
+      }
+      const criterios = criteriosRaw ? JSON.stringify(criteriosRaw) : null;
       const franjaOla1Inicio = body?.franja_ola1_inicio || body?.franjaOla1Inicio || '10:00';
       const franjaOla1Fin = body?.franja_ola1_fin || body?.franjaOla1Fin || '13:00';
       const franjaOla2Inicio = body?.franja_ola2_inicio || body?.franjaOla2Inicio || '17:00';
