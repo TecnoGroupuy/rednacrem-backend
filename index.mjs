@@ -5978,11 +5978,16 @@ export const handler = async (event) => {
         ? Math.max(1, Number(maxIntentosRaw))
         : 3;
       const fechaVencimiento = body?.fecha_vencimiento || body?.fechaVencimiento || null;
-      let criteriosRaw = body?.criterios || null;
-      if (typeof criteriosRaw === 'string') {
-        try { criteriosRaw = JSON.parse(criteriosRaw); } catch { criteriosRaw = {}; }
+      let criteriosJson = body?.criterios ?? null;
+      if (typeof criteriosJson === "string") {
+        try {
+          criteriosJson = JSON.parse(criteriosJson);
+        } catch {
+          criteriosJson = {};
+        }
       }
-      const criterios = criteriosRaw ? JSON.stringify(criteriosRaw) : null;
+      if (!criteriosJson) criteriosJson = {};
+      const criterios = JSON.stringify(criteriosJson);
       const franjaOla1Inicio = body?.franja_ola1_inicio || body?.franjaOla1Inicio || '10:00';
       const franjaOla1Fin = body?.franja_ola1_fin || body?.franjaOla1Fin || '13:00';
       const franjaOla2Inicio = body?.franja_ola2_inicio || body?.franjaOla2Inicio || '17:00';
