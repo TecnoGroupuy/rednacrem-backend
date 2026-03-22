@@ -5900,24 +5900,25 @@ export const handler = async (event) => {
       }
 
       const limite = Math.min(5000, Math.max(1, parseInt(getQueryParam(event, "limite") || "50", 10)));
+      const pagina = Math.max(1, parseInt(getQueryParam(event, "pagina") || "1", 10));
+      const offset = (pagina - 1) * limite;
       const where = conditions.join(" AND ");
       const client = createDbClient();
       await client.connect();
       try {
         const result = await client.query(
-          `SELECT id, nombre, apellido, departamento, localidad, telefono, celular, origen_dato,
+          `SELECT id, nombre, apellido, departamento, localidad, telefono, celular,
+                  origen_dato AS fuente,
                   DATE_PART('year', AGE(fecha_nacimiento))::int AS edad
            FROM datos_para_trabajar
            WHERE ${where}
            ORDER BY id ASC
-           LIMIT $${i}`,
-          [...params, limite]
+           LIMIT $${i} OFFSET $${i + 1}`,
+          [...params, limite, offset]
         );
         return json(200, {
-          ok: true,
           success: true,
-          data: { items: result.rows, total: result.rows.length },
-          error: null
+          data: { contactos: result.rows, pagina, limite }
         });
       } finally {
         await client.end();
