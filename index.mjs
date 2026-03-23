@@ -5294,60 +5294,66 @@ export const handler = async (event) => {
         const result = await client.query(
           `
           SELECT
-            b.id,
-            b.nombre,
-            b.estado,
-            b.seller_id,
-            b.max_intentos,
-            b.fecha_vencimiento,
-            b.criterios,
-            b.franja_ola1_inicio,
-            b.franja_ola1_fin,
-            b.franja_ola2_inicio,
-            b.franja_ola2_fin,
-            b.dias_entre_olas,
-            b.created_at,
+            lb.*,
             u.nombre AS assigned_nombre,
             u.apellido AS assigned_apellido,
-            COUNT(DISTINCT lbc.id)::int AS cantidad_contactos,
-            COALESCE(
+            COALESCE(cnt.total, 0) AS total_contactos,
+            COALESCE(vnd.vendedores, '[]') AS vendedores
+          FROM lead_batches lb
+          LEFT JOIN users u ON u.id = lb.asignado_a
+          LEFT JOIN (
+            SELECT batch_id, COUNT(*) AS total
+            FROM lead_batch_contacts
+            GROUP BY batch_id
+          ) cnt ON cnt.batch_id = lb.id
+          LEFT JOIN (
+            SELECT
+              lbs.batch_id,
               JSON_AGG(
                 JSON_BUILD_OBJECT(
-                  'id', su.id,
-                  'nombre', su.nombre,
-                  'apellido', su.apellido,
-                  'email', su.email
+                  'id', u.id,
+                  'nombre', u.nombre,
+                  'apellido', u.apellido,
+                  'email', u.email
                 )
-              ) FILTER (WHERE su.id IS NOT NULL),
-              '[]'
-            ) AS vendedores
-          FROM lead_batches b
-          LEFT JOIN users u ON u.id = b.asignado_a
-          LEFT JOIN lead_batch_contacts lbc ON lbc.batch_id = b.id
-          LEFT JOIN lead_batch_sellers lbs ON lbs.batch_id = b.id
-          LEFT JOIN users su ON su.id = lbs.seller_id
-          GROUP BY b.id, u.nombre, u.apellido
-          ORDER BY b.created_at DESC
+              ) AS vendedores
+            FROM lead_batch_sellers lbs
+            JOIN users u ON u.id = lbs.seller_id
+            GROUP BY lbs.batch_id
+          ) vnd ON vnd.batch_id = lb.id
+          ORDER BY lb.created_at DESC
           `
         );
-        const items = result.rows.map((row) => ({
-          id: row.id,
-          nombre: row.nombre,
-          estado: row.estado,
-          seller_id: row.seller_id,
-          max_intentos: row.max_intentos,
-          fecha_vencimiento: row.fecha_vencimiento,
-          criterios: row.criterios,
-          franja_ola1_inicio: row.franja_ola1_inicio,
-          franja_ola1_fin: row.franja_ola1_fin,
-          franja_ola2_inicio: row.franja_ola2_inicio,
-          franja_ola2_fin: row.franja_ola2_fin,
-          dias_entre_olas: row.dias_entre_olas,
-          created_at: row.created_at,
-          assigned_to_name: [row.assigned_nombre, row.assigned_apellido].filter(Boolean).join(" ").trim(),
-          cantidad_contactos: Number(row.cantidad_contactos || 0),
-          vendedores: row.vendedores || []
-        }));
+        const items = result.rows.map((row) => {
+          const totalContactos = Number.parseInt(row.total_contactos, 10) || 0;
+          let vendedores = row.vendedores || [];
+          if (typeof vendedores === "string") {
+            try {
+              vendedores = JSON.parse(vendedores);
+            } catch {
+              vendedores = [];
+            }
+          }
+          return {
+            id: row.id,
+            nombre: row.nombre,
+            estado: row.estado,
+            seller_id: row.seller_id,
+            max_intentos: row.max_intentos,
+            fecha_vencimiento: row.fecha_vencimiento,
+            criterios: row.criterios,
+            franja_ola1_inicio: row.franja_ola1_inicio,
+            franja_ola1_fin: row.franja_ola1_fin,
+            franja_ola2_inicio: row.franja_ola2_inicio,
+            franja_ola2_fin: row.franja_ola2_fin,
+            dias_entre_olas: row.dias_entre_olas,
+            created_at: row.created_at,
+            assigned_to_name: [row.assigned_nombre, row.assigned_apellido].filter(Boolean).join(" ").trim(),
+            total_contactos: totalContactos,
+            cantidad_contactos: totalContactos,
+            vendedores
+          };
+        });
         return json(200, {
           ok: true,
           success: true,
