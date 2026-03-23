@@ -4248,7 +4248,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const item = await getManualTicketById(manualTicketMatch[1]);
