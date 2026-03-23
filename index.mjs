@@ -5459,19 +5459,6 @@ export const handler = async (event) => {
         }
 
         let effectiveResultado = resultadoInput;
-        let maxIntentos = null;
-        if (batchId) {
-          const batchRes = await client.query(
-            `SELECT max_intentos FROM lead_batches WHERE id = $1 LIMIT 1`,
-            [batchId]
-          );
-          maxIntentos = batchRes.rows[0]?.max_intentos || null;
-        }
-
-        if (maxIntentos && !desiredCatalog?.es_final && nextAttempts >= maxIntentos) {
-          effectiveResultado = "rellamar";
-        }
-
         let nuevaOla = currentOla;
         if (effectiveResultado === "no_contesta" && currentOla === 1) {
           nuevaOla = 2;
