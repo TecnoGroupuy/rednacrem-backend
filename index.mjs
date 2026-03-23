@@ -5587,6 +5587,10 @@ export const handler = async (event) => {
       const dateParam = getQueryParam(event, "fecha");
       const incluirCumplidas = getQueryParam(event, "incluir_cumplidas") === "true";
       const sellerId = dbUser?.role_key === "vendedor" ? dbUser.id : (sellerIdParam || dbUser.id);
+      console.log("[agenda] dbUser.id:", dbUser?.id);
+      console.log("[agenda] dbUser.role_key:", dbUser?.role_key);
+      console.log("[agenda] sellerIdParam:", sellerIdParam);
+      console.log("[agenda] sellerId usado en query:", sellerId);
 
       const values = [sellerId];
       const whereParts = ["a.seller_id = $1"];
@@ -5625,9 +5629,9 @@ export const handler = async (event) => {
             (
               SELECT JSON_AGG(
                 JSON_BUILD_OBJECT(
-                  'estado', lmh.estado_venta,
+                  'resultado', lmh.resultado,
                   'nota', lmh.nota,
-                  'fecha', lmh.created_at
+                  'fecha', lmh.fecha_gestion
                 ) ORDER BY lmh.created_at DESC
               )
               FROM lead_management_history lmh
