@@ -4544,7 +4544,12 @@ export const handler = async (event) => {
             lcs.intentos,
             lcs.batch_id,
             lcs.ultimo_intento_at,
-            lb.nombre AS nombre_lote
+            lb.nombre AS nombre_lote,
+            (SELECT MAX(lmh.created_at)
+             FROM lead_management_history lmh
+             WHERE lmh.contact_id = d.id
+               AND lmh.batch_id = lcs.batch_id
+            ) AS ultima_gestion_real
           FROM lead_contact_status lcs
           JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           JOIN lead_batches lb ON lb.id = lcs.batch_id
