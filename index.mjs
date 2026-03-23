@@ -5309,7 +5309,7 @@ export const handler = async (event) => {
             b.created_at,
             u.nombre AS assigned_nombre,
             u.apellido AS assigned_apellido,
-            COUNT(lbc.id)::int AS cantidad_contactos,
+            COUNT(DISTINCT lbc.id)::int AS cantidad_contactos,
             COALESCE(
               JSON_AGG(
                 JSON_BUILD_OBJECT(
@@ -6346,6 +6346,8 @@ export const handler = async (event) => {
 
       const contactIds = Array.isArray(body?.contactIds) ? body.contactIds : [];
       const batchId = body?.batchId || null;
+      console.log("[assign] body recibido:", JSON.stringify(body));
+      console.log("[assign] batchId:", batchId, "contactIds count:", contactIds?.length);
 
       if (!batchId || !contactIds.length) {
         return json(422, { ok: false, message: "batchId y contactIds requeridos" });
