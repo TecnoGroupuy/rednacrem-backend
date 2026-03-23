@@ -109,7 +109,7 @@ function buildCorsHeaders(event) {
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, X-Requested-With, X-Dev-Auth, X-Dev-User-Email, X-Dev-User-Role, X-File-Name, X-Filename",
+      "Content-Type, Authorization, X-Requested-With, X-Dev-Auth, X-Dev-User-Email, X-Dev-User-Role, X-Dev-User-Sub, X-Dev-Role, x-dev-user-sub, x-dev-role, X-File-Name, X-Filename",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Expose-Headers": "Content-Disposition"
   };
