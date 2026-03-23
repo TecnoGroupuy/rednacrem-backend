@@ -4499,6 +4499,76 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/leads/assigned")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const sellerId = dbUser?.id || null;
+      if (!sellerId) {
+        return json(401, { ok: false, message: "Seller id requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `
+          SELECT
+            d.id,
+            d.nombre,
+            d.apellido,
+            d.telefono,
+            d.celular,
+            d.departamento,
+            d.localidad,
+            d.origen_dato,
+            lcs.estado_venta,
+            lcs.intentos,
+            lcs.batch_id,
+            lcs.ultimo_intento_at,
+            lb.nombre AS nombre_lote
+          FROM lead_contact_status lcs
+          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lb.estado IN ('activo', 'asignado')
+          ORDER BY lcs.intentos ASC, lcs.contact_id ASC
+          `,
+          [sellerId]
+        );
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: {
+            contactos: result.rows,
+            total: result.rows.length
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list assigned leads",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/leads/next")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
