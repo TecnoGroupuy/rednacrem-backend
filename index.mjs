@@ -4845,6 +4845,24 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      const page = parseInt(getQueryParam(event, "page") || "1", 10);
+      const limit = parseInt(getQueryParam(event, "limit") || "50", 10);
+      const offset = (page - 1) * limit;
+      const tab = getQueryParam(event, "tab") || "todos";
+      const tabFiltros = {
+        nuevo: "AND lcs.estado_venta = 'nuevo'",
+        no_contesta: "AND lcs.estado_venta IN ('no_contesta', 'rellamar')",
+        seguimiento: "AND lcs.estado_venta = 'seguimiento'",
+        rechazo: "AND lcs.estado_venta = 'rechazo'",
+        todos: "AND lcs.estado_venta != 'dato_erroneo'"
+      };
+      const tabWhere = tabFiltros[tab] || tabFiltros.todos;
+      const tabWhereCount = tabWhere.replace(/^AND\s+/, "");
+      const countExtra =
+        tabWhereCount && tabWhereCount !== "lcs.estado_venta != 'dato_erroneo'"
+          ? `AND ${tabWhereCount}`
+          : "";
+
       const sellerId = dbUser?.id || null;
       if (!sellerId) {
         return json(401, { ok: false, message: "Seller id requerido" });
@@ -4853,6 +4871,18 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const countResult = await client.query(
+          `
+          SELECT COUNT(*) AS count
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lb.estado IN ('activo', 'asignado')
+            AND lcs.estado_venta != 'dato_erroneo'
+            ${countExtra}
+          `,
+          [sellerId]
+        );
         const result = await client.query(
           `
           SELECT
@@ -4885,17 +4915,23 @@ export const handler = async (event) => {
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
+            ${tabWhere}
           ORDER BY lcs.intentos ASC, lcs.contact_id ASC
+          LIMIT $2 OFFSET $3
           `,
-          [sellerId]
+          [sellerId, limit, offset]
         );
+        const total = parseInt(countResult.rows[0]?.count || "0", 10);
 
         return json(200, {
           ok: true,
           success: true,
           data: {
             contactos: result.rows,
-            total: result.rows.length
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit)
           }
         });
       } finally {
@@ -5070,6 +5106,101 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to load next lead",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/leads/daily-stats")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const sellerId = dbUser?.id || null;
+      const hoy = new Date().toISOString().split("T")[0];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const totalesResult = await client.query(
+          `
+          SELECT 
+            COUNT(*) FILTER (WHERE lcs.estado_venta != 'dato_erroneo') AS total_asignados,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'nuevo') AS nuevos,
+            COUNT(*) FILTER (WHERE lcs.estado_venta IN ('no_contesta','rellamar')) AS no_contesta,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazos,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS ventas,
+            COUNT(*) FILTER (WHERE lcs.estado_venta != 'nuevo' AND lcs.estado_venta != 'dato_erroneo') AS tocados
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lb.estado IN ('activo', 'asignado')
+          `,
+          [sellerId]
+        );
+
+        const hoyResult = await client.query(
+          `
+          SELECT 
+            COUNT(*) AS gestiones_hoy,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'venta') AS ventas_hoy,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'no_contesta') AS no_contesta_hoy,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'seguimiento') AS seguimientos_hoy,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'rechazo') AS rechazos_hoy
+          FROM lead_management_history lmh
+          WHERE lmh.user_id = $1
+            AND lmh.fecha_gestion::date = $2::date
+          `,
+          [sellerId, hoy]
+        );
+
+        const t = totalesResult.rows[0] || {};
+        const h = hoyResult.rows[0] || {};
+        const total = parseInt(t.total_asignados || "0", 10) || 1;
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: {
+            total_asignados: parseInt(t.total_asignados || "0", 10),
+            nuevos: parseInt(t.nuevos || "0", 10),
+            no_contesta: parseInt(t.no_contesta || "0", 10),
+            seguimiento: parseInt(t.seguimiento || "0", 10),
+            rechazos: parseInt(t.rechazos || "0", 10),
+            ventas: parseInt(t.ventas || "0", 10),
+            tocados: parseInt(t.tocados || "0", 10),
+            pct_contacto: Math.round(
+              (parseInt(t.seguimiento || "0", 10) + parseInt(t.ventas || "0", 10)) / total * 100
+            ),
+            pct_efectividad: Math.round(
+              parseInt(t.ventas || "0", 10) / total * 100
+            ),
+            gestiones_hoy: parseInt(h.gestiones_hoy || "0", 10),
+            ventas_hoy: parseInt(h.ventas_hoy || "0", 10),
+            no_contesta_hoy: parseInt(h.no_contesta_hoy || "0", 10),
+            seguimientos_hoy: parseInt(h.seguimientos_hoy || "0", 10),
+            rechazos_hoy: parseInt(h.rechazos_hoy || "0", 10)
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load daily stats",
         error: error.message
       });
     }
