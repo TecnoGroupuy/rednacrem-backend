@@ -3913,7 +3913,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const metrics = await getClientMetrics();
@@ -3944,7 +3944,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const clientId = clientDocumentMatch[1];
@@ -3994,7 +3994,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const clientId = clientDocumentSentMatch[1];
@@ -4049,7 +4049,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const item = await createManualTicket(validation.data);
@@ -4076,7 +4076,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const clienteId = event?.queryStringParameters?.clienteId || event?.queryStringParameters?.cliente_id;
@@ -4317,7 +4317,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const items = await listProducts();
@@ -4344,7 +4344,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
@@ -4512,7 +4512,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const sellerId = dbUser?.id || null;
@@ -5359,7 +5359,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const client = createDbClient();
