@@ -5638,7 +5638,7 @@ export const handler = async (event) => {
           [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
         );
 
-        if (effectiveResultado === "seguimiento" && fechaAgenda) {
+        if ((effectiveResultado === "seguimiento" || effectiveResultado === "rellamar") && fechaAgenda) {
           await client.query(
             `
             INSERT INTO lead_agenda (
