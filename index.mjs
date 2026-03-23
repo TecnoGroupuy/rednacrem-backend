@@ -3922,6 +3922,7 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        await client.query("BEGIN");
         const result = await client.query(
           `
           INSERT INTO contacts (
@@ -3957,11 +3958,145 @@ export const handler = async (event) => {
           ]
         );
 
+        const contactId = result.rows[0]?.id;
+        const products = Array.isArray(body?.products) ? body.products : [];
+        if (contactId && products.length) {
+          const sellerId = body?.vendedor_id || dbUser?.id || null;
+          const sellerNameSnapshot = normalizeText(
+            products[0]?.sellerName ||
+            products[0]?.seller_name ||
+            [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() ||
+            dbUser?.email ||
+            ""
+          ) || null;
+          const sellerOrigin = sellerId ? "interno" : "externo";
+
+          for (const product of products) {
+            const productName = normalizeText(
+              product?.nombre_producto || product?.nombreProducto || product?.nombre
+            ) || "Producto";
+            const plan = normalizeText(product?.plan) || null;
+            const precio = parseNumber(product?.precio) ?? 0;
+            const fechaAlta = parseDate(product?.fecha_alta || product?.fechaAlta) || new Date().toISOString().slice(0, 10);
+            const estadoRaw = normalizeText(product?.estado || product?.producto_estado || "alta");
+            const estadoNorm = estadoRaw.toLowerCase();
+            const isAlta = estadoNorm === "alta" || estadoNorm === "activo";
+            const fechaBaja = isAlta ? null : (parseDate(product?.fecha_baja || product?.fechaBaja) || fechaAlta);
+            const motivoBaja = isAlta ? null : "otro";
+            const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
+            const medioPago = normalizeText(product?.medio_pago || product?.medioPago) || null;
+
+            let productId = null;
+            if (productName) {
+              const productRes = await client.query(
+                `SELECT id FROM products WHERE lower(nombre) = lower($1) LIMIT 1`,
+                [productName]
+              );
+              productId = productRes.rows[0]?.id || null;
+              if (!productId) {
+                const productInsert = await client.query(
+                  `
+                  INSERT INTO products (nombre, categoria, precio, activo)
+                  VALUES ($1, 'General', $2, true)
+                  RETURNING id
+                  `,
+                  [productName, precio || 0]
+                );
+                productId = productInsert.rows[0]?.id || null;
+              }
+            }
+
+            const saleInsert = await client.query(
+              `
+              INSERT INTO sales (
+                contact_id,
+                seller_id,
+                fecha,
+                medio_pago,
+                seller_name_snapshot,
+                seller_origin
+              )
+              VALUES ($1, $2, $3, $4, $5, $6)
+              RETURNING id
+              `,
+              [
+                contactId,
+                sellerId,
+                fechaAlta,
+                medioPago,
+                sellerNameSnapshot,
+                sellerOrigin
+              ]
+            );
+            const saleId = saleInsert.rows[0]?.id;
+
+            if (saleId && productId) {
+              await client.query(
+                `
+                INSERT INTO sale_items (
+                  sale_id,
+                  product_id,
+                  cantidad,
+                  precio_unitario
+                )
+                VALUES ($1,$2,1,$3)
+                `,
+                [saleId, productId, precio || 0]
+              );
+            }
+
+            await client.query(
+              `
+              INSERT INTO contact_products (
+                contact_id,
+                nombre_producto,
+                plan,
+                precio,
+                fecha_alta,
+                cuotas_pagas,
+                carencia_cuotas,
+                estado,
+                motivo_baja,
+                motivo_baja_detalle,
+                fecha_baja,
+                seller_user_id,
+                seller_name_snapshot,
+                seller_origin,
+                sale_id
+              )
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              `,
+              [
+                contactId,
+                productName,
+                plan,
+                precio || 0,
+                fechaAlta,
+                0,
+                0,
+                isAlta ? "alta" : "baja",
+                motivoBaja,
+                motivoBajaDetalle,
+                fechaBaja,
+                sellerId,
+                sellerNameSnapshot,
+                sellerOrigin,
+                saleId
+              ]
+            );
+          }
+        }
+
+        await client.query("COMMIT");
+
         return json(200, {
           ok: true,
           success: true,
-          data: { id: result.rows[0]?.id }
+          data: { id: contactId }
         });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
       } finally {
         await client.end();
       }
