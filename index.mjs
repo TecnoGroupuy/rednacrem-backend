@@ -5585,6 +5585,7 @@ export const handler = async (event) => {
 
       const sellerIdParam = getQueryParam(event, "seller_id");
       const dateParam = getQueryParam(event, "fecha");
+      const incluirCumplidas = getQueryParam(event, "incluir_cumplidas") === "true";
       const sellerId = dbUser?.role_key === "vendedor" ? dbUser.id : (sellerIdParam || dbUser.id);
 
       const values = [sellerId];
@@ -5595,6 +5596,9 @@ export const handler = async (event) => {
         whereParts.push(`a.fecha_agenda::date = $${idx}::date`);
         values.push(dateParam);
         idx += 1;
+      }
+      if (!incluirCumplidas) {
+        whereParts.push("a.cumplida = false");
       }
 
       const whereClause = `WHERE ${whereParts.join(" AND ")}`;
@@ -5615,9 +5619,26 @@ export const handler = async (event) => {
             d.nombre,
             d.apellido,
             d.telefono,
-            d.celular
+            d.celular,
+            lcs.intentos,
+            lcs.estado_venta,
+            (
+              SELECT JSON_AGG(
+                JSON_BUILD_OBJECT(
+                  'estado', lmh.estado_venta,
+                  'nota', lmh.nota,
+                  'fecha', lmh.created_at
+                ) ORDER BY lmh.created_at DESC
+              )
+              FROM lead_management_history lmh
+              WHERE lmh.contact_id = a.contact_id
+                AND lmh.batch_id = a.batch_id
+            ) AS historial
           FROM lead_agenda a
           JOIN datos_para_trabajar d ON d.id = a.contact_id
+          LEFT JOIN lead_contact_status lcs
+            ON lcs.contact_id = a.contact_id
+            AND lcs.batch_id = a.batch_id
           ${whereClause}
           ORDER BY a.fecha_agenda ASC
           `,
