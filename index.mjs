@@ -4121,7 +4121,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const item = await updateManualTicket(manualTicketMatch[1], validation.data);
@@ -4172,7 +4172,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const autor = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || "Usuario";
@@ -4206,7 +4206,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       const result = await closeManualTicket({
