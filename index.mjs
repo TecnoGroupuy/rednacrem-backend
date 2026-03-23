@@ -3229,6 +3229,9 @@ function requireApproved(event, dbUser) {
 }
 
 function requireRole(event, dbUser, allowedRoles) {
+  console.log("[role-check] roles requeridos:", allowedRoles);
+  console.log("[role-check] rol del usuario:", dbUser?.role_key);
+  console.log("[role-check] ¿tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
     return json(403, {
       ok: false,
@@ -3866,6 +3869,102 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to list contacts",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/contacts")) {
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const nombre = normalizeText(body?.nombre);
+      const apellido = normalizeText(body?.apellido);
+
+      if (!nombre || !apellido) {
+        return json(422, {
+          ok: false,
+          message: "Nombre y apellido son requeridos"
+        });
+      }
+
+      const documento = normalizeText(body?.documento) || null;
+      const fechaNacimiento = parseDate(body?.fecha_nacimiento || body?.fechaNacimiento || null);
+      const telefono = normalizeText(body?.telefono) || null;
+      const celular = normalizeText(body?.celular) || null;
+      const correo = normalizeEmail(body?.correo_electronico || body?.email);
+      const email = correo ? correo : null;
+      const direccion = normalizeText(body?.direccion) || null;
+      const departamento = normalizeText(body?.departamento) || null;
+      const pais = normalizeText(body?.pais) || "Uruguay";
+      const status = normalizeText(body?.estado || body?.status || "activo") || "activo";
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `
+          INSERT INTO contacts (
+            nombre,
+            apellido,
+            documento,
+            fecha_nacimiento,
+            telefono,
+            celular,
+            email,
+            direccion,
+            departamento,
+            pais,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now(), now())
+          RETURNING id
+          `,
+          [
+            nombre,
+            apellido,
+            documento,
+            fechaNacimiento,
+            telefono,
+            celular,
+            email,
+            direccion,
+            departamento,
+            pais,
+            status
+          ]
+        );
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: { id: result.rows[0]?.id }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to create contact",
         error: error.message
       });
     }
@@ -5027,6 +5126,12 @@ export const handler = async (event) => {
     }
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      console.log("[management] method:", method, "path:", path);
+      console.log("[management] dbUser:", JSON.stringify({
+        id: dbUser?.id,
+        role_key: dbUser?.role_key,
+        sub: dbUser?.sub
+      }));
 
       let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
