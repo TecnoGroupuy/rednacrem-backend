@@ -4171,6 +4171,96 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/sales/mine")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const sellerId = dbUser?.id || null;
+      const sellerName = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim();
+      const sellerNamePattern = sellerName ? `%${sellerName}%` : "";
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `
+          SELECT
+            s.id,
+            s.contact_id,
+            s.seller_id,
+            s.fecha,
+            s.created_at,
+            s.medio_pago,
+            s.seller_name_snapshot,
+            c.nombre,
+            c.apellido,
+            c.telefono,
+            c.celular,
+            si.product_id,
+            si.precio_unitario,
+            p.nombre AS producto_nombre
+          FROM sales s
+          JOIN contacts c ON c.id = s.contact_id
+          LEFT JOIN LATERAL (
+            SELECT product_id, precio_unitario
+            FROM sale_items
+            WHERE sale_id = s.id
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT 1
+          ) si ON true
+          LEFT JOIN products p ON p.id = si.product_id
+          WHERE s.seller_id = $1
+             OR ($2 <> '' AND s.seller_name_snapshot ILIKE $3)
+          ORDER BY s.created_at DESC NULLS LAST, s.fecha DESC
+          `,
+          [sellerId, sellerName, sellerNamePattern]
+        );
+
+        const items = result.rows.map((row) => ({
+          id: row.id,
+          contact_id: row.contact_id,
+          cliente_nombre: [row.nombre, row.apellido].filter(Boolean).join(" ").trim(),
+          telefono: row.celular || row.telefono || "",
+          producto_id: row.product_id || null,
+          producto_nombre: row.producto_nombre || null,
+          cuota: row.precio_unitario !== null && row.precio_unitario !== undefined
+            ? Number(row.precio_unitario)
+            : null,
+          fecha_venta: row.fecha || null,
+          fecha_venta_at: row.created_at || null,
+          medio_pago: row.medio_pago || null
+        }));
+
+        return json(200, {
+          ok: true,
+          success: true,
+          items,
+          data: { items }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list sales",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && clientDocumentMatch) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
