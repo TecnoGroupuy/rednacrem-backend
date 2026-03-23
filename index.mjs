@@ -240,10 +240,14 @@ function getAuthUser(event) {
       headers["x-dev-user-role"] ||
       headers["X-Dev-User-Role"] ||
       "superadministrador";
+    const devSub =
+      headers["x-dev-user-sub"] ||
+      headers["X-Dev-User-Sub"] ||
+      "dev-user";
 
     return {
       authenticated: true,
-      sub: "dev-user",
+      sub: devSub,
       email: devEmail,
       name: devEmail,
       given_name: "",
@@ -252,7 +256,7 @@ function getAuthUser(event) {
       fallbackRole: devRole,
       localDev: true,
       claims: {
-        sub: "dev-user",
+        sub: devSub,
         email: devEmail,
         name: devEmail,
         "cognito:groups": [devRole]
