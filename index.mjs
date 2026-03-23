@@ -3894,8 +3894,12 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const nombre = normalizeText(body?.nombre);
-      const apellido = normalizeText(body?.apellido);
+      const contactPayload = body?.contact && typeof body.contact === "object"
+        ? body.contact
+        : body;
+
+      const nombre = normalizeText(contactPayload?.nombre);
+      const apellido = normalizeText(contactPayload?.apellido);
 
       if (!nombre || !apellido) {
         return json(422, {
@@ -3904,16 +3908,16 @@ export const handler = async (event) => {
         });
       }
 
-      const documento = normalizeText(body?.documento) || null;
-      const fechaNacimiento = parseDate(body?.fecha_nacimiento || body?.fechaNacimiento || null);
-      const telefono = normalizeText(body?.telefono) || null;
-      const celular = normalizeText(body?.celular) || null;
-      const correo = normalizeEmail(body?.correo_electronico || body?.email);
+      const documento = normalizeText(contactPayload?.documento) || null;
+      const fechaNacimiento = parseDate(contactPayload?.fecha_nacimiento || contactPayload?.fechaNacimiento || null);
+      const telefono = normalizeText(contactPayload?.telefono) || null;
+      const celular = normalizeText(contactPayload?.celular) || null;
+      const correo = normalizeEmail(contactPayload?.correo_electronico || contactPayload?.email);
       const email = correo ? correo : null;
-      const direccion = normalizeText(body?.direccion) || null;
-      const departamento = normalizeText(body?.departamento) || null;
-      const pais = normalizeText(body?.pais) || "Uruguay";
-      const status = normalizeText(body?.estado || body?.status || "activo") || "activo";
+      const direccion = normalizeText(contactPayload?.direccion) || null;
+      const departamento = normalizeText(contactPayload?.departamento) || null;
+      const pais = normalizeText(contactPayload?.pais) || "Uruguay";
+      const status = normalizeText(contactPayload?.estado || contactPayload?.status || "activo") || "activo";
 
       const client = createDbClient();
       await client.connect();
