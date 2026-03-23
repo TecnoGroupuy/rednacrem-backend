@@ -1,4 +1,4 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -449,15 +449,15 @@ function getDepartamentoFromFixed(numero) {
   if (n.startsWith("444")) return "Lavalleja";
   if (n.startsWith("477")) return "Artigas";
   if (n.startsWith("473")) return "Salto";
-  if (n.startsWith("472")) return "Paysandú";
-  if (n.startsWith("456")) return "Río Negro";
+  if (n.startsWith("472")) return "PaysandÃº";
+  if (n.startsWith("456")) return "RÃ­o Negro";
   if (n.startsWith("453")) return "Soriano";
-  if (n.startsWith("434")) return "San José";
+  if (n.startsWith("434")) return "San JosÃ©";
   if (n.startsWith("447")) return "Rocha";
   if (n.startsWith("445")) return "Treinta y Tres";
   if (n.startsWith("464")) return "Cerro Largo";
   if (n.startsWith("462")) return "Rivera";
-  if (n.startsWith("463")) return "Tacuarembó";
+  if (n.startsWith("463")) return "TacuarembÃ³";
   return null;
 }
 
@@ -501,10 +501,10 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2314": "Cerro",
   "2601": "Carrasco",
   "2916": "Ciudad Vieja",
-  "2320": "Colón",
+  "2320": "ColÃ³n",
   "2222": "Piedras Blancas",
-  "2401": "Cordón",
-  "2487": "Hosp. Clínicas",
+  "2401": "CordÃ³n",
+  "2487": "Hosp. ClÃ­nicas",
   "2292": "Pando",
   "2294": "Sauce",
   "2295": "Empalme Olmos",
@@ -514,51 +514,51 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2312": "Paso de la Arena",
   "2355": "Sayago",
   "2409": "Tres Cruces",
-  "2506": "Unión",
-  "2347": "Autódromo",
+  "2506": "UniÃ³n",
+  "2347": "AutÃ³dromo",
   "2362": "La Paz",
   "2364": "Las Piedras",
   "2369": "Progreso",
-  "2372": "Atlántida",
+  "2372": "AtlÃ¡ntida",
   "2682": "Lagomar",
   "2696": "Solymar",
   "4332": "Canelones",
-  "4530": "Cañada Nieto",
+  "4530": "CaÃ±ada Nieto",
   "4222": "Maldonado",
   "4223": "Maldonado",
   "4224": "Maldonado",
   "4225": "Maldonado",
-  "4244": "Punta del Este (Península)",
+  "4244": "Punta del Este (PenÃ­nsula)",
   "4248": "Punta del Este Parada 5",
   "4249": "Punta del Este Parada 5",
   "4255": "Laguna del Sauce",
   "4257": "Portezuelo",
   "4266": "San Carlos",
   "4277": "La Barra",
-  "4311": "Casupá",
-  "4312": "San Ramón",
+  "4311": "CasupÃ¡",
+  "4312": "San RamÃ³n",
   "4313": "San Antonio",
   "4315": "Tala",
   "4317": "Miguez",
   "4318": "Cerro Colorado",
   "4319": "Chamizo",
-  "4334": "Santa Lucía",
-  "4335": "Juanicó",
+  "4334": "Santa LucÃ­a",
+  "4335": "JuanicÃ³",
   "4336": "Los Cerrillos",
   "4338": "Colonia Etchepare",
   "4339": "Cardal",
-  "4342": "San José",
-  "4345": "Kiyú",
+  "4342": "San JosÃ©",
+  "4345": "KiyÃº",
   "4346": "Rafael Peraza",
   "4348": "Villa Rodriguez",
   "4349": "Colonia Agra.Delta",
   "4352": "Florida",
-  "4354": "Sarandí Grande",
+  "4354": "SarandÃ­ Grande",
   "4360": "Blanquillo",
   "4362": "Durazno",
   "4364": "Trinidad",
   "4365": "Carmen",
-  "4367": "Sarandí del Yi",
+  "4367": "SarandÃ­ del Yi",
   "4368": "Carlos Reyles",
   "4369": "La Paloma",
   "4373": "La Floresta",
@@ -569,77 +569,77 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "4378": "Cuchilla Alta",
   "4399": "San Jacinto",
   "4430": "Gregorio Aznarez",
-  "4432": "Piriápolis",
-  "4434": "Pan de Azúcar",
-  "4438": "Balneario Solís",
+  "4432": "PiriÃ¡polis",
+  "4434": "Pan de AzÃºcar",
+  "4438": "Balneario SolÃ­s",
   "4442": "Minas",
-  "4446": "Aiguá",
-  "4447": "Solís de Mataojo",
-  "4448": "Pirarajá",
+  "4446": "AiguÃ¡",
+  "4447": "SolÃ­s de Mataojo",
+  "4448": "PirarajÃ¡",
   "4449": "Mariscala",
   "4452": "Treinta y Tres",
-  "4455": "José P. Varela",
+  "4455": "JosÃ© P. Varela",
   "4456": "Lascano",
-  "4457": "Velázquez",
+  "4457": "VelÃ¡zquez",
   "4458": "Vergara",
-  "4459": "Cebollatí",
-  "4463": "Zapicán",
+  "4459": "CebollatÃ­",
+  "4463": "ZapicÃ¡n",
   "4464": "Santa Clara de Olimar",
   "4466": "Cerro Chato",
-  "4469": "Batlle y Ordoñez",
+  "4469": "Batlle y OrdoÃ±ez",
   "4472": "Rocha",
   "4474": "Barra del Chuy",
   "4475": "Aguas Dulces",
   "4476": "La Coronilla",
   "4477": "Santa Teresa",
   "4479": "La Paloma (Rocha)",
-  "4486": "Faro José Ignacio",
+  "4486": "Faro JosÃ© Ignacio",
   "4522": "Colonia",
   "4534": "Dolores",
   "4536": "Cardona",
   "4537": "Palmitas",
-  "4538": "José E. Rodó",
+  "4538": "JosÃ© E. RodÃ³",
   "4539": "Ismael Cortinas",
-  "4542": "Balneario Zagarazú",
+  "4542": "Balneario ZagarazÃº",
   "4544": "Nueva Palmira",
   "4552": "Rosario",
   "4554": "Nueva Helvecia",
   "4558": "Colonia Valdense",
   "4562": "Fray Bentos",
   "4567": "Young",
-  "4568": "Nuevo Berlín",
+  "4568": "Nuevo BerlÃ­n",
   "4569": "San Javier",
   "4574": "Semillero",
   "4575": "Colonia Miguelete",
-  "4576": "Ombúes de Lavalle",
+  "4576": "OmbÃºes de Lavalle",
   "4577": "Conchillas",
   "4586": "Juan Lacaze",
   "4587": "Playa Fomento",
   "4588": "Santa Ana",
   "4622": "Rivera",
-  "4632": "Tacuarembó",
-  "4640": "Aceguá",
+  "4632": "TacuarembÃ³",
+  "4640": "AceguÃ¡",
   "4642": "Melo",
   "4654": "Vichadero",
   "4656": "Tranqueras",
   "4658": "Minas de Corrales",
   "4664": "Paso de los Toros",
-  "4675": "Río Branco",
-  "4679": "Lago Merín",
-  "4722": "Paysandú",
+  "4675": "RÃ­o Branco",
+  "4679": "Lago MerÃ­n",
+  "4722": "PaysandÃº",
   "4730": "Defensa (Salto)",
   "4732": "Pueblo Lavalleja",
   "4733": "Cuchilla de Salto",
-  "4742": "Guichón",
+  "4742": "GuichÃ³n",
   "4747": "Piedras Coloradas",
   "4754": "Quebracho",
-  "4764": "Constitución",
-  "4766": "Belén",
+  "4764": "ConstituciÃ³n",
+  "4766": "BelÃ©n",
   "4772": "Artigas",
   "4776": "Baltasar Brum",
-  "4777": "Tomás Gomensoro",
+  "4777": "TomÃ¡s Gomensoro",
   "4778": "Mones Quintela",
-  "4779": "Bella Unión",
+  "4779": "Bella UniÃ³n",
   "4888": "Fraile Muerto",
   "5432": "Mercedes"
 };
@@ -981,7 +981,7 @@ function mapProductRowToApi(row) {
 const IMPORT_TYPE_LABEL = {
   clientes: "CSV de clientes",
   no_llamar: "CSV Base No llamar",
-  resultados: "CSV de resultados telefónicos",
+  resultados: "CSV de resultados telefÃ³nicos",
   datos_para_trabajar: "CSV Datos para trabajar"
 };
 
@@ -1226,10 +1226,10 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "telefono": "telefono",
   "celular": "celular",
   "correo electronico": "correo_electronico",
-  "correo electrónico": "correo_electronico",
+  "correo electrÃ³nico": "correo_electronico",
   "email": "correo_electronico",
   "direccion": "direccion",
-  "dirección": "direccion",
+  "direcciÃ³n": "direccion",
   "departamento": "departamento",
   "localidad": "localidad",
   "pais": "pais",
@@ -1422,7 +1422,7 @@ function buildImportSampleCsv(type) {
     "telefono",
     "Celular",
     "Correo electronico",
-    "Dirección",
+    "DirecciÃ³n",
     "Departamento",
     "Pais",
     "Nombre del familiar",
@@ -1446,7 +1446,7 @@ function buildImportSampleCsv(type) {
     "telefono": "099123456",
     "Celular": "099123456",
     "Correo electronico": "ana.pereira@example.com",
-    "Dirección": "18 de Julio 1234",
+    "DirecciÃ³n": "18 de Julio 1234",
     "Departamento": "Montevideo",
     "Pais": "Uruguay",
     "Nombre del familiar": "Luis",
@@ -1487,7 +1487,7 @@ function validateProductPayload(body, options = {}) {
 
   const parsedPrecio = Number(String(precio || 0).replace(/[^0-9.-]/g, ""));
   if (Number.isNaN(parsedPrecio)) {
-    errors.precio = ["precio inválido"];
+    errors.precio = ["precio invÃ¡lido"];
   }
 
   if (Object.keys(errors).length > 0) {
@@ -1706,13 +1706,13 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!email) {
       errors.email = "El email es obligatorio";
     } else if (!isValidEmail(email)) {
-      errors.email = "El email no es válido";
+      errors.email = "El email no es vÃ¡lido";
     }
   }
 
   if (!options.partial || body?.telefono !== undefined) {
     if (!telefono) {
-      errors.telefono = "El teléfono es obligatorio";
+      errors.telefono = "El telÃ©fono es obligatorio";
     }
   }
 
@@ -1720,7 +1720,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!rol) {
       errors.rol = "El rol es obligatorio";
     } else if (!VALID_ROLES.includes(rol)) {
-      errors.rol = "El rol no es válido";
+      errors.rol = "El rol no es vÃ¡lido";
     }
   }
 
@@ -1728,7 +1728,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!status) {
       errors.status = "El estado es obligatorio";
     } else if (!VALID_USER_STATUSES.includes(status)) {
-      errors.status = "El estado no es válido";
+      errors.status = "El estado no es vÃ¡lido";
     }
   }
 
@@ -1766,7 +1766,7 @@ function validateVendorRegistrationPayload(body) {
   if (!nombre) errors.nombre = "El nombre es obligatorio";
   if (!apellido) errors.apellido = "El apellido es obligatorio";
   if (!email) errors.email = "El email es obligatorio";
-  if (!telefono) errors.telefono = "El teléfono es obligatorio";
+  if (!telefono) errors.telefono = "El telÃ©fono es obligatorio";
 
   return {
     valid: Object.keys(errors).length === 0,
@@ -3147,7 +3147,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.role_key,
           updatedUser.role_key,
           actorUserId,
-          "Actualización desde superadmin/users"
+          "ActualizaciÃ³n desde superadmin/users"
         ]
       );
     }
@@ -3170,7 +3170,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.status,
           updatedUser.status,
           actorUserId,
-          "Actualización desde superadmin/users"
+          "ActualizaciÃ³n desde superadmin/users"
         ]
       );
     }
@@ -3231,7 +3231,7 @@ function requireApproved(event, dbUser) {
 function requireRole(event, dbUser, allowedRoles) {
   console.log("[role-check] roles requeridos:", allowedRoles);
   console.log("[role-check] rol del usuario:", dbUser?.role_key);
-  console.log("[role-check] ¿tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
+  console.log("[role-check] Â¿tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
     return json(403, {
       ok: false,
@@ -3459,7 +3459,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
     if (requestRow.status !== "pending") {
       return {
         invalidState: true,
-        message: "La solicitud ya no está pendiente"
+        message: "La solicitud ya no estÃ¡ pendiente"
       };
     }
 
@@ -3532,7 +3532,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
         null,
         "vendedor",
         reviewerUserId,
-        "Aprobación de solicitud de vendedor"
+        "AprobaciÃ³n de solicitud de vendedor"
       ]
     );
 
@@ -3600,7 +3600,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
       await client.query("ROLLBACK");
       return {
         invalidState: true,
-        message: "La solicitud ya no está pendiente"
+        message: "La solicitud ya no estÃ¡ pendiente"
       };
     }
 
@@ -4954,7 +4954,7 @@ export const handler = async (event) => {
             ok: true,
             success: true,
             data: null,
-            message: "No tenés lotes activos asignados",
+            message: "No tenÃ©s lotes activos asignados",
             error: null
           });
         }
@@ -5042,8 +5042,8 @@ export const handler = async (event) => {
               success: true,
               data: null,
               message: enOla2
-                ? `No hay contactos disponibles en esta franja. Volvé a las ${ola1Inicio}`
-                : `No hay contactos disponibles en esta franja. Volvé a las ${ola2Inicio}`,
+                ? `No hay contactos disponibles en esta franja. VolvÃ© a las ${ola1Inicio}`
+                : `No hay contactos disponibles en esta franja. VolvÃ© a las ${ola2Inicio}`,
               error: null
             });
           }
@@ -5052,7 +5052,7 @@ export const handler = async (event) => {
             ok: true,
             success: true,
             data: null,
-            message: "Todos los contactos del lote fueron gestionados. ¡Buen trabajo!",
+            message: "Todos los contactos del lote fueron gestionados. Â¡Buen trabajo!",
             error: null
           });
         }
@@ -5417,12 +5417,12 @@ export const handler = async (event) => {
         const validationErrors = [];
 
         if (!resultadoInput || resultadoInput === "nuevo") {
-          validationErrors.push({ field: "estado_venta", message: "Estado inválido" });
+          validationErrors.push({ field: "estado_venta", message: "Estado invÃ¡lido" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
-          validationErrors.push({ field: "estado_venta", message: "Estado no existe en catálogo" });
+          validationErrors.push({ field: "estado_venta", message: "Estado no existe en catÃ¡logo" });
         }
 
         if (resultadoInput === "seguimiento" && !fechaAgenda) {
@@ -5430,15 +5430,15 @@ export const handler = async (event) => {
         }
 
         if (currentEstadoVenta) {
-          const currentCatalog = await getLeadStatusCatalogEntry(client, currentEstadoVenta);
-          if (currentCatalog?.es_final) {
+          const estadosVerdaderamenteFinales = ["venta", "rechazo", "dato_erroneo"];
+          if (estadosVerdaderamenteFinales.includes(currentEstadoVenta)) {
             await client.query("ROLLBACK");
             return json(409, {
               ok: false,
               success: false,
               data: null,
               error: {
-                message: "Contacto ya está en estado final",
+                message: "Contacto ya estÃ¡ en estado final",
                 estado_actual: currentEstadoVenta
               }
             });
@@ -5452,7 +5452,7 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "Validación",
+              message: "ValidaciÃ³n",
               errors: validationErrors
             }
           });
@@ -6866,7 +6866,7 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "Contactos inválidos para asignar",
+              message: "Contactos invÃ¡lidos para asignar",
               errors
             }
           });
@@ -9315,3 +9315,4 @@ export const __testables = {
   validateSuperadminUserPayload,
   requireRole
 };
+
