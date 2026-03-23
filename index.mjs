@@ -6537,6 +6537,8 @@ export const handler = async (event) => {
             DO UPDATE SET
               batch_id = EXCLUDED.batch_id,
               assigned_to = EXCLUDED.assigned_to,
+              estado_venta = 'nuevo',
+              intentos = 0,
               updated_at = now()
             `,
             [contactId, batchId, assignedTo]
