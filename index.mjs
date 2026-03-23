@@ -4261,6 +4261,71 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/clients/my-sales")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const sellerId = dbUser?.id || null;
+      const client = createDbClient();
+      await client.connect();
+
+      try {
+        const result = await client.query(
+          `
+          SELECT 
+            d.id,
+            d.nombre,
+            d.apellido,
+            d.telefono,
+            d.celular,
+            d.departamento,
+            d.localidad,
+            d.origen_dato AS fuente,
+            lcs.ultimo_intento_at AS fecha_venta,
+            lb.nombre AS nombre_lote,
+            lb.id AS batch_id,
+            (
+              SELECT lmh.nota 
+              FROM lead_management_history lmh
+              WHERE lmh.contact_id = d.id
+                AND lmh.batch_id = lcs.batch_id
+                AND lmh.resultado = 'venta'
+              ORDER BY lmh.fecha_gestion DESC
+              LIMIT 1
+            ) AS nota_venta
+          FROM lead_contact_status lcs
+          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lcs.estado_venta = 'venta'
+          ORDER BY lcs.ultimo_intento_at DESC
+          `,
+          [sellerId]
+        );
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: result.rows
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load my sales",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && clientDocumentMatch) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -5139,7 +5204,6 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta != 'dato_erroneo') AS total_asignados,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'nuevo') AS nuevos,
             COUNT(*) FILTER (WHERE lcs.estado_venta IN ('no_contesta','rellamar')) AS no_contesta,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazos,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS ventas,
             COUNT(*) FILTER (WHERE lcs.estado_venta != 'nuevo' AND lcs.estado_venta != 'dato_erroneo') AS tocados
@@ -5151,24 +5215,79 @@ export const handler = async (event) => {
           [sellerId]
         );
 
+        const agendaResult = await client.query(
+          `
+          SELECT COUNT(*) AS seguimiento_activo
+          FROM lead_agenda la
+          JOIN lead_batches lb ON lb.id = la.batch_id
+          WHERE la.seller_id = $1
+            AND la.cumplida = false
+            AND lb.estado IN ('activo', 'asignado')
+          `,
+          [sellerId]
+        );
+
         const hoyResult = await client.query(
           `
-          SELECT 
+          WITH contactos_tocados_hoy AS (
+            SELECT DISTINCT contact_id
+            FROM lead_management_history
+            WHERE user_id = $1
+              AND fecha_gestion::date = $2::date
+          ),
+          ultimo_resultado_hoy AS (
+            SELECT DISTINCT ON (lmh.contact_id)
+              lmh.contact_id,
+              lmh.resultado
+            FROM lead_management_history lmh
+            JOIN contactos_tocados_hoy cth ON cth.contact_id = lmh.contact_id
+            WHERE lmh.user_id = $1
+              AND lmh.fecha_gestion::date = $2::date
+            ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
+          )
+          SELECT
             COUNT(*) AS gestiones_hoy,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'venta') AS ventas_hoy,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'no_contesta') AS no_contesta_hoy,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'seguimiento') AS seguimientos_hoy,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'rechazo') AS rechazos_hoy
-          FROM lead_management_history lmh
-          WHERE lmh.user_id = $1
-            AND lmh.fecha_gestion::date = $2::date
+            COUNT(*) FILTER (WHERE resultado = 'venta') AS ventas_hoy,
+            COUNT(*) FILTER (WHERE resultado = 'no_contesta') AS no_contesta_hoy,
+            COUNT(*) FILTER (WHERE resultado = 'seguimiento') AS tipificados_seguimiento_hoy,
+            COUNT(*) FILTER (WHERE resultado = 'rechazo') AS rechazos_hoy,
+            COUNT(*) FILTER (WHERE resultado = 'rellamar') AS rellamar_hoy
+          FROM ultimo_resultado_hoy
           `,
           [sellerId, hoy]
         );
 
+        const seguimientoActivoResult = await client.query(
+          `
+          SELECT COUNT(*) AS seguimiento_activo_hoy
+          FROM lead_agenda la
+          JOIN lead_contact_status lcs
+            ON lcs.contact_id = la.contact_id
+            AND lcs.batch_id = la.batch_id
+          JOIN lead_batches lb ON lb.id = la.batch_id
+          WHERE la.seller_id = $1
+            AND la.cumplida = false
+            AND lb.estado IN ('activo', 'asignado')
+            AND lcs.estado_venta NOT IN ('rechazo', 'venta', 'dato_erroneo')
+          `,
+          [sellerId]
+        );
+
         const t = totalesResult.rows[0] || {};
         const h = hoyResult.rows[0] || {};
-        const total = parseInt(t.total_asignados || "0", 10) || 1;
+        const sa = seguimientoActivoResult.rows[0] || {};
+        const seguimientoActivo = parseInt(agendaResult.rows[0]?.seguimiento_activo || "0", 10);
+        const tocados = parseInt(t.tocados || "0", 10) || 1;
+        const contactosReales =
+          seguimientoActivo +
+          parseInt(t.ventas || "0", 10) +
+          parseInt(t.rechazos || "0", 10);
+        const gestiHoy = parseInt(h.gestiones_hoy || "0", 10) || 1;
+        const contactoRealHoy =
+          parseInt(sa.seguimiento_activo_hoy || "0", 10) +
+          parseInt(h.rechazos_hoy || "0", 10) +
+          parseInt(h.ventas_hoy || "0", 10) +
+          parseInt(h.rellamar_hoy || "0", 10);
 
         return json(200, {
           ok: true,
@@ -5177,21 +5296,25 @@ export const handler = async (event) => {
             total_asignados: parseInt(t.total_asignados || "0", 10),
             nuevos: parseInt(t.nuevos || "0", 10),
             no_contesta: parseInt(t.no_contesta || "0", 10),
-            seguimiento: parseInt(t.seguimiento || "0", 10),
+            seguimiento: seguimientoActivo,
             rechazos: parseInt(t.rechazos || "0", 10),
             ventas: parseInt(t.ventas || "0", 10),
             tocados: parseInt(t.tocados || "0", 10),
-            pct_contacto: Math.round(
-              (parseInt(t.seguimiento || "0", 10) + parseInt(t.ventas || "0", 10)) / total * 100
-            ),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
             pct_efectividad: Math.round(
-              parseInt(t.ventas || "0", 10) / total * 100
+              parseInt(t.ventas || "0", 10) / tocados * 100
             ),
             gestiones_hoy: parseInt(h.gestiones_hoy || "0", 10),
             ventas_hoy: parseInt(h.ventas_hoy || "0", 10),
             no_contesta_hoy: parseInt(h.no_contesta_hoy || "0", 10),
-            seguimientos_hoy: parseInt(h.seguimientos_hoy || "0", 10),
-            rechazos_hoy: parseInt(h.rechazos_hoy || "0", 10)
+            tipificados_seguimiento_hoy: parseInt(sa.seguimiento_activo_hoy || "0", 10),
+            rechazos_hoy: parseInt(h.rechazos_hoy || "0", 10),
+            rellamar_hoy: parseInt(h.rellamar_hoy || "0", 10),
+            pct_contacto_hoy: Math.round(contactoRealHoy / gestiHoy * 100),
+            pct_efectividad_hoy: Math.round(
+              parseInt(h.ventas_hoy || "0", 10) / gestiHoy * 100
+            )
           }
         });
       } finally {
@@ -5638,6 +5761,19 @@ export const handler = async (event) => {
           [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
         );
 
+        if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
+          await client.query(
+            `
+            UPDATE lead_agenda
+            SET cumplida = true
+            WHERE contact_id = $1
+              AND batch_id = $2
+              AND cumplida = false
+            `,
+            [leadId, batchId]
+          );
+        }
+
         if ((effectiveResultado === "seguimiento" || effectiveResultado === "rellamar") && fechaAgenda) {
           await client.query(
             `
@@ -5750,6 +5886,15 @@ export const handler = async (event) => {
             d.correo_electronico,
             lcs.intentos,
             lcs.estado_venta,
+            (
+              SELECT lmh.resultado
+              FROM lead_management_history lmh
+              WHERE lmh.contact_id = a.contact_id
+                AND lmh.batch_id = a.batch_id
+                AND lmh.resultado IN ('seguimiento', 'rellamar')
+              ORDER BY lmh.fecha_gestion DESC
+              LIMIT 1
+            ) AS tipo_agenda,
             (
               SELECT JSON_AGG(
                 JSON_BUILD_OBJECT(

@@ -5,8 +5,12 @@
   "main": "index.mjs",
   "scripts": {
     "start": "node index.mjs",
+    "start:local": "node local-server.mjs",
     "dev": "node --watch index.mjs",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev:local": "node --watch local-server.mjs",
+    "env:supervisor": "powershell -NoProfile -Command \"Copy-Item -Force .env.local.supervisor .env.local\"",
+    "env:vendedor": "powershell -NoProfile -Command \"Copy-Item -Force .env.local.vendedor .env.local\"",
+    "test": "node --test --experimental-test-isolation=none"
   },
   "keywords": [],
   "author": "",
