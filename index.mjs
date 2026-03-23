@@ -66,7 +66,8 @@ const VALID_ROLES = [
   "director",
   "supervisor",
   "operaciones",
-  "atencion_cliente"
+  "atencion_cliente",
+  "vendedor"
 ];
 
 const INTERNAL_CONTACT_ACCESS_ROLES = [
@@ -74,7 +75,8 @@ const INTERNAL_CONTACT_ACCESS_ROLES = [
   "director",
   "supervisor",
   "operaciones",
-  "atencion_cliente"
+  "atencion_cliente",
+  "vendedor"
 ];
 
 const LEAD_ACCESS_ROLES = [
