@@ -5624,6 +5624,12 @@ export const handler = async (event) => {
             d.apellido,
             d.telefono,
             d.celular,
+            d.documento,
+            d.fecha_nacimiento,
+            DATE_PART('year', AGE(d.fecha_nacimiento))::int AS edad,
+            d.departamento,
+            d.localidad,
+            d.correo_electronico,
             lcs.intentos,
             lcs.estado_venta,
             (
