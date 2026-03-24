@@ -29,7 +29,7 @@ jobs:
       - name: Deploy worker Lambda
         run: |
           aws lambda update-function-code \
-            --function-name rednacrem-no-call-worker \
+            --function-name no-call-import-worker \
             --zip-file fileb://function.zip \
             --region us-east-2
         env:
