@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -7,15 +6,14 @@ import {
   AdminAddUserToGroupCommand,
   ListUsersCommand
 } from "@aws-sdk/client-cognito-identity-provider";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
 import { normalizePhone } from "./src/lib/validation.js";
 import { createManualUser, updateUser } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
 
-const require = createRequire(import.meta.url);
-const AWS = require("aws-sdk");
-const sqs = new AWS.SQS({ region: process.env.AWS_REGION || "us-east-2" });
+const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
 
 function loadEnvFile(filePath) {
   try {
@@ -59,12 +57,12 @@ async function enqueueNoCallJob(jobId, startAt) {
     throw new Error("NO_CALL_IMPORT_QUEUE_URL not set");
   }
   const payload = startAt ? { jobId, startAt } : { jobId };
-  await sqs
-    .sendMessage({
+  await sqs.send(
+    new SendMessageCommand({
       QueueUrl: queueUrl,
       MessageBody: JSON.stringify(payload),
     })
-    .promise();
+  );
 }
 
 const VALID_USER_STATUSES = [

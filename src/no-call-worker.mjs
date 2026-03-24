@@ -1,9 +1,7 @@
-import { createRequire } from "node:module";
 import { processNoCallJob } from "../index.mjs";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
-const require = createRequire(import.meta.url);
-const AWS = require("aws-sdk");
-const sqs = new AWS.SQS({ region: process.env.AWS_REGION || "us-east-2" });
+const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
 
 const QUEUE_URL = process.env.NO_CALL_IMPORT_QUEUE_URL;
 const MAX_MILLIS = Number(process.env.NO_CALL_WORKER_MAX_MILLIS || 600000);
@@ -13,12 +11,12 @@ async function requeue(jobId, startAt) {
     console.warn("[no-call-worker] NO_CALL_IMPORT_QUEUE_URL not set; cannot requeue");
     return;
   }
-  await sqs
-    .sendMessage({
+  await sqs.send(
+    new SendMessageCommand({
       QueueUrl: QUEUE_URL,
       MessageBody: JSON.stringify({ jobId, startAt }),
     })
-    .promise();
+  );
 }
 
 export const handler = async (event) => {
