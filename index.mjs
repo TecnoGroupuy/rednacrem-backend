@@ -303,6 +303,13 @@ function getAuthUser(event) {
 }
 
 function createDbClient() {
+  const pgsslRaw = (process.env.PGSSL || process.env.DATABASE_SSL || "").toLowerCase();
+  const urlSsl =
+    process.env.DATABASE_URL &&
+    /sslmode=(require|verify-full|verify-ca)/i.test(process.env.DATABASE_URL);
+  const useSsl =
+    ["true", "1", "require", "verify-full", "verify-ca"].includes(pgsslRaw) || urlSsl;
+
   return new Client({
     connectionString: process.env.DATABASE_URL || undefined,
     host: process.env.PGHOST || process.env.DATABASE_HOST,
@@ -314,10 +321,7 @@ function createDbClient() {
     user: process.env.PGUSER || process.env.DATABASE_USER,
     password: process.env.PGPASSWORD || process.env.DATABASE_PASSWORD,
     database: process.env.PGDATABASE || process.env.DATABASE_NAME,
-    ssl:
-      process.env.PGSSL === "true"
-        ? { rejectUnauthorized: false }
-        : undefined
+    ssl: useSsl ? { rejectUnauthorized: false } : undefined
   });
 }
 
