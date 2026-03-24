@@ -1,12 +1,27 @@
 import { AppError } from "./errors.js";
 
+export const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "https://rednacrem.tri.uy",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, x-file-name, x-filename, x-amz-date, x-api-key",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+};
+
 function baseResponse(statusCode, payload) {
   return {
     statusCode,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      ...CORS_HEADERS,
     },
     body: JSON.stringify(payload, null, 2),
+  };
+}
+
+export function handleOptions() {
+  return {
+    statusCode: 200,
+    headers: CORS_HEADERS,
+    body: "",
   };
 }
 

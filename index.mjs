@@ -7,6 +7,7 @@ import {
   ListUsersCommand
 } from "@aws-sdk/client-cognito-identity-provider";
 import { AppError } from "./src/lib/errors.js";
+import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
 import { normalizePhone } from "./src/lib/validation.js";
 import { createManualUser, updateUser } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
@@ -88,45 +89,12 @@ const cognitoClient = new CognitoIdentityProviderClient({
   region: process.env.AWS_REGION
 });
 
-const ALLOWED_ORIGINS = new Set([
-  "http://127.0.0.1:5173",
-  "http://localhost:5173"
-]);
-
-let CURRENT_CORS_HEADERS = null;
-
-function buildCorsHeaders(event) {
-  const origin =
-    event?.headers?.origin ||
-    event?.headers?.Origin ||
-    event?.headers?.ORIGIN ||
-    null;
-
-  if (!origin || !ALLOWED_ORIGINS.has(origin)) {
-    return {};
-  }
-
-  return {
-    "Access-Control-Allow-Origin": origin,
-    "Vary": "Origin",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, X-Requested-With, X-Dev-Auth, X-Dev-User-Email, X-Dev-User-Role, X-Dev-User-Sub, X-Dev-Role, x-dev-user-sub, x-dev-role, X-File-Name, X-Filename",
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Expose-Headers": "Content-Disposition"
-  };
-}
-
-function setCurrentCorsHeaders(event) {
-  CURRENT_CORS_HEADERS = buildCorsHeaders(event);
-}
-
 function json(statusCode, payload) {
   return {
     statusCode,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...(CURRENT_CORS_HEADERS || {})
+      ...CORS_HEADERS
     },
     body: JSON.stringify(payload)
   };
@@ -209,7 +177,9 @@ function getPrimaryRole(groups) {
 }
 
 function getAuthUser(event) {
-  const claims = event.requestContext?.authorizer?.jwt?.claims;
+  const claims =
+    event.requestContext?.authorizer?.jwt?.claims ||
+    event.requestContext?.authorizer?.claims;
 
   if (claims) {
     const groups = normalizeGroups(claims["cognito:groups"]);
@@ -3632,6 +3602,9 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
 }
 
 export const handler = async (event) => {
+  if (getMethodFromHttp(event) === "OPTIONS") {
+    return handleOptions();
+  }
   const path = getPath(event);
   const method = getMethod(event);
   const segments = getPathSegments(path);
@@ -3643,8 +3616,6 @@ export const handler = async (event) => {
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
   const manualTicketCloseMatch = path.match(/\/manual-tickets\/([^/]+)\/close$/);
-  setCurrentCorsHeaders(event);
-
   console.log("REQUEST", {
     method,
     path,
@@ -3654,16 +3625,6 @@ export const handler = async (event) => {
     ),
     authorizerKeys: Object.keys(event?.requestContext?.authorizer || {})
   });
-
-  if (method === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: {
-        ...(CURRENT_CORS_HEADERS || {})
-      },
-      body: ""
-    };
-  }
 
   if (method === "GET" && path.endsWith("/health")) {
     return json(200, {
@@ -4360,7 +4321,7 @@ export const handler = async (event) => {
         headers: {
           "Content-Type": "application/pdf",
           "Content-Disposition": `attachment; filename="${filename}"`,
-          ...(CURRENT_CORS_HEADERS || {})
+          ...CORS_HEADERS
         },
         body: pdfBuffer.toString("base64"),
         isBase64Encoded: true
@@ -7255,7 +7216,7 @@ export const handler = async (event) => {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": `attachment; filename="${filename}"`,
-          ...(CURRENT_CORS_HEADERS || {})
+          ...CORS_HEADERS
         },
         body: csv
       };
@@ -7944,7 +7905,7 @@ export const handler = async (event) => {
         );
         const jobId = jobResult.rows[0].id;
         // Fire-and-forget background processing.
-        processNoCallJob(jobId);
+        await processNoCallJob(jobId);
         return json(201, { ok: true, jobId });
       } finally {
         await client.end();
