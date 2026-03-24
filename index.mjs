@@ -723,6 +723,7 @@ export async function processNoCallJob(jobId, options = {}) {
           UPDATE no_call_import_jobs
           SET status = 'failed',
               error_message = $1,
+              completed_at = now(),
               updated_at = now()
           WHERE id = $2
           `,
@@ -774,6 +775,7 @@ export async function processNoCallJob(jobId, options = {}) {
       UPDATE no_call_import_jobs
       SET status = 'failed',
           error_message = $1,
+          completed_at = now(),
           updated_at = now()
       WHERE id = $2
       `,
@@ -7378,6 +7380,7 @@ export const handler = async (event) => {
               b.valid_rows,
               b.error_rows,
               b.rejected_missing_documento,
+              NULL::int AS processed_rows,
               b.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
@@ -7396,6 +7399,7 @@ export const handler = async (event) => {
               j.inserted_rows AS valid_rows,
               j.skipped_rows AS error_rows,
               0 AS rejected_missing_documento,
+              j.processed_rows,
               j.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
@@ -7414,6 +7418,7 @@ export const handler = async (event) => {
               stats.total_rows AS valid_rows,
               0 AS error_rows,
               0 AS rejected_missing_documento,
+              NULL::int AS processed_rows,
               stats.created_at,
               NULL AS user_nombre,
               NULL AS user_apellido,
@@ -7449,6 +7454,7 @@ export const handler = async (event) => {
               b.valid_rows,
               b.error_rows,
               b.rejected_missing_documento,
+              NULL::int AS processed_rows,
               b.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
@@ -7467,6 +7473,7 @@ export const handler = async (event) => {
               j.inserted_rows AS valid_rows,
               j.skipped_rows AS error_rows,
               0 AS rejected_missing_documento,
+              j.processed_rows,
               j.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
@@ -7485,6 +7492,7 @@ export const handler = async (event) => {
               stats.total_rows AS valid_rows,
               0 AS error_rows,
               0 AS rejected_missing_documento,
+              NULL::int AS processed_rows,
               stats.created_at,
               NULL AS user_nombre,
               NULL AS user_apellido,
@@ -7507,6 +7515,7 @@ export const handler = async (event) => {
             valid_rows,
             error_rows,
             rejected_missing_documento,
+            processed_rows,
             created_at,
             user_nombre,
             user_apellido,
@@ -7539,6 +7548,12 @@ export const handler = async (event) => {
               ? "Fallida"
               : "Cargada";
           }
+          const totalRows = Number(row.total_rows || 0);
+          const processedRows = Number(row.processed_rows || 0);
+          const progressPercent =
+            row.source === "no_call_jobs" && totalRows > 0
+              ? Math.min(100, Math.round((processedRows / totalRows) * 100))
+              : null;
           return {
             id: row.id,
             archivo: row.file_name,
@@ -7550,7 +7565,9 @@ export const handler = async (event) => {
             usuario,
             tipo: row.import_type,
             tipoLabel: IMPORT_TYPE_LABEL[row.import_type] || row.import_type,
-            rejectedMissingDocumento: Number(row.rejected_missing_documento || 0)
+            rejectedMissingDocumento: Number(row.rejected_missing_documento || 0),
+            progressPercent,
+            processedRows
           };
         });
 
@@ -7925,13 +7942,27 @@ export const handler = async (event) => {
             created_by
           )
           VALUES ($1, 'queued', 0, 0, 0, 0, $2, $3)
-          RETURNING id
+          RETURNING id, status, file_name, created_at
           `,
           [fileName, csvText, dbUser?.id || null]
         );
-        const jobId = jobResult.rows[0].id;
+        const job = jobResult.rows[0];
+        const jobId = job.id;
         await enqueueNoCallJob(jobId);
-        return json(201, { ok: true, jobId });
+        return json(201, {
+          ok: true,
+          job: {
+            id: jobId,
+            status: job.status,
+            fileName: job.file_name,
+            createdAt: job.created_at,
+            total: 0,
+            processed: 0,
+            inserted: 0,
+            skipped: 0,
+            progressPercent: 0
+          }
+        });
       } finally {
         await client.end();
       }
@@ -7992,20 +8023,26 @@ export const handler = async (event) => {
           return json(404, { ok: false, message: "Job not found" });
         }
         const row = jobRes.rows[0];
+        const totalRows = Number(row.total_rows || 0);
+        const processedRows = Number(row.processed_rows || 0);
+        const progressPercent = totalRows > 0
+          ? Math.min(100, Math.round((processedRows / totalRows) * 100))
+          : 0;
         return json(200, {
           ok: true,
           job: {
             id: row.id,
             fileName: row.file_name,
             status: row.status,
-            total: Number(row.total_rows || 0),
-            processed: Number(row.processed_rows || 0),
+            total: totalRows,
+            processed: processedRows,
             inserted: Number(row.inserted_rows || 0),
             skipped: Number(row.skipped_rows || 0),
             error: row.error_message || null,
             createdAt: row.created_at,
             startedAt: row.started_at,
-            completedAt: row.completed_at
+            completedAt: row.completed_at,
+            progressPercent
           }
         });
       } finally {
