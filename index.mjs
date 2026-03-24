@@ -664,25 +664,9 @@ async function processNoCallJob(jobId) {
     let inserted = 0;
     let skipped = 0;
 
-    const runChunk = async () => {
+    while (index < rows.length) {
       const chunk = rows.slice(index, index + NO_CALL_JOB_CHUNK_SIZE);
-      if (!chunk.length) {
-        await client.query(
-          `
-          UPDATE no_call_import_jobs
-          SET status = 'completed',
-              processed_rows = $1,
-              inserted_rows = $2,
-              skipped_rows = $3,
-              completed_at = now(),
-              updated_at = now()
-          WHERE id = $4
-          `,
-          [index, inserted, skipped, jobId]
-        );
-        await client.end();
-        return;
-      }
+      if (!chunk.length) break;
 
       try {
         await client.query("BEGIN");
@@ -737,11 +721,22 @@ async function processNoCallJob(jobId) {
         `,
         [index, inserted, skipped, jobId]
       );
+    }
 
-      setImmediate(runChunk);
-    };
-
-    setImmediate(runChunk);
+    await client.query(
+      `
+      UPDATE no_call_import_jobs
+      SET status = 'completed',
+          processed_rows = $1,
+          inserted_rows = $2,
+          skipped_rows = $3,
+          completed_at = now(),
+          updated_at = now()
+      WHERE id = $4
+      `,
+      [index, inserted, skipped, jobId]
+    );
+    await client.end();
   } catch (error) {
     await client.query(
       `
