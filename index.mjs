@@ -1,4 +1,5 @@
-﻿import fs from "node:fs";
+import fs from "node:fs";
+import { createRequire } from "node:module";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -11,6 +12,10 @@ import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./s
 import { normalizePhone } from "./src/lib/validation.js";
 import { createManualUser, updateUser } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
+
+const require = createRequire(import.meta.url);
+const AWS = require("aws-sdk");
+const sqs = new AWS.SQS({ region: process.env.AWS_REGION || "us-east-2" });
 
 function loadEnvFile(filePath) {
   try {
@@ -47,6 +52,20 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(".env");
 loadEnvFile(".env.local");
+
+async function enqueueNoCallJob(jobId, startAt) {
+  const queueUrl = process.env.NO_CALL_IMPORT_QUEUE_URL;
+  if (!queueUrl) {
+    throw new Error("NO_CALL_IMPORT_QUEUE_URL not set");
+  }
+  const payload = startAt ? { jobId, startAt } : { jobId };
+  await sqs
+    .sendMessage({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(payload),
+    })
+    .promise();
+}
 
 const VALID_USER_STATUSES = [
   "pending",
@@ -419,15 +438,15 @@ function getDepartamentoFromFixed(numero) {
   if (n.startsWith("444")) return "Lavalleja";
   if (n.startsWith("477")) return "Artigas";
   if (n.startsWith("473")) return "Salto";
-  if (n.startsWith("472")) return "PaysandÃº";
-  if (n.startsWith("456")) return "RÃ­o Negro";
+  if (n.startsWith("472")) return "Paysandú";
+  if (n.startsWith("456")) return "Río Negro";
   if (n.startsWith("453")) return "Soriano";
-  if (n.startsWith("434")) return "San JosÃ©";
+  if (n.startsWith("434")) return "San José";
   if (n.startsWith("447")) return "Rocha";
   if (n.startsWith("445")) return "Treinta y Tres";
   if (n.startsWith("464")) return "Cerro Largo";
   if (n.startsWith("462")) return "Rivera";
-  if (n.startsWith("463")) return "TacuarembÃ³";
+  if (n.startsWith("463")) return "Tacuarembó";
   return null;
 }
 
@@ -471,10 +490,10 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2314": "Cerro",
   "2601": "Carrasco",
   "2916": "Ciudad Vieja",
-  "2320": "ColÃ³n",
+  "2320": "Colón",
   "2222": "Piedras Blancas",
-  "2401": "CordÃ³n",
-  "2487": "Hosp. ClÃ­nicas",
+  "2401": "Cordón",
+  "2487": "Hosp. Clínicas",
   "2292": "Pando",
   "2294": "Sauce",
   "2295": "Empalme Olmos",
@@ -484,51 +503,51 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2312": "Paso de la Arena",
   "2355": "Sayago",
   "2409": "Tres Cruces",
-  "2506": "UniÃ³n",
-  "2347": "AutÃ³dromo",
+  "2506": "Unión",
+  "2347": "Autódromo",
   "2362": "La Paz",
   "2364": "Las Piedras",
   "2369": "Progreso",
-  "2372": "AtlÃ¡ntida",
+  "2372": "Atlántida",
   "2682": "Lagomar",
   "2696": "Solymar",
   "4332": "Canelones",
-  "4530": "CaÃ±ada Nieto",
+  "4530": "Cañada Nieto",
   "4222": "Maldonado",
   "4223": "Maldonado",
   "4224": "Maldonado",
   "4225": "Maldonado",
-  "4244": "Punta del Este (PenÃ­nsula)",
+  "4244": "Punta del Este (Península)",
   "4248": "Punta del Este Parada 5",
   "4249": "Punta del Este Parada 5",
   "4255": "Laguna del Sauce",
   "4257": "Portezuelo",
   "4266": "San Carlos",
   "4277": "La Barra",
-  "4311": "CasupÃ¡",
-  "4312": "San RamÃ³n",
+  "4311": "Casupá",
+  "4312": "San Ramón",
   "4313": "San Antonio",
   "4315": "Tala",
   "4317": "Miguez",
   "4318": "Cerro Colorado",
   "4319": "Chamizo",
-  "4334": "Santa LucÃ­a",
-  "4335": "JuanicÃ³",
+  "4334": "Santa Lucía",
+  "4335": "Juanicó",
   "4336": "Los Cerrillos",
   "4338": "Colonia Etchepare",
   "4339": "Cardal",
-  "4342": "San JosÃ©",
-  "4345": "KiyÃº",
+  "4342": "San José",
+  "4345": "Kiyú",
   "4346": "Rafael Peraza",
   "4348": "Villa Rodriguez",
   "4349": "Colonia Agra.Delta",
   "4352": "Florida",
-  "4354": "SarandÃ­ Grande",
+  "4354": "Sarandí Grande",
   "4360": "Blanquillo",
   "4362": "Durazno",
   "4364": "Trinidad",
   "4365": "Carmen",
-  "4367": "SarandÃ­ del Yi",
+  "4367": "Sarandí del Yi",
   "4368": "Carlos Reyles",
   "4369": "La Paloma",
   "4373": "La Floresta",
@@ -539,77 +558,77 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "4378": "Cuchilla Alta",
   "4399": "San Jacinto",
   "4430": "Gregorio Aznarez",
-  "4432": "PiriÃ¡polis",
-  "4434": "Pan de AzÃºcar",
-  "4438": "Balneario SolÃ­s",
+  "4432": "Piriápolis",
+  "4434": "Pan de Azúcar",
+  "4438": "Balneario Solís",
   "4442": "Minas",
-  "4446": "AiguÃ¡",
-  "4447": "SolÃ­s de Mataojo",
-  "4448": "PirarajÃ¡",
+  "4446": "Aiguá",
+  "4447": "Solís de Mataojo",
+  "4448": "Pirarajá",
   "4449": "Mariscala",
   "4452": "Treinta y Tres",
-  "4455": "JosÃ© P. Varela",
+  "4455": "José P. Varela",
   "4456": "Lascano",
-  "4457": "VelÃ¡zquez",
+  "4457": "Velázquez",
   "4458": "Vergara",
-  "4459": "CebollatÃ­",
-  "4463": "ZapicÃ¡n",
+  "4459": "Cebollatí",
+  "4463": "Zapicán",
   "4464": "Santa Clara de Olimar",
   "4466": "Cerro Chato",
-  "4469": "Batlle y OrdoÃ±ez",
+  "4469": "Batlle y Ordoñez",
   "4472": "Rocha",
   "4474": "Barra del Chuy",
   "4475": "Aguas Dulces",
   "4476": "La Coronilla",
   "4477": "Santa Teresa",
   "4479": "La Paloma (Rocha)",
-  "4486": "Faro JosÃ© Ignacio",
+  "4486": "Faro José Ignacio",
   "4522": "Colonia",
   "4534": "Dolores",
   "4536": "Cardona",
   "4537": "Palmitas",
-  "4538": "JosÃ© E. RodÃ³",
+  "4538": "José E. Rodó",
   "4539": "Ismael Cortinas",
-  "4542": "Balneario ZagarazÃº",
+  "4542": "Balneario Zagarazú",
   "4544": "Nueva Palmira",
   "4552": "Rosario",
   "4554": "Nueva Helvecia",
   "4558": "Colonia Valdense",
   "4562": "Fray Bentos",
   "4567": "Young",
-  "4568": "Nuevo BerlÃ­n",
+  "4568": "Nuevo Berlín",
   "4569": "San Javier",
   "4574": "Semillero",
   "4575": "Colonia Miguelete",
-  "4576": "OmbÃºes de Lavalle",
+  "4576": "Ombúes de Lavalle",
   "4577": "Conchillas",
   "4586": "Juan Lacaze",
   "4587": "Playa Fomento",
   "4588": "Santa Ana",
   "4622": "Rivera",
-  "4632": "TacuarembÃ³",
-  "4640": "AceguÃ¡",
+  "4632": "Tacuarembó",
+  "4640": "Aceguá",
   "4642": "Melo",
   "4654": "Vichadero",
   "4656": "Tranqueras",
   "4658": "Minas de Corrales",
   "4664": "Paso de los Toros",
-  "4675": "RÃ­o Branco",
-  "4679": "Lago MerÃ­n",
-  "4722": "PaysandÃº",
+  "4675": "Río Branco",
+  "4679": "Lago Merín",
+  "4722": "Paysandú",
   "4730": "Defensa (Salto)",
   "4732": "Pueblo Lavalleja",
   "4733": "Cuchilla de Salto",
-  "4742": "GuichÃ³n",
+  "4742": "Guichón",
   "4747": "Piedras Coloradas",
   "4754": "Quebracho",
-  "4764": "ConstituciÃ³n",
-  "4766": "BelÃ©n",
+  "4764": "Constitución",
+  "4766": "Belén",
   "4772": "Artigas",
   "4776": "Baltasar Brum",
-  "4777": "TomÃ¡s Gomensoro",
+  "4777": "Tomás Gomensoro",
   "4778": "Mones Quintela",
-  "4779": "Bella UniÃ³n",
+  "4779": "Bella Unión",
   "4888": "Fraile Muerto",
   "5432": "Mercedes"
 };
@@ -622,14 +641,14 @@ function getLocalidadFromFixed(numero) {
 
 const NO_CALL_JOB_CHUNK_SIZE = 5000;
 
-async function processNoCallJob(jobId) {
+export async function processNoCallJob(jobId, options = {}) {
   const client = createDbClient();
   await client.connect();
 
   try {
     const jobRes = await client.query(
       `
-      SELECT id, csv_text
+      SELECT id, csv_text, processed_rows, inserted_rows, skipped_rows
       FROM no_call_import_jobs
       WHERE id = $1
       LIMIT 1
@@ -644,25 +663,27 @@ async function processNoCallJob(jobId) {
     const rows = parsedRows.slice(1);
     const totalRows = rows.length;
 
+    let index = options.startAt ?? jobRes.rows[0].processed_rows ?? 0;
+    let inserted = jobRes.rows[0].inserted_rows ?? 0;
+    let skipped = jobRes.rows[0].skipped_rows ?? 0;
+
     await client.query(
       `
       UPDATE no_call_import_jobs
       SET status = 'processing',
           total_rows = $1,
-          processed_rows = 0,
-          inserted_rows = 0,
-          skipped_rows = 0,
+          processed_rows = $2,
+          inserted_rows = $3,
+          skipped_rows = $4,
           error_message = NULL,
           started_at = now(),
           updated_at = now()
-      WHERE id = $2
+      WHERE id = $5
       `,
-      [totalRows, jobId]
+      [totalRows, index, inserted, skipped, jobId]
     );
-
-    let index = 0;
-    let inserted = 0;
-    let skipped = 0;
+    const maxMillis = options.maxMillis ?? null;
+    const startedAt = Date.now();
 
     while (index < rows.length) {
       const chunk = rows.slice(index, index + NO_CALL_JOB_CHUNK_SIZE);
@@ -721,6 +742,14 @@ async function processNoCallJob(jobId) {
         `,
         [index, inserted, skipped, jobId]
       );
+
+      if (maxMillis && Date.now() - startedAt > maxMillis) {
+        if (typeof options.requeue === "function") {
+          await options.requeue(index);
+        }
+        await client.end();
+        return;
+      }
     }
 
     await client.query(
@@ -946,7 +975,7 @@ function mapProductRowToApi(row) {
 const IMPORT_TYPE_LABEL = {
   clientes: "CSV de clientes",
   no_llamar: "CSV Base No llamar",
-  resultados: "CSV de resultados telefÃ³nicos",
+  resultados: "CSV de resultados telefónicos",
   datos_para_trabajar: "CSV Datos para trabajar"
 };
 
@@ -1191,10 +1220,10 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "telefono": "telefono",
   "celular": "celular",
   "correo electronico": "correo_electronico",
-  "correo electrÃ³nico": "correo_electronico",
+  "correo electrónico": "correo_electronico",
   "email": "correo_electronico",
   "direccion": "direccion",
-  "direcciÃ³n": "direccion",
+  "dirección": "direccion",
   "departamento": "departamento",
   "localidad": "localidad",
   "pais": "pais",
@@ -1387,7 +1416,7 @@ function buildImportSampleCsv(type) {
     "telefono",
     "Celular",
     "Correo electronico",
-    "DirecciÃ³n",
+    "Dirección",
     "Departamento",
     "Pais",
     "Nombre del familiar",
@@ -1411,7 +1440,7 @@ function buildImportSampleCsv(type) {
     "telefono": "099123456",
     "Celular": "099123456",
     "Correo electronico": "ana.pereira@example.com",
-    "DirecciÃ³n": "18 de Julio 1234",
+    "Dirección": "18 de Julio 1234",
     "Departamento": "Montevideo",
     "Pais": "Uruguay",
     "Nombre del familiar": "Luis",
@@ -1452,7 +1481,7 @@ function validateProductPayload(body, options = {}) {
 
   const parsedPrecio = Number(String(precio || 0).replace(/[^0-9.-]/g, ""));
   if (Number.isNaN(parsedPrecio)) {
-    errors.precio = ["precio invÃ¡lido"];
+    errors.precio = ["precio inválido"];
   }
 
   if (Object.keys(errors).length > 0) {
@@ -1671,13 +1700,13 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!email) {
       errors.email = "El email es obligatorio";
     } else if (!isValidEmail(email)) {
-      errors.email = "El email no es vÃ¡lido";
+      errors.email = "El email no es válido";
     }
   }
 
   if (!options.partial || body?.telefono !== undefined) {
     if (!telefono) {
-      errors.telefono = "El telÃ©fono es obligatorio";
+      errors.telefono = "El teléfono es obligatorio";
     }
   }
 
@@ -1685,7 +1714,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!rol) {
       errors.rol = "El rol es obligatorio";
     } else if (!VALID_ROLES.includes(rol)) {
-      errors.rol = "El rol no es vÃ¡lido";
+      errors.rol = "El rol no es válido";
     }
   }
 
@@ -1693,7 +1722,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!status) {
       errors.status = "El estado es obligatorio";
     } else if (!VALID_USER_STATUSES.includes(status)) {
-      errors.status = "El estado no es vÃ¡lido";
+      errors.status = "El estado no es válido";
     }
   }
 
@@ -1731,7 +1760,7 @@ function validateVendorRegistrationPayload(body) {
   if (!nombre) errors.nombre = "El nombre es obligatorio";
   if (!apellido) errors.apellido = "El apellido es obligatorio";
   if (!email) errors.email = "El email es obligatorio";
-  if (!telefono) errors.telefono = "El telÃ©fono es obligatorio";
+  if (!telefono) errors.telefono = "El teléfono es obligatorio";
 
   return {
     valid: Object.keys(errors).length === 0,
@@ -3112,7 +3141,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.role_key,
           updatedUser.role_key,
           actorUserId,
-          "ActualizaciÃ³n desde superadmin/users"
+          "Actualización desde superadmin/users"
         ]
       );
     }
@@ -3135,7 +3164,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.status,
           updatedUser.status,
           actorUserId,
-          "ActualizaciÃ³n desde superadmin/users"
+          "Actualización desde superadmin/users"
         ]
       );
     }
@@ -3196,7 +3225,7 @@ function requireApproved(event, dbUser) {
 function requireRole(event, dbUser, allowedRoles) {
   console.log("[role-check] roles requeridos:", allowedRoles);
   console.log("[role-check] rol del usuario:", dbUser?.role_key);
-  console.log("[role-check] Â¿tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
+  console.log("[role-check] ¿tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
     return json(403, {
       ok: false,
@@ -3424,7 +3453,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
     if (requestRow.status !== "pending") {
       return {
         invalidState: true,
-        message: "La solicitud ya no estÃ¡ pendiente"
+        message: "La solicitud ya no está pendiente"
       };
     }
 
@@ -3497,7 +3526,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
         null,
         "vendedor",
         reviewerUserId,
-        "AprobaciÃ³n de solicitud de vendedor"
+        "Aprobación de solicitud de vendedor"
       ]
     );
 
@@ -3565,7 +3594,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
       await client.query("ROLLBACK");
       return {
         invalidState: true,
-        message: "La solicitud ya no estÃ¡ pendiente"
+        message: "La solicitud ya no está pendiente"
       };
     }
 
@@ -5011,7 +5040,7 @@ export const handler = async (event) => {
             ok: true,
             success: true,
             data: null,
-            message: "No tenÃ©s lotes activos asignados",
+            message: "No tenés lotes activos asignados",
             error: null
           });
         }
@@ -5099,8 +5128,8 @@ export const handler = async (event) => {
               success: true,
               data: null,
               message: enOla2
-                ? `No hay contactos disponibles en esta franja. VolvÃ© a las ${ola1Inicio}`
-                : `No hay contactos disponibles en esta franja. VolvÃ© a las ${ola2Inicio}`,
+                ? `No hay contactos disponibles en esta franja. Volvé a las ${ola1Inicio}`
+                : `No hay contactos disponibles en esta franja. Volvé a las ${ola2Inicio}`,
               error: null
             });
           }
@@ -5109,7 +5138,7 @@ export const handler = async (event) => {
             ok: true,
             success: true,
             data: null,
-            message: "Todos los contactos del lote fueron gestionados. Â¡Buen trabajo!",
+            message: "Todos los contactos del lote fueron gestionados. ¡Buen trabajo!",
             error: null
           });
         }
@@ -5627,12 +5656,12 @@ export const handler = async (event) => {
         const validationErrors = [];
 
         if (!resultadoInput || resultadoInput === "nuevo") {
-          validationErrors.push({ field: "estado_venta", message: "Estado invÃ¡lido" });
+          validationErrors.push({ field: "estado_venta", message: "Estado inválido" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
-          validationErrors.push({ field: "estado_venta", message: "Estado no existe en catÃ¡logo" });
+          validationErrors.push({ field: "estado_venta", message: "Estado no existe en catálogo" });
         }
 
         if (resultadoInput === "seguimiento" && !fechaAgenda) {
@@ -5648,7 +5677,7 @@ export const handler = async (event) => {
               success: false,
               data: null,
               error: {
-                message: "Contacto ya estÃ¡ en estado final",
+                message: "Contacto ya está en estado final",
                 estado_actual: currentEstadoVenta
               }
             });
@@ -5662,7 +5691,7 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "ValidaciÃ³n",
+              message: "Validación",
               errors: validationErrors
             }
           });
@@ -7085,7 +7114,7 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "Contactos invÃ¡lidos para asignar",
+              message: "Contactos inválidos para asignar",
               errors
             }
           });
@@ -7899,8 +7928,7 @@ export const handler = async (event) => {
           [fileName, csvText, dbUser?.id || null]
         );
         const jobId = jobResult.rows[0].id;
-        // Fire-and-forget background processing.
-        await processNoCallJob(jobId);
+        await enqueueNoCallJob(jobId);
         return json(201, { ok: true, jobId });
       } finally {
         await client.end();
@@ -9534,4 +9562,7 @@ export const __testables = {
   validateSuperadminUserPayload,
   requireRole
 };
+
+
+
 
