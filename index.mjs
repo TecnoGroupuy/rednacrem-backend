@@ -642,6 +642,62 @@ function getLocalidadFromFixed(numero) {
 }
 
 const NO_CALL_JOB_CHUNK_SIZE = 5000;
+const CONTACT_IMPORT_BATCH_SIZE = 500;
+
+function detectCsvDelimiter(headerLine) {
+  if (!headerLine) return ",";
+  const commaCount = (headerLine.match(/,/g) || []).length;
+  const semicolonCount = (headerLine.match(/;/g) || []).length;
+  return semicolonCount > commaCount ? ";" : ",";
+}
+
+function countCsvRows(csvText) {
+  if (!csvText) return 0;
+  let count = 0;
+  for (let i = 0; i < csvText.length; i += 1) {
+    if (csvText[i] === "\n") count += 1;
+  }
+  if (csvText.length > 0 && csvText[csvText.length - 1] !== "\n") count += 1;
+  return count;
+}
+
+function* iterateCsvLines(input) {
+  const text = String(input || "");
+  if (!text.length) return;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === "\n") {
+      let line = text.slice(start, i);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      yield line;
+      start = i + 1;
+    }
+  }
+  if (start <= text.length) {
+    let line = text.slice(start);
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (line.length || text.length) yield line;
+  }
+}
+
+function* iterateNoCallValues(csvText) {
+  const text = String(csvText || "").replace(/^\uFEFF/, "");
+  const iterator = iterateCsvLines(text);
+  const headerResult = iterator.next();
+  const header = headerResult.done ? "" : headerResult.value || "";
+  const delimiter = detectCsvDelimiter(header);
+  for (const line of iterator) {
+    if (!line) continue;
+    const cells = parseCsvLine(line, delimiter);
+    const first = cells[0] || "";
+    if (first && first.trim()) {
+      yield first.trim();
+    } else {
+      yield "";
+    }
+  }
+}
 
 export async function processNoCallJob(jobId, options = {}) {
   const client = createDbClient();
@@ -661,9 +717,8 @@ export async function processNoCallJob(jobId, options = {}) {
     if (!jobRes.rows.length) return;
 
     const csvText = jobRes.rows[0].csv_text || "";
-    const parsedRows = parseCsv(csvText);
-    const rows = parsedRows.slice(1);
-    const totalRows = rows.length;
+    const totalRows = Math.max(0, countCsvRows(csvText) - 1);
+    const valuesIter = iterateNoCallValues(csvText);
 
     let index = options.startAt ?? jobRes.rows[0].processed_rows ?? 0;
     let inserted = jobRes.rows[0].inserted_rows ?? 0;
@@ -687,14 +742,27 @@ export async function processNoCallJob(jobId, options = {}) {
     const maxMillis = options.maxMillis ?? null;
     const startedAt = Date.now();
 
-    while (index < rows.length) {
-      const chunk = rows.slice(index, index + NO_CALL_JOB_CHUNK_SIZE);
-      if (!chunk.length) break;
+    const buffer = [];
+    let currentIndex = 0;
+    for (const value of valuesIter) {
+      if (currentIndex < index) {
+        currentIndex += 1;
+        continue;
+      }
+      buffer.push(value);
+      currentIndex += 1;
+      if (buffer.length < NO_CALL_JOB_CHUNK_SIZE) continue;
+
+      const chunk = buffer.splice(0, buffer.length);
 
       try {
         await client.query("BEGIN");
-        for (const row of chunk) {
-          const rawValue = row[0];
+        const numeros = [];
+        const fuentes = [];
+        const departamentos = [];
+        const localidades = [];
+
+        for (const rawValue of chunk) {
           const numero = normalizeUyNumber(rawValue);
           if (!numero) {
             skipped += 1;
@@ -703,18 +771,25 @@ export async function processNoCallJob(jobId, options = {}) {
           const fuente = getFuenteFromNumber(numero);
           const departamento = fuente === "tel_fijo" ? getDepartamentoFromFixed(numero) : null;
           const localidad = fuente === "tel_fijo" ? getLocalidadFromFixed(numero) : null;
+          numeros.push(numero);
+          fuentes.push(fuente);
+          departamentos.push(departamento);
+          localidades.push(localidad);
+        }
 
+        if (numeros.length > 0) {
           const result = await client.query(
             `
             INSERT INTO no_call_entries (numero, fuente, departamento, localidad)
-            VALUES ($1, $2, $3, $4)
+            SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[])
             ON CONFLICT (numero) DO NOTHING
             `,
-            [numero, fuente, departamento, localidad]
+            [numeros, fuentes, departamentos, localidades]
           );
-          if (result.rowCount > 0) inserted += 1;
-          else skipped += 1;
+          inserted += result.rowCount;
+          skipped += numeros.length - result.rowCount;
         }
+
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -740,10 +815,11 @@ export async function processNoCallJob(jobId, options = {}) {
         SET processed_rows = $1,
             inserted_rows = $2,
             skipped_rows = $3,
+            total_rows = $4,
             updated_at = now()
-        WHERE id = $4
+        WHERE id = $5
         `,
-        [index, inserted, skipped, jobId]
+        [index, inserted, skipped, totalRows, jobId]
       );
 
       if (maxMillis && Date.now() - startedAt > maxMillis) {
@@ -755,6 +831,75 @@ export async function processNoCallJob(jobId, options = {}) {
       }
     }
 
+    if (buffer.length > 0) {
+      try {
+        await client.query("BEGIN");
+        const numeros = [];
+        const fuentes = [];
+        const departamentos = [];
+        const localidades = [];
+
+        for (const rawValue of buffer) {
+          const numero = normalizeUyNumber(rawValue);
+          if (!numero) {
+            skipped += 1;
+            continue;
+          }
+          const fuente = getFuenteFromNumber(numero);
+          const departamento = fuente === "tel_fijo" ? getDepartamentoFromFixed(numero) : null;
+          const localidad = fuente === "tel_fijo" ? getLocalidadFromFixed(numero) : null;
+          numeros.push(numero);
+          fuentes.push(fuente);
+          departamentos.push(departamento);
+          localidades.push(localidad);
+        }
+
+        if (numeros.length > 0) {
+          const result = await client.query(
+            `
+            INSERT INTO no_call_entries (numero, fuente, departamento, localidad)
+            SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[])
+            ON CONFLICT (numero) DO NOTHING
+            `,
+            [numeros, fuentes, departamentos, localidades]
+          );
+          inserted += result.rowCount;
+          skipped += numeros.length - result.rowCount;
+        }
+
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        await client.query(
+          `
+          UPDATE no_call_import_jobs
+          SET status = 'failed',
+              error_message = $1,
+              completed_at = now(),
+              updated_at = now()
+          WHERE id = $2
+          `,
+          [error.message, jobId]
+        );
+        await client.end();
+        return;
+      }
+
+      index += buffer.length;
+      await client.query(
+        `
+        UPDATE no_call_import_jobs
+        SET processed_rows = $1,
+            inserted_rows = $2,
+            skipped_rows = $3,
+            total_rows = $4,
+            updated_at = now()
+        WHERE id = $5
+        `,
+        [index, inserted, skipped, totalRows, jobId]
+      );
+    }
+
     await client.query(
       `
       UPDATE no_call_import_jobs
@@ -762,11 +907,12 @@ export async function processNoCallJob(jobId, options = {}) {
           processed_rows = $1,
           inserted_rows = $2,
           skipped_rows = $3,
+          total_rows = $4,
           completed_at = now(),
           updated_at = now()
-      WHERE id = $4
+      WHERE id = $5
       `,
-      [index, inserted, skipped, jobId]
+      [index, inserted, skipped, totalRows, jobId]
     );
     await client.end();
   } catch (error) {
@@ -1357,6 +1503,115 @@ function mapCsvRowsToImport(rows) {
   }
 
   return { rows: mapped, ignoredEmptyRows };
+}
+
+const CONTACT_IMPORT_COLUMNS = [
+  "batch_id",
+  "row_number",
+  "nombre",
+  "apellido",
+  "email",
+  "telefono",
+  "documento",
+  "contacto_estado",
+  "producto_nombre",
+  "plan",
+  "precio",
+  "medio_pago",
+  "fecha_alta",
+  "cuotas_pagas",
+  "carencia_cuotas",
+  "producto_estado",
+  "motivo_baja",
+  "motivo_baja_detalle",
+  "fecha_baja",
+  "vendedor_nombre",
+  "vendedor_email",
+  "fecha_venta",
+  "documento_beneficiario",
+  "documento_cobranza",
+  "telefono_venta",
+  "telefono_fijo",
+  "telefono_celular",
+  "telefono_alternativo",
+  "consulta_estado",
+  "evaluacion",
+  "auditoria_ok",
+  "auditoria_comentario",
+  "nombre_asesor",
+  "fecha_nacimiento",
+  "departamento_residencia",
+  "nombre_familiar",
+  "apellido_familiar",
+  "telefono_familiar",
+  "parentesco",
+  "import_status",
+  "error_detail",
+  "raw_payload"
+];
+
+function buildContactImportRowValues(batchId, rowNumber, item, importStatus, errorDetail) {
+  return [
+    batchId,
+    rowNumber,
+    item.nombre,
+    item.apellido,
+    item.email,
+    item.telefono,
+    item.documento,
+    "activo",
+    item.producto_nombre,
+    item.plan || null,
+    parseNumber(item.precio),
+    item.medio_pago,
+    parseDate(item.fecha_venta),
+    null,
+    null,
+    item.producto_estado,
+    null,
+    null,
+    parseDate(item.fecha_baja),
+    item.vendedor_nombre,
+    item.vendedor_email,
+    parseDate(item.fecha_venta),
+    item.documento_beneficiario,
+    item.documento_cobranza,
+    item.telefono_venta,
+    item.telefono_fijo,
+    item.telefono_celular,
+    item.telefono_alternativo,
+    item.consulta_estado,
+    item.evaluacion,
+    item.auditoria_ok,
+    item.auditoria_comentario,
+    item.nombre_asesor,
+    parseDate(item.fecha_nacimiento),
+    item.departamento_residencia,
+    item.nombre_familiar,
+    item.apellido_familiar,
+    item.telefono_familiar,
+    item.parentesco,
+    importStatus,
+    errorDetail,
+    item
+  ];
+}
+
+function buildContactImportInsertBatch(batchRows) {
+  const values = [];
+  const placeholders = batchRows.map((row, index) => {
+    const base = index * CONTACT_IMPORT_COLUMNS.length;
+    values.push(...row);
+    const params = CONTACT_IMPORT_COLUMNS.map((_, colIndex) => `$${base + colIndex + 1}`);
+    return `(${params.join(", ")})`;
+  });
+  return {
+    sql: `
+      INSERT INTO contact_import_rows (${CONTACT_IMPORT_COLUMNS.join(", ")})
+      VALUES ${placeholders.join(", ")}
+    `,
+    values
+  };
 }
 
 function validateImportRow(item) {
@@ -8467,36 +8722,22 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const { rows, ignoredEmptyRows } = mapCsvRowsToImport(parseCsv(csvText));
+      const lineIterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+      const headerLineResult = lineIterator.next();
+      const headerLine = headerLineResult.done ? "" : headerLineResult.value || "";
+      if (!headerLine.trim()) {
+        return json(400, { ok: false, message: "CSV vacio" });
+      }
+      const separator = detectCsvSeparator(headerLine);
+      const headerKeys = parseCsvLine(headerLine, separator).map(
+        (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
+      );
+      let ignoredEmptyRows = 0;
       const client = createDbClient();
       await client.connect();
 
       try {
         await client.query("BEGIN");
-        const productNames = Array.from(
-          new Set(
-            rows
-              .map((row) => normalizeText(row.producto_nombre))
-              .filter(Boolean)
-          )
-        );
-        let missingProducts = [];
-        if (productNames.length > 0) {
-          const existingProducts = await client.query(
-            `
-            SELECT lower(nombre) AS nombre
-            FROM products
-            WHERE lower(nombre) = ANY($1)
-            `,
-            [productNames.map((name) => name.toLowerCase())]
-          );
-          const existingSet = new Set(
-            existingProducts.rows.map((row) => row.nombre)
-          );
-          missingProducts = productNames.filter(
-            (name) => !existingSet.has(name.toLowerCase())
-          );
-        }
         const batchResult = await client.query(
           `
           INSERT INTO contact_import_batches (
@@ -8519,9 +8760,38 @@ export const handler = async (event) => {
         let validRows = 0;
         let errorRows = 0;
         let missingDocumentoRows = 0;
+        const productNamesSet = new Set();
+        let totalRows = 0;
+        const batchRows = [];
 
-        for (let i = 0; i < rows.length; i += 1) {
-          const item = rows[i];
+        const flushBatch = async () => {
+          if (!batchRows.length) return;
+          const { sql, values } = buildContactImportInsertBatch(batchRows);
+          await client.query(sql, values);
+          batchRows.length = 0;
+        };
+
+        for (const line of lineIterator) {
+          if (!line || !line.trim()) {
+            ignoredEmptyRows += 1;
+            continue;
+          }
+          const cells = parseCsvLine(line, separator);
+          const item = {};
+          for (let j = 0; j < headerKeys.length; j += 1) {
+            const key = headerKeys[j];
+            if (!key) continue;
+            item[key] = normalizeCsvValue(cells[j]);
+          }
+          const hasValues = Object.values(item).some(
+            (value) => value !== null && String(value).trim() !== ""
+          );
+          if (!hasValues) {
+            ignoredEmptyRows += 1;
+            continue;
+          }
+
+          totalRows += 1;
           const errors = validateImportRow(item);
           const importStatus = errors.length ? "error" : "validated";
           if (importStatus === "validated") validRows += 1;
@@ -8530,106 +8800,41 @@ export const handler = async (event) => {
             if (errors.includes("documento requerido")) missingDocumentoRows += 1;
           }
 
-          await client.query(
+          const productName = normalizeText(item.producto_nombre);
+          if (productName) productNamesSet.add(productName);
+
+          const rowValues = buildContactImportRowValues(
+            batch.id,
+            totalRows,
+            item,
+            importStatus,
+            errors.length ? JSON.stringify(errors) : null
+          );
+          batchRows.push(rowValues);
+
+          if (batchRows.length >= CONTACT_IMPORT_BATCH_SIZE) {
+            await flushBatch();
+          }
+        }
+
+        await flushBatch();
+
+        const productNames = Array.from(productNamesSet).filter(Boolean);
+        let missingProducts = [];
+        if (productNames.length > 0) {
+          const existingProducts = await client.query(
             `
-            INSERT INTO contact_import_rows (
-              batch_id,
-              row_number,
-              nombre,
-              apellido,
-              email,
-              telefono,
-              documento,
-              contacto_estado,
-              producto_nombre,
-              plan,
-              precio,
-              medio_pago,
-              fecha_alta,
-              cuotas_pagas,
-              carencia_cuotas,
-              producto_estado,
-              motivo_baja,
-              motivo_baja_detalle,
-              fecha_baja,
-              vendedor_nombre,
-              vendedor_email,
-              fecha_venta,
-              documento_beneficiario,
-              documento_cobranza,
-              telefono_venta,
-              telefono_fijo,
-              telefono_celular,
-              telefono_alternativo,
-              consulta_estado,
-              evaluacion,
-              auditoria_ok,
-              auditoria_comentario,
-              nombre_asesor,
-              fecha_nacimiento,
-              departamento_residencia,
-              nombre_familiar,
-              apellido_familiar,
-              telefono_familiar,
-              parentesco,
-              import_status,
-              error_detail,
-              raw_payload
-            )
-            VALUES (
-              $1, $2, $3, $4, $5, $6, $7,
-              $8, $9, $10, $11, $12, $13,
-              $14, $15, $16, $17, $18, $19,
-              $20, $21, $22, $23, $24, $25,
-              $26, $27, $28, $29, $30, $31,
-              $32, $33, $34, $35, $36, $37,
-              $38, $39, $40, $41, $42
-            )
+            SELECT lower(nombre) AS nombre
+            FROM products
+            WHERE lower(nombre) = ANY($1)
             `,
-            [
-              batch.id,
-              i + 1,
-              item.nombre,
-              item.apellido,
-              item.email,
-              item.telefono,
-              item.documento,
-              "activo",
-              item.producto_nombre,
-              item.plan || null,
-              parseNumber(item.precio),
-              item.medio_pago,
-              parseDate(item.fecha_venta),
-              null,
-              null,
-              item.producto_estado,
-              null,
-              null,
-              parseDate(item.fecha_baja),
-              item.vendedor_nombre,
-              item.vendedor_email,
-              parseDate(item.fecha_venta),
-              item.documento_beneficiario,
-              item.documento_cobranza,
-              item.telefono_venta,
-              item.telefono_fijo,
-              item.telefono_celular,
-              item.telefono_alternativo,
-              item.consulta_estado,
-              item.evaluacion,
-              item.auditoria_ok,
-              item.auditoria_comentario,
-              item.nombre_asesor,
-              parseDate(item.fecha_nacimiento),
-              item.departamento_residencia,
-              item.nombre_familiar,
-              item.apellido_familiar,
-              item.telefono_familiar,
-              item.parentesco,
-              importStatus,
-              errors.length ? JSON.stringify(errors) : null,
-              item
-            ]
+            [productNames.map((name) => name.toLowerCase())]
+          );
+          const existingSet = new Set(
+            existingProducts.rows.map((row) => row.nombre)
+          );
+          missingProducts = productNames.filter(
+            (name) => !existingSet.has(name.toLowerCase())
           );
         }
 
@@ -8644,14 +8849,14 @@ export const handler = async (event) => {
               updated_at = now()
           WHERE id = $5
           `,
-          [rows.length, validRows, errorRows, missingDocumentoRows, batch.id]
+          [totalRows, validRows, errorRows, missingDocumentoRows, batch.id]
         );
 
         await client.query("COMMIT");
         return json(201, {
           ok: true,
           batchId: batch.id,
-          total: rows.length,
+          total: totalRows,
           valid: validRows,
           errors: errorRows,
           rejectedMissingDocumento: missingDocumentoRows,
