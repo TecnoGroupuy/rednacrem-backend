@@ -20,12 +20,14 @@ async function requeue(jobId, startAt) {
 }
 
 export const handler = async (event) => {
+  console.log("WORKER EVENT", JSON.stringify(event, null, 2));
   if (!event?.Records?.length) return;
   for (const record of event.Records) {
     const body = record.body ? JSON.parse(record.body) : {};
     const jobId = body.jobId;
     const startAt = Number.isInteger(body.startAt) ? body.startAt : undefined;
     if (!jobId) continue;
+    console.log("WORKER JOB", JSON.stringify({ jobId, startAt }));
     await processNoCallJob(jobId, {
       startAt,
       maxMillis: MAX_MILLIS,
