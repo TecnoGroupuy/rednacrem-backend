@@ -900,19 +900,24 @@ export async function processNoCallJob(jobId, options = {}) {
       );
     }
 
+    const finalStatus =
+      totalRows > 0 && inserted === 0 && skipped > 0
+        ? "failed"
+        : "completed";
+
     await client.query(
       `
       UPDATE no_call_import_jobs
-      SET status = 'completed',
-          processed_rows = $1,
-          inserted_rows = $2,
-          skipped_rows = $3,
-          total_rows = $4,
+      SET status = $1,
+          processed_rows = $2,
+          inserted_rows = $3,
+          skipped_rows = $4,
+          total_rows = $5,
           completed_at = now(),
           updated_at = now()
-      WHERE id = $5
+      WHERE id = $6
       `,
-      [index, inserted, skipped, totalRows, jobId]
+      [finalStatus, index, inserted, skipped, totalRows, jobId]
     );
     await client.end();
   } catch (error) {
@@ -7993,17 +7998,22 @@ export const handler = async (event) => {
           `
         );
 
+        const finalStatus =
+          rows.length > 0 && inserted === 0 && skipped > 0
+            ? "failed"
+            : "processed";
+
         await client.query(
           `
           UPDATE contact_import_batches
           SET total_rows = $1,
               valid_rows = $2,
               error_rows = $3,
-              status = 'processed',
+              status = $4,
               updated_at = now()
-          WHERE id = $4
+          WHERE id = $5
           `,
-          [rows.length, inserted, skipped, batch.id]
+          [rows.length, inserted, skipped, finalStatus, batch.id]
         );
 
         await client.query("COMMIT");
@@ -8492,13 +8502,15 @@ export const handler = async (event) => {
           );
           inserted += 1;
         }
+        const finalStatus = rows.length === 0 ? "failed" : "processed";
+
         await client.query(
           `
           UPDATE contact_import_batches
           SET valid_rows = $2, error_rows = $3, status = $4
           WHERE id = $1
           `,
-          [batchId, inserted, 0, "processed"]
+          [batchId, inserted, 0, finalStatus]
         );
         await client.query("COMMIT");
         return json(201, {
@@ -8838,6 +8850,11 @@ export const handler = async (event) => {
           );
         }
 
+        const finalStatus =
+          totalRows > 0 && validRows === 0 && errorRows > 0
+            ? "failed"
+            : "validated";
+
         await client.query(
           `
           UPDATE contact_import_batches
@@ -8845,11 +8862,11 @@ export const handler = async (event) => {
               valid_rows = $2,
               error_rows = $3,
               rejected_missing_documento = $4,
-              status = 'validated',
+              status = $5,
               updated_at = now()
-          WHERE id = $5
+          WHERE id = $6
           `,
-          [totalRows, validRows, errorRows, missingDocumentoRows, batch.id]
+          [totalRows, validRows, errorRows, missingDocumentoRows, finalStatus, batch.id]
         );
 
         await client.query("COMMIT");
