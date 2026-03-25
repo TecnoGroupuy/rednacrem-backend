@@ -3074,8 +3074,7 @@ async function getClientDetailData(clientId) {
         apellido,
         telefono,
         parentesco,
-        created_at,
-        updated_at
+        created_at
       FROM contact_relatives
       WHERE contact_id = $1
       ORDER BY created_at ASC
@@ -3090,9 +3089,7 @@ async function getClientDetailData(clientId) {
       telefono: row.telefono,
       parentesco: row.parentesco,
       createdAt: row.created_at,
-      created_at: row.created_at,
-      updatedAt: row.updated_at,
-      updated_at: row.updated_at
+      created_at: row.created_at
     }));
 
     return {
