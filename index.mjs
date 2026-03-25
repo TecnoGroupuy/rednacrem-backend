@@ -9849,6 +9849,50 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/supervisor/agents")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const search = normalizeText(getQueryParam(event, "search") || "");
+      const items = await listUsersService({
+        role: "vendedor",
+        status: "approved",
+        search: search || null
+      });
+
+      const mapped = items.map((user) => ({
+        id: user.id,
+        nombre: user.nombre,
+        apellido: user.apellido,
+        email: user.email,
+        status: "Activo"
+      }));
+
+      return json(200, {
+        ok: true,
+        agents: mapped
+      });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list agents",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/sellers")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
