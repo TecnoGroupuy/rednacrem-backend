@@ -6427,7 +6427,7 @@ export const handler = async (event) => {
             d.direccion,
             d.departamento,
             d.localidad,
-            d.pais,
+            NULL::text AS pais,
             d.origen_dato,
             lcs.estado_venta,
             lcs.intentos,
