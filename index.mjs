@@ -8226,7 +8226,7 @@ export const handler = async (event) => {
             `
             INSERT INTO lead_batch_sellers (batch_id, seller_id)
             VALUES ($1, $2)
-            ON CONFLICT (batch_id, seller_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             `,
             [batchId, sid]
           );
@@ -8364,7 +8364,7 @@ export const handler = async (event) => {
             `
             INSERT INTO lead_batch_sellers (batch_id, seller_id)
             VALUES ($1, $2)
-            ON CONFLICT (batch_id, seller_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             `,
             [batchId, resolvedSellerId]
           );
