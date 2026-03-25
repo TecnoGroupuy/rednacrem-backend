@@ -8240,6 +8240,67 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "DELETE" && path.match(/\/imports\/no-llamar\/jobs\/([^/]+)$/)) {
+    const match = path.match(/\/imports\/no-llamar\/jobs\/([^/]+)$/);
+    const jobId = match?.[1];
+    if (!jobId) {
+      return json(400, { ok: false, message: "Job id requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const statusRes = await client.query(
+          `
+          SELECT status
+          FROM no_call_import_jobs
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [jobId]
+        );
+        if (!statusRes.rows.length) {
+          return json(404, { ok: false, message: "Job no encontrado" });
+        }
+        const status = statusRes.rows[0]?.status || "";
+        if (status === "processing") {
+          return json(409, { ok: false, message: "El job está en proceso" });
+        }
+        const deleted = await client.query(
+          `
+          DELETE FROM no_call_import_jobs
+          WHERE id = $1
+          `,
+          [jobId]
+        );
+        return json(200, { ok: true, deleted: deleted.rowCount || 0 });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to delete no-llamar job",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.match(/\/imports\/no-llamar\/jobs\/([^/]+)$/)) {
     const match = path.match(/\/imports\/no-llamar\/jobs\/([^/]+)$/);
     const jobId = match?.[1];
@@ -8947,6 +9008,63 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to load import rows",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "DELETE" && path.match(/\/imports\/clients\/([^/]+)$/)) {
+    const match = path.match(/\/imports\/clients\/([^/]+)$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `
+          DELETE FROM contact_import_rows
+          WHERE batch_id = $1
+          `,
+          [batchId]
+        );
+        const deleteBatch = await client.query(
+          `
+          DELETE FROM contact_import_batches
+          WHERE id = $1
+          `,
+          [batchId]
+        );
+        await client.query("COMMIT");
+        return json(200, { ok: true, deleted: deleteBatch.rowCount || 0 });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to delete import batch",
         error: error.message
       });
     }
