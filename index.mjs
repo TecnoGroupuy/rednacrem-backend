@@ -3445,8 +3445,18 @@ async function getCurrentDbUserFromEvent(event) {
   }
 
   let dbUser = null;
-  if (authUser?.claims) {
-    dbUser = await findCurrentUserFromClaims(authUser.claims);
+  const baseClaims = authUser?.claims || {};
+  const mergedClaims = {
+    ...baseClaims,
+    sub: authUser?.sub || baseClaims.sub || null,
+    email: authUser?.email || baseClaims.email || null,
+    name: authUser?.name || baseClaims.name || null,
+    given_name: authUser?.given_name || baseClaims.given_name || null,
+    family_name: authUser?.family_name || baseClaims.family_name || null,
+    "cognito:groups": authUser?.groups || baseClaims["cognito:groups"] || baseClaims.groups || []
+  };
+  if (authUser?.claims || authUser?.sub || authUser?.email) {
+    dbUser = await findCurrentUserFromClaims(mergedClaims);
   } else {
     dbUser = await getUserByAuthUser(authUser);
   }
@@ -5170,15 +5180,17 @@ export const handler = async (event) => {
     }
 
     try {
-      const claims = authUser?.claims || {
-        sub: authUser?.sub || null,
-        email: authUser?.email || null,
-        name: authUser?.name || null,
-        given_name: authUser?.given_name || null,
-        family_name: authUser?.family_name || null,
-        "cognito:groups": authUser?.groups || []
+      const baseClaims = authUser?.claims || {};
+      const mergedClaims = {
+        ...baseClaims,
+        sub: authUser?.sub || baseClaims.sub || null,
+        email: authUser?.email || baseClaims.email || null,
+        name: authUser?.name || baseClaims.name || null,
+        given_name: authUser?.given_name || baseClaims.given_name || null,
+        family_name: authUser?.family_name || baseClaims.family_name || null,
+        "cognito:groups": authUser?.groups || baseClaims["cognito:groups"] || baseClaims.groups || []
       };
-      const dbUser = await findCurrentUserFromClaims(claims);
+      const dbUser = await findCurrentUserFromClaims(mergedClaims);
 
       if (!dbUser) {
         return json(404, {
