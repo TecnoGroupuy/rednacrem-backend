@@ -65,6 +65,26 @@ async function enqueueNoCallJob(jobId, startAt) {
   );
 }
 
+function getDatosTrabajarQueueUrl() {
+  return process.env.DATOS_TRABAJAR_IMPORT_QUEUE_URL || process.env.NO_CALL_IMPORT_QUEUE_URL || "";
+}
+
+async function enqueueDatosTrabajarJob(jobId, startAt) {
+  const queueUrl = getDatosTrabajarQueueUrl();
+  if (!queueUrl) {
+    throw new Error("DATOS_TRABAJAR_IMPORT_QUEUE_URL not set");
+  }
+  const payload = startAt
+    ? { jobId, startAt, type: "datos_para_trabajar" }
+    : { jobId, type: "datos_para_trabajar" };
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(payload),
+    })
+  );
+}
+
 const VALID_USER_STATUSES = [
   "pending",
   "approved",
@@ -1628,6 +1648,254 @@ function validateImportRow(item) {
     errors.push("documento requerido");
   }
   return errors;
+}
+
+async function ensureDatosTrabajarJobTable(client) {
+  await client.query(
+    `
+    CREATE TABLE IF NOT EXISTS datos_para_trabajar_import_jobs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      batch_id uuid,
+      file_name text,
+      status text,
+      total_rows int,
+      processed_rows int,
+      inserted_rows int,
+      blocked_rows int,
+      skipped_rows int,
+      csv_text text,
+      created_by uuid,
+      error_message text,
+      started_at timestamptz,
+      completed_at timestamptz,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
+    )
+    `
+  );
+}
+
+function buildDatosTrabajarInsertBatch(batchRows) {
+  const columns = [
+    "nombre",
+    "apellido",
+    "documento",
+    "fecha_nacimiento",
+    "telefono",
+    "celular",
+    "email",
+    "direccion",
+    "departamento",
+    "localidad",
+    "origen_dato",
+    "estado"
+  ];
+  const values = [];
+  const placeholders = batchRows.map((row, index) => {
+    const base = index * columns.length;
+    values.push(...row);
+    const params = columns.map((_, colIndex) => `$${base + colIndex + 1}`);
+    return `(${params.join(", ")})`;
+  });
+  return {
+    sql: `
+      INSERT INTO datos_para_trabajar (${columns.join(", ")})
+      VALUES ${placeholders.join(", ")}
+    `,
+    values
+  };
+}
+
+export async function processDatosTrabajarJob(jobId, options = {}) {
+  const client = createDbClient();
+  await client.connect();
+
+  try {
+    const jobRes = await client.query(
+      `
+      SELECT id, batch_id, csv_text, processed_rows, inserted_rows, blocked_rows, skipped_rows
+      FROM datos_para_trabajar_import_jobs
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [jobId]
+    );
+    if (!jobRes.rows.length) return;
+
+    const job = jobRes.rows[0];
+    const csvText = job.csv_text || "";
+    const { rows } = mapDatosParaTrabajarCsv(csvText);
+    const totalRows = rows.length;
+
+    let index = options.startAt ?? job.processed_rows ?? 0;
+    let inserted = job.inserted_rows ?? 0;
+    let blocked = job.blocked_rows ?? 0;
+    let skipped = job.skipped_rows ?? 0;
+
+    await client.query(
+      `
+      UPDATE datos_para_trabajar_import_jobs
+      SET status = 'processing',
+          total_rows = $1,
+          processed_rows = $2,
+          inserted_rows = $3,
+          blocked_rows = $4,
+          skipped_rows = $5,
+          error_message = NULL,
+          started_at = now(),
+          updated_at = now()
+      WHERE id = $6
+      `,
+      [totalRows, index, inserted, blocked, skipped, jobId]
+    );
+
+    const normalizedNumbers = new Set();
+    for (const row of rows) {
+      const tel = normalizeUyNumber(row.telefono);
+      const cel = normalizeUyNumber(row.celular);
+      if (tel) normalizedNumbers.add(tel);
+      if (cel) normalizedNumbers.add(cel);
+    }
+
+    let blockedNumbers = new Set();
+    if (normalizedNumbers.size) {
+      const normalizedList = Array.from(normalizedNumbers);
+      const res = await client.query(
+        `SELECT numero FROM no_call_entries WHERE numero = ANY($1::text[])`,
+        [normalizedList]
+      );
+      blockedNumbers = new Set(res.rows.map((r) => r.numero));
+
+      const contactsRes = await client.query(
+        `
+        SELECT telefono, celular
+        FROM contacts
+        WHERE telefono = ANY($1::text[])
+           OR celular = ANY($1::text[])
+        `,
+        [normalizedList]
+      );
+      for (const row of contactsRes.rows) {
+        if (row.telefono) blockedNumbers.add(row.telefono);
+        if (row.celular) blockedNumbers.add(row.celular);
+      }
+    }
+
+    const maxMillis = options.maxMillis ?? null;
+    const startedAt = Date.now();
+    const batchSize = options.batchSize ?? 200;
+    let buffer = [];
+
+    for (let i = index; i < rows.length; i += 1) {
+      const row = rows[i];
+      const tel = normalizeUyNumber(row.telefono);
+      const cel = normalizeUyNumber(row.celular);
+      const isBlocked =
+        (tel && blockedNumbers.has(tel)) || (cel && blockedNumbers.has(cel));
+
+      buffer.push([
+        row.nombre || null,
+        row.apellido || null,
+        row.documento || null,
+        row.fecha_nacimiento || null,
+        row.telefono || null,
+        row.celular || null,
+        row.correo_electronico || row.email || null,
+        row.direccion || null,
+        row.departamento || null,
+        row.localidad || null,
+        row.origen_dato || null,
+        isBlocked ? "bloqueado" : "nuevo"
+      ]);
+
+      if (isBlocked) blocked += 1;
+      inserted += 1;
+      index += 1;
+
+      if (buffer.length >= batchSize) {
+        const { sql, values } = buildDatosTrabajarInsertBatch(buffer);
+        await client.query(sql, values);
+        buffer = [];
+      }
+
+      if (maxMillis && Date.now() - startedAt > maxMillis) {
+        if (buffer.length) {
+          const { sql, values } = buildDatosTrabajarInsertBatch(buffer);
+          await client.query(sql, values);
+        }
+        await client.query(
+          `
+          UPDATE datos_para_trabajar_import_jobs
+          SET processed_rows = $1,
+              inserted_rows = $2,
+              blocked_rows = $3,
+              skipped_rows = $4,
+              total_rows = $5,
+              updated_at = now()
+          WHERE id = $6
+          `,
+          [index, inserted, blocked, skipped, totalRows, jobId]
+        );
+        if (typeof options.requeue === "function") {
+          await options.requeue(index);
+        }
+        await client.end();
+        return;
+      }
+    }
+
+    if (buffer.length) {
+      const { sql, values } = buildDatosTrabajarInsertBatch(buffer);
+      await client.query(sql, values);
+    }
+
+    await client.query(
+      `
+      UPDATE datos_para_trabajar_import_jobs
+      SET status = 'completed',
+          processed_rows = $1,
+          inserted_rows = $2,
+          blocked_rows = $3,
+          skipped_rows = $4,
+          total_rows = $5,
+          completed_at = now(),
+          updated_at = now()
+      WHERE id = $6
+      `,
+      [index, inserted, blocked, skipped, totalRows, jobId]
+    );
+
+    if (job.batch_id) {
+      await client.query(
+        `
+        UPDATE contact_import_batches
+        SET total_rows = $1,
+            valid_rows = $2,
+            error_rows = $3,
+            status = 'processed',
+            updated_at = now()
+        WHERE id = $4
+        `,
+        [totalRows, inserted, 0, job.batch_id]
+      );
+    }
+  } catch (error) {
+    try {
+      await client.query(
+        `
+        UPDATE datos_para_trabajar_import_jobs
+        SET status = 'failed',
+            error_message = $1,
+            completed_at = now(),
+            updated_at = now()
+        WHERE id = $2
+        `,
+        [error.message, jobId]
+      );
+    } catch {}
+  } finally {
+    await client.end();
+  }
 }
 
 async function processClientImportBatch(batchId, { createProducts = true } = {}) {
@@ -8930,99 +9198,51 @@ export const handler = async (event) => {
           }
         }
         const batchId = batchRes.rows[0]?.id || null;
-        let inserted = 0;
-        let blockedCount = 0;
-        const normalizedNumbers = new Set();
-        for (const row of rows) {
-          const tel = normalizeUyNumber(row.telefono);
-          const cel = normalizeUyNumber(row.celular);
-          if (tel) normalizedNumbers.add(tel);
-          if (cel) normalizedNumbers.add(cel);
+        await ensureDatosTrabajarJobTable(client);
+        const jobRes = await client.query(
+          `
+          INSERT INTO datos_para_trabajar_import_jobs (
+            batch_id,
+            file_name,
+            status,
+            total_rows,
+            processed_rows,
+            inserted_rows,
+            blocked_rows,
+            skipped_rows,
+            csv_text,
+            created_by
+          )
+          VALUES ($1, $2, 'queued', $3, 0, 0, 0, 0, $4, $5)
+          RETURNING id
+          `,
+          [batchId, fileName, rows.length, csvText, dbUser?.id || null]
+        );
+
+        const jobId = jobRes.rows[0]?.id || null;
+        if (!jobId) {
+          throw new Error("Failed to create datos_para_trabajar job");
         }
-
-        let blockedNumbers = new Set();
-        if (normalizedNumbers.size) {
-          const normalizedList = Array.from(normalizedNumbers);
-          const res = await client.query(
-            `SELECT numero FROM no_call_entries WHERE numero = ANY($1::text[])`,
-            [normalizedList]
-          );
-          blockedNumbers = new Set(res.rows.map((r) => r.numero));
-
-          const contactsRes = await client.query(
-            `
-            SELECT telefono, celular
-            FROM contacts
-            WHERE telefono = ANY($1::text[])
-               OR celular = ANY($1::text[])
-            `,
-            [normalizedList]
-          );
-          for (const row of contactsRes.rows) {
-            if (row.telefono) blockedNumbers.add(row.telefono);
-            if (row.celular) blockedNumbers.add(row.celular);
-          }
-        }
-
-        for (const row of rows) {
-          const tel = normalizeUyNumber(row.telefono);
-          const cel = normalizeUyNumber(row.celular);
-          const isBlocked =
-            (tel && blockedNumbers.has(tel)) || (cel && blockedNumbers.has(cel));
-
-          await client.query(
-            `
-            INSERT INTO datos_para_trabajar (
-              nombre,
-              apellido,
-              documento,
-              fecha_nacimiento,
-              telefono,
-              celular,
-              email,
-              direccion,
-              departamento,
-              localidad,
-              origen_dato,
-              estado
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-            `,
-            [
-              row.nombre || null,
-              row.apellido || null,
-              row.documento || null,
-              row.fecha_nacimiento || null,
-              row.telefono || null,
-              row.celular || null,
-              row.correo_electronico || row.email || null,
-              row.direccion || null,
-              row.departamento || null,
-              row.localidad || null,
-              row.origen_dato || null,
-              isBlocked ? "bloqueado" : "nuevo"
-            ]
-          );
-          inserted += 1;
-          if (isBlocked) blockedCount += 1;
-        }
-        const finalStatus = rows.length === 0 ? "failed" : "processed";
+        await enqueueDatosTrabajarJob(jobId);
 
         await client.query(
           `
           UPDATE contact_import_batches
-          SET valid_rows = $2, error_rows = $3, status = $4
+          SET status = 'processing',
+              total_rows = $2,
+              valid_rows = 0,
+              error_rows = 0,
+              updated_at = now()
           WHERE id = $1
           `,
-          [batchId, inserted, 0, finalStatus]
+          [batchId, rows.length]
         );
         await client.query("COMMIT");
         return json(201, {
           ok: true,
           batchId,
+          jobId,
           total: rows.length,
-          inserted,
-          blockedCount,
           ignoredEmptyRows
         });
       } catch (error) {
