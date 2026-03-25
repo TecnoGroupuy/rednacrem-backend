@@ -7993,7 +7993,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path === "/datos-para-trabajar/list") {
+  if (method === "GET" && path.endsWith("/datos-para-trabajar/list")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
