@@ -2879,7 +2879,7 @@ async function getClientDocumentData(clientId) {
     const userSelect = metadata.hasUsersTable
       ? "u.nombre AS seller_nombre, u.apellido AS seller_apellido"
       : "NULL::text AS seller_nombre, NULL::text AS seller_apellido";
-    const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_id" : "";
+    const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_user_id" : "";
 
     const result = await client.query(
       `
@@ -2893,11 +2893,11 @@ async function getClientDocumentData(clientId) {
         cp.cuotas_pagas,
         cp.carencia_cuotas,
         s.id AS sale_id,
-        s.fecha AS sale_fecha,
+        s.created_at AS sale_fecha,
         s.medio_pago,
         s.seller_origin,
         s.seller_name_snapshot,
-        s.seller_id,
+        s.seller_user_id AS seller_id,
         ${userSelect}
       FROM contacts c
       LEFT JOIN LATERAL (
@@ -2983,17 +2983,17 @@ async function getClientDetailData(clientId) {
     const userSelect = metadata.hasUsersTable
       ? "u.nombre AS seller_nombre, u.apellido AS seller_apellido"
       : "NULL::text AS seller_nombre, NULL::text AS seller_apellido";
-    const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_id" : "";
+    const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_user_id" : "";
 
     const productsResult = await client.query(
       `
       SELECT
         cp.*,
-        s.fecha AS sale_fecha,
+        s.created_at AS sale_fecha,
         s.medio_pago,
         s.seller_origin,
         s.seller_name_snapshot,
-        s.seller_id,
+        s.seller_user_id AS seller_id,
         ${userSelect}
       FROM contact_products cp
       LEFT JOIN sales s
@@ -3043,7 +3043,7 @@ async function getClientDetailData(clientId) {
       FROM sales s
       ${userJoin}
       WHERE s.contact_id = $1
-      ORDER BY s.fecha DESC NULLS LAST, s.created_at DESC
+      ORDER BY s.created_at DESC
       `,
       [clientId]
     );
@@ -3055,8 +3055,8 @@ async function getClientDetailData(clientId) {
 
       return {
         id: row.id,
-        fecha: row.fecha,
-        fecha_alta: row.fecha,
+        fecha: row.created_at,
+        fecha_alta: row.created_at,
         medioPago: row.medio_pago,
         medio_pago: row.medio_pago,
         sellerName,
@@ -4880,8 +4880,7 @@ export const handler = async (event) => {
           SELECT
             s.id,
             s.contact_id,
-            s.seller_id,
-            s.fecha,
+            s.seller_user_id AS seller_id,
             s.created_at,
             s.medio_pago,
             s.seller_name_snapshot,
@@ -4890,21 +4889,21 @@ export const handler = async (event) => {
             c.telefono,
             c.celular,
             si.product_id,
-            si.precio_unitario,
-            p.nombre AS producto_nombre
+            si.price,
+            COALESCE(p.nombre, si.product_name_snapshot) AS producto_nombre
           FROM sales s
           JOIN contacts c ON c.id = s.contact_id
           LEFT JOIN LATERAL (
-            SELECT product_id, precio_unitario
+            SELECT product_id, price, product_name_snapshot
             FROM sale_items
             WHERE sale_id = s.id
             ORDER BY created_at DESC NULLS LAST
             LIMIT 1
           ) si ON true
           LEFT JOIN products p ON p.id = si.product_id
-          WHERE s.seller_id = $1
+          WHERE s.seller_user_id = $1
              OR ($2 <> '' AND s.seller_name_snapshot ILIKE $3)
-          ORDER BY s.created_at DESC NULLS LAST, s.fecha DESC
+          ORDER BY s.created_at DESC NULLS LAST
           `,
           [sellerId, sellerName, sellerNamePattern]
         );
@@ -4916,10 +4915,10 @@ export const handler = async (event) => {
           telefono: row.celular || row.telefono || "",
           producto_id: row.product_id || null,
           producto_nombre: row.producto_nombre || null,
-          cuota: row.precio_unitario !== null && row.precio_unitario !== undefined
-            ? Number(row.precio_unitario)
+          cuota: row.price !== null && row.price !== undefined
+            ? Number(row.price)
             : null,
-          fecha_venta: row.fecha || null,
+          fecha_venta: row.created_at || null,
           fecha_venta_at: row.created_at || null,
           medio_pago: row.medio_pago || null
         }));
