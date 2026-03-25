@@ -3444,7 +3444,12 @@ async function getCurrentDbUserFromEvent(event) {
     return { authUser, dbUser: null };
   }
 
-  let dbUser = await getUserByAuthUser(authUser);
+  let dbUser = null;
+  if (authUser?.claims) {
+    dbUser = await findCurrentUserFromClaims(authUser.claims);
+  } else {
+    dbUser = await getUserByAuthUser(authUser);
+  }
 
   if (!dbUser && authUser?.localDev) {
     const client = createDbClient();
