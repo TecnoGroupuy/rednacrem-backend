@@ -191,7 +191,11 @@ function normalizeGroups(groups) {
   if (!groups) return [];
   if (Array.isArray(groups)) return groups;
   if (typeof groups === "string") {
-    return groups.split(",").map((g) => g.trim()).filter(Boolean);
+    return groups
+      .replace(/[\[\]"]/g, " ")
+      .split(/[\s,]+/)
+      .map((g) => g.trim())
+      .filter(Boolean);
   }
   return [];
 }
