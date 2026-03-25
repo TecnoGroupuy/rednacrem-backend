@@ -7198,32 +7198,40 @@ export const handler = async (event) => {
           [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
 
-        await client.query(
-          `
-          INSERT INTO lead_contact_status (
-            contact_id,
-            estado_venta,
-            intentos,
-            proxima_accion,
-            batch_id,
-            assigned_to,
-            ola_actual,
-            ultimo_intento_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-          ON CONFLICT (contact_id)
-          DO UPDATE SET
-            estado_venta = EXCLUDED.estado_venta,
-            intentos = EXCLUDED.intentos,
-            proxima_accion = EXCLUDED.proxima_accion,
-            batch_id = COALESCE(lead_contact_status.batch_id, EXCLUDED.batch_id),
-            assigned_to = COALESCE(lead_contact_status.assigned_to, EXCLUDED.assigned_to),
-            ola_actual = $7,
-            ultimo_intento_at = now(),
-            updated_at = now()
-          `,
-          [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
-        );
+          const updateLeadStatus = await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = $2,
+                intentos = $3,
+                proxima_accion = $4,
+                batch_id = COALESCE(lead_contact_status.batch_id, $5),
+                assigned_to = COALESCE(lead_contact_status.assigned_to, $6),
+                ola_actual = $7,
+                ultimo_intento_at = now(),
+                updated_at = now()
+            WHERE contact_id = $1
+            RETURNING contact_id
+            `,
+            [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+          );
+          if (!updateLeadStatus.rows.length) {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                proxima_accion,
+                batch_id,
+                assigned_to,
+                ola_actual,
+                ultimo_intento_at
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+              `,
+              [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+            );
+          }
 
         if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
           await client.query(
@@ -8628,26 +8636,34 @@ export const handler = async (event) => {
             [batchId, contactId]
           );
 
-          await client.query(
+          const updateStatus = await client.query(
             `
-            INSERT INTO lead_contact_status (
-              contact_id,
-              estado_venta,
-              intentos,
-              batch_id,
-              assigned_to
-            )
-            VALUES ($1, 'nuevo', 0, $2, $3)
-            ON CONFLICT (contact_id)
-            DO UPDATE SET
-              batch_id = EXCLUDED.batch_id,
-              assigned_to = EXCLUDED.assigned_to,
-              estado_venta = 'nuevo',
-              intentos = 0,
-              updated_at = now()
+            UPDATE lead_contact_status
+            SET batch_id = $2,
+                assigned_to = $3,
+                estado_venta = 'nuevo',
+                intentos = 0,
+                updated_at = now()
+            WHERE contact_id = $1
+            RETURNING contact_id
             `,
             [contactId, batchId, assignedTo]
           );
+          if (!updateStatus.rows.length) {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                batch_id,
+                assigned_to
+              )
+              VALUES ($1, 'nuevo', 0, $2, $3)
+              `,
+              [contactId, batchId, assignedTo]
+            );
+          }
         }
 
         await client.query(
