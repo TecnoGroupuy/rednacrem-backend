@@ -1894,18 +1894,16 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             `
             INSERT INTO sales (
               contact_id,
-              seller_id,
               fecha,
               medio_pago,
               seller_name_snapshot,
               seller_origin
             )
-            VALUES ($1, $2, $3, $4, $5, 'importado')
+            VALUES ($1, $2, $3, $4, 'importado')
             RETURNING id
             `,
             [
               contact.id,
-              null,
               fechaVenta || new Date().toISOString().slice(0, 10),
               row.medio_pago || null,
               row.vendedor_nombre || null
