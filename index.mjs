@@ -1894,7 +1894,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             `
             INSERT INTO sales (
               contact_id,
-              fecha,
+              seller_user_id,
               medio_pago,
               seller_name_snapshot,
               seller_origin
@@ -1904,7 +1904,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             `,
             [
               contact.id,
-              fechaVenta || new Date().toISOString().slice(0, 10),
+              null,
               row.medio_pago || null,
               row.vendedor_nombre || null
             ]
@@ -4693,19 +4693,17 @@ export const handler = async (event) => {
               `
               INSERT INTO sales (
                 contact_id,
-                seller_id,
-                fecha,
+                seller_user_id,
                 medio_pago,
                 seller_name_snapshot,
                 seller_origin
               )
-              VALUES ($1, $2, $3, $4, $5, $6)
+              VALUES ($1, $2, $3, $4, $5)
               RETURNING id
               `,
               [
                 contactId,
-                sellerId,
-                fechaAlta,
+                sellerId || null,
                 medioPago,
                 sellerNameSnapshot,
                 sellerOrigin
