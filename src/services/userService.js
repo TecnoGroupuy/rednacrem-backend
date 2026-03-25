@@ -69,13 +69,26 @@ async function ensureUserRole(user, desiredRole) {
 }
 
 export async function findCurrentUserFromClaims(claims) {
+  console.log("[DEBUG_ME] claims completos:", JSON.stringify({
+    sub: claims?.sub,
+    username: claims?.username,
+    email: claims?.email,
+    given_name: claims?.given_name,
+    token_use: claims?.token_use,
+    iss: claims?.iss
+  }));
+
   const sub = claims.sub || claims.username;
   const email = claims.email ? String(claims.email).toLowerCase() : null;
+
+  console.log("[DEBUG_ME] sub resuelto:", sub);
+  console.log("[DEBUG_ME] email resuelto:", email);
   const groups = normalizeGroups(claims);
   const desiredRole = pickRoleFromGroups(groups);
 
   if (sub) {
     const bySub = await findUserByCognitoSub(sub);
+    console.log("[DEBUG_ME] bySub resultado:", bySub ? bySub.id : "null");
     if (bySub) {
       return await ensureUserRole(bySub, desiredRole);
     }
@@ -83,6 +96,7 @@ export async function findCurrentUserFromClaims(claims) {
 
   if (email) {
     const byEmail = await findUserByEmail(email);
+    console.log("[DEBUG_ME] byEmail resultado:", byEmail ? byEmail.id : "null");
     if (byEmail) {
       if (sub && !byEmail.cognito_sub) {
         await updateUserById(byEmail.id, { cognito_sub: sub });
