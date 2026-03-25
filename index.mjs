@@ -10,7 +10,7 @@ import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
 import { normalizePhone } from "./src/lib/validation.js";
-import { createManualUser, updateUser } from "./src/services/userService.js";
+import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
@@ -7142,7 +7142,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path === "/lead-sources") {
+  if (method === "GET" && path.endsWith("/lead-sources")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -7189,7 +7189,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path === "/departamentos") {
+  if (method === "GET" && path.endsWith("/departamentos")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -7236,7 +7236,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path === "/localidades") {
+  if (method === "GET" && path.endsWith("/localidades")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -7294,7 +7294,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path === "/area-codes") {
+  if (method === "GET" && path.endsWith("/area-codes")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -7353,7 +7353,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path === "/datos-para-trabajar/preview") {
+  if (method === "GET" && (path.endsWith("/datos-para-trabajar/preview") || path.endsWith("/preview"))) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -8931,6 +8931,52 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to create no-llamar job",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/sellers")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const search = normalizeText(getQueryParam(event, "search") || "");
+      const items = await listUsersService({
+        role: "vendedor",
+        status: "approved",
+        search: search || null
+      });
+
+      const mapped = items.map((user) => ({
+        id: user.id,
+        nombre: user.nombre,
+        apellido: user.apellido,
+        email: user.email,
+        telefono: user.telefono
+      }));
+
+      return json(200, {
+        ok: true,
+        success: true,
+        data: mapped,
+        items: mapped
+      });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list sellers",
         error: error.message
       });
     }
