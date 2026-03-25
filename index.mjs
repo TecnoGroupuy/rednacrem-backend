@@ -12,6 +12,7 @@ import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./s
 import { normalizePhone } from "./src/lib/validation.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
 import { emitRealtime } from "./src/monitoring/realtimeBus.js";
+import { findCurrentUserFromClaims } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
@@ -5160,7 +5161,15 @@ export const handler = async (event) => {
     }
 
     try {
-      const dbUser = await getUserByAuthUser(authUser);
+      const claims = authUser?.claims || {
+        sub: authUser?.sub || null,
+        email: authUser?.email || null,
+        name: authUser?.name || null,
+        given_name: authUser?.given_name || null,
+        family_name: authUser?.family_name || null,
+        "cognito:groups": authUser?.groups || []
+      };
+      const dbUser = await findCurrentUserFromClaims(claims);
 
       if (!dbUser) {
         return json(404, {
