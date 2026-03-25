@@ -11,6 +11,7 @@ import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
 import { normalizePhone } from "./src/lib/validation.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
+import { emitRealtime } from "./src/monitoring/realtimeBus.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
@@ -1304,6 +1305,494 @@ function parseDate(value) {
   const month = String(parsed.getMonth() + 1).padStart(2, "0");
   const day = String(parsed.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+const LOCAL_TZ = process.env.APP_TIMEZONE || process.env.TIMEZONE || "America/Montevideo";
+
+function formatDateYmd(date, tz = LOCAL_TZ) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function formatTimeHm(date, tz = LOCAL_TZ) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function parseFechaParam(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text || text === "hoy") {
+    return formatDateYmd(new Date());
+  }
+  return text;
+}
+
+function minutesBetween(start, end) {
+  if (!start || !end) return 0;
+  const diff = end.getTime() - start.getTime();
+  return Math.max(0, Math.round(diff / 60000));
+}
+
+function timeToMinutes(value) {
+  if (!value) return 0;
+  const [h, m] = String(value).split(":").map((v) => Number(v));
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+}
+
+function computeConversion(ventas, llamadas) {
+  if (!llamadas) return 0;
+  return Math.round((ventas / llamadas) * 1000) / 10;
+}
+
+async function getConfigMap(client) {
+  const result = await client.query("SELECT clave, valor FROM configuracion");
+  const map = {};
+  for (const row of result.rows) {
+    const num = Number(row.valor);
+    map[row.clave] = Number.isNaN(num) ? row.valor : num;
+  }
+  return {
+    limite_bano_minutos: Number(map.limite_bano_minutos ?? 10),
+    limite_descanso_minutos: Number(map.limite_descanso_minutos ?? 15),
+    conversion_minima_porcentaje: Number(map.conversion_minima_porcentaje ?? 10),
+    conversion_excelente_porcentaje: Number(map.conversion_excelente_porcentaje ?? 16),
+    meta_llamadas_dia: Number(map.meta_llamadas_dia ?? 40),
+    meta_ventas_dia: Number(map.meta_ventas_dia ?? 6)
+  };
+}
+
+async function getTeamSummary(client, fecha, now = new Date()) {
+  const config = await getConfigMap(client);
+  const agentsRes = await client.query(
+    `SELECT * FROM agentes WHERE activo = true ORDER BY nombre`
+  );
+  const agents = agentsRes.rows;
+  const agentIds = agents.map((a) => a.id);
+
+  const eventsRes = agentIds.length
+    ? await client.query(
+      `
+      SELECT *
+      FROM eventos_turno
+      WHERE fecha = $1
+        AND agente_id = ANY($2::uuid[])
+      ORDER BY inicio ASC
+      `,
+      [fecha, agentIds]
+    )
+    : { rows: [] };
+
+  const callsRes = agentIds.length
+    ? await client.query(
+      `
+      SELECT
+        agente_id,
+        COUNT(*)::int AS total_llamadas,
+        COUNT(*) FILTER (WHERE resultado = 'venta')::int AS total_ventas
+      FROM llamadas
+      WHERE fecha = $1
+        AND agente_id = ANY($2::uuid[])
+      GROUP BY agente_id
+      `,
+      [fecha, agentIds]
+    )
+    : { rows: [] };
+
+  const callsMap = new Map();
+  for (const row of callsRes.rows) {
+    callsMap.set(row.agente_id, {
+      total_llamadas: Number(row.total_llamadas || 0),
+      total_ventas: Number(row.total_ventas || 0)
+    });
+  }
+
+  const eventsByAgent = new Map();
+  for (const row of eventsRes.rows) {
+    if (!eventsByAgent.has(row.agente_id)) eventsByAgent.set(row.agente_id, []);
+    eventsByAgent.get(row.agente_id).push(row);
+  }
+
+  let totalLlamadas = 0;
+  let totalVentas = 0;
+  const agentesOutput = [];
+  const pausaMinutesList = [];
+
+  for (const agent of agents) {
+    const events = eventsByAgent.get(agent.id) || [];
+    const login = events.filter((e) => e.tipo === "LOGIN").sort((a, b) => new Date(a.inicio) - new Date(b.inicio))[0];
+    const logoutEvents = events.filter((e) => e.tipo === "LOGOUT").sort((a, b) => new Date(b.inicio) - new Date(a.inicio));
+    const logout = logoutEvents[0] || null;
+    const loginTime = login ? new Date(login.inicio) : null;
+    const logoutTime = logout ? new Date(logout.inicio) : null;
+
+    const connectedMinutes = loginTime
+      ? minutesBetween(loginTime, logoutTime || now)
+      : 0;
+
+    const pauseEvents = events.filter((e) => e.tipo === "DESCANSO" || e.tipo === "BAÑO");
+    const pauseCount = pauseEvents.length;
+    let pauseMinutes = 0;
+    for (const ev of pauseEvents) {
+      if (!ev.fin) continue;
+      pauseMinutes += minutesBetween(new Date(ev.inicio), new Date(ev.fin));
+    }
+
+    pausaMinutesList.push(pauseMinutes);
+
+    const callStats = callsMap.get(agent.id) || { total_llamadas: 0, total_ventas: 0 };
+    totalLlamadas += callStats.total_llamadas;
+    totalVentas += callStats.total_ventas;
+
+    const conversion = computeConversion(callStats.total_ventas, callStats.total_llamadas);
+    let estado = "Activo";
+    if (conversion < config.conversion_minima_porcentaje) estado = "Atencion";
+    if (conversion >= config.conversion_excelente_porcentaje) estado = "Excelente";
+
+    agentesOutput.push({
+      id: agent.id,
+      nombre: agent.nombre,
+      iniciales: agent.iniciales,
+      turno_inicio: agent.turno_inicio,
+      turno_fin: agent.turno_fin,
+      login_time: loginTime ? formatTimeHm(loginTime) : null,
+      logout_time: logoutTime ? formatTimeHm(logoutTime) : null,
+      tiempo_conectado_minutos: connectedMinutes,
+      total_llamadas: callStats.total_llamadas,
+      total_ventas: callStats.total_ventas,
+      conversion,
+      estado,
+      alerta: false,
+      cantidad_pausas: pauseCount,
+      tiempo_total_pausas_minutos: pauseMinutes
+    });
+  }
+
+  const avgPausa =
+    pausaMinutesList.length > 0
+      ? Math.round(pausaMinutesList.reduce((a, b) => a + b, 0) / pausaMinutesList.length)
+      : 0;
+
+  let agentesAtencion = 0;
+  for (const agent of agentesOutput) {
+    if (agent.tiempo_total_pausas_minutos > avgPausa + 20) {
+      agent.estado = "Atencion";
+    }
+    agent.alerta = agent.estado === "Atencion";
+    if (agent.alerta) agentesAtencion += 1;
+  }
+
+  const alertasRes = await client.query(
+    `
+    SELECT a.*, ag.nombre AS agente_nombre
+    FROM alertas a
+    LEFT JOIN agentes ag ON ag.id = a.agente_id
+    WHERE a.fecha = $1
+      AND a.resuelta = false
+    ORDER BY a.created_at DESC
+    `,
+    [fecha]
+  );
+
+  return {
+    fecha,
+    resumen_equipo: {
+      agentes_activos: agentesOutput.filter((a) => a.login_time).length,
+      agentes_total: agents.length,
+      agentes_atencion: agentesAtencion,
+      total_llamadas: totalLlamadas,
+      meta_llamadas: config.meta_llamadas_dia * agents.length,
+      total_ventas: totalVentas,
+      meta_ventas: config.meta_ventas_dia * agents.length,
+      conversion_promedio: computeConversion(totalVentas, totalLlamadas)
+    },
+    alertas_activas: alertasRes.rows.map((row) => ({
+      agente_nombre: row.agente_nombre,
+      descripcion: row.descripcion || row.tipo
+    })),
+    agentes: agentesOutput
+  };
+}
+
+async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
+  const config = await getConfigMap(client);
+  const agentRes = await client.query(
+    `SELECT * FROM agentes WHERE id = $1 LIMIT 1`,
+    [agenteId]
+  );
+  const agent = agentRes.rows[0];
+  if (!agent) return null;
+
+  const eventsRes = await client.query(
+    `
+    SELECT *
+    FROM eventos_turno
+    WHERE agente_id = $1
+      AND fecha = $2
+    ORDER BY inicio ASC
+    `,
+    [agenteId, fecha]
+  );
+  const events = eventsRes.rows;
+
+  const callsRes = await client.query(
+    `
+    SELECT *
+    FROM llamadas
+    WHERE agente_id = $1
+      AND fecha = $2
+    ORDER BY inicio ASC
+    `,
+    [agenteId, fecha]
+  );
+  const calls = callsRes.rows;
+
+  const login = events.filter((e) => e.tipo === "LOGIN").sort((a, b) => new Date(a.inicio) - new Date(b.inicio))[0];
+  const logout = events.filter((e) => e.tipo === "LOGOUT").sort((a, b) => new Date(b.inicio) - new Date(a.inicio))[0];
+  const loginTime = login ? new Date(login.inicio) : null;
+  const logoutTime = logout ? new Date(logout.inicio) : null;
+
+  const connectedMinutes = loginTime
+    ? minutesBetween(loginTime, logoutTime || now)
+    : 0;
+
+  const pauseEvents = events.filter((e) => e.tipo === "DESCANSO" || e.tipo === "BAÑO");
+  let pauseMinutes = 0;
+  const eventos = events.map((ev) => {
+    const inicio = new Date(ev.inicio);
+    const fin = ev.fin ? new Date(ev.fin) : null;
+    const duration = fin ? minutesBetween(inicio, fin) : minutesBetween(inicio, now);
+    let excedido = false;
+    let exceso = 0;
+    if (ev.tipo === "DESCANSO" || ev.tipo === "BAÑO") {
+      const limite = ev.tipo === "BAÑO"
+        ? config.limite_bano_minutos
+        : config.limite_descanso_minutos;
+      excedido = fin ? duration > limite : duration > limite;
+      exceso = Math.max(0, duration - limite);
+      if (fin) pauseMinutes += duration;
+    }
+    return {
+      tipo: ev.tipo,
+      inicio: formatTimeHm(inicio),
+      fin: fin ? formatTimeHm(fin) : null,
+      duracion_minutos: duration,
+      excedido,
+      exceso_minutos: exceso,
+      porcentaje_ancho: 0
+    };
+  });
+
+  const totalCalls = calls.length;
+  const totalVentas = calls.filter((c) => c.resultado === "venta").length;
+  const conversion = computeConversion(totalVentas, totalCalls);
+
+  const turnoTotalMin = Math.max(1, timeToMinutes(agent.turno_fin) - timeToMinutes(agent.turno_inicio));
+  for (const ev of eventos) {
+    ev.porcentaje_ancho = Math.round((ev.duracion_minutos / turnoTotalMin) * 1000) / 10;
+  }
+
+  const tiempoProductivo = Math.max(0, connectedMinutes - pauseMinutes);
+  const porcentajeProductivo = Math.round((tiempoProductivo / turnoTotalMin) * 100);
+
+  const teamSummary = await getTeamSummary(client, fecha, now);
+  const conversionPromedioEquipo = teamSummary.resumen_equipo.conversion_promedio;
+
+  const alertasRes = await client.query(
+    `
+    SELECT *
+    FROM alertas
+    WHERE agente_id = $1
+      AND fecha = $2
+      AND resuelta = false
+    ORDER BY created_at DESC
+    `,
+    [agenteId, fecha]
+  );
+
+  const alertas = alertasRes.rows.map((row) => ({
+    tipo: row.tipo,
+    subtipo: row.subtipo || null,
+    descripcion: row.descripcion || row.tipo,
+    severidad: row.tipo === "conversion_baja" ? "alta" : "media",
+    hora_evento: row.hora_evento ? formatTimeHm(new Date(row.hora_evento)) : null,
+    duracion_minutos: row.duracion_minutos || null,
+    limite_minutos: row.limite_minutos || null,
+    exceso_minutos: row.exceso_minutos || null,
+    veces_en_semana: row.veces_en_semana || 0
+  }));
+
+  const totalPausasEquipo = teamSummary.agentes.reduce(
+    (acc, item) => acc + item.tiempo_total_pausas_minutos,
+    0
+  );
+  const promedioPausasEquipo = teamSummary.agentes.length
+    ? totalPausasEquipo / teamSummary.agentes.length
+    : 0;
+  if (pauseMinutes > promedioPausasEquipo + 20) {
+    alertas.push({
+      tipo: "pausas_excesivas",
+      descripcion: `${pauseMinutes} min totales vs promedio equipo ${Math.round(promedioPausasEquipo)} min`,
+      severidad: "media",
+      exceso_minutos: Math.max(0, pauseMinutes - promedioPausasEquipo)
+    });
+  }
+
+  const llamadas = calls.map((call) => ({
+    id: call.id,
+    hora: formatTimeHm(new Date(call.inicio)),
+    duracion_segundos: call.duracion_segundos,
+    cliente_nombre: call.cliente_nombre,
+    resultado: call.resultado,
+    corta: call.corta
+  }));
+
+  const estado = conversion < config.conversion_minima_porcentaje
+    ? "Atencion"
+    : conversion >= config.conversion_excelente_porcentaje
+    ? "Excelente"
+    : "Activo";
+
+  return {
+    agente: {
+      id: agent.id,
+      nombre: agent.nombre,
+      iniciales: agent.iniciales,
+      turno_inicio: agent.turno_inicio,
+      turno_fin: agent.turno_fin,
+      estado
+    },
+    metricas: {
+      total_llamadas: totalCalls,
+      meta_llamadas: config.meta_llamadas_dia,
+      total_ventas: totalVentas,
+      meta_ventas: config.meta_ventas_dia,
+      conversion,
+      conversion_promedio_equipo: conversionPromedioEquipo,
+      tiempo_conectado_minutos: connectedMinutes,
+      tiempo_productivo_minutos: tiempoProductivo,
+      porcentaje_productivo: porcentajeProductivo,
+      tiempo_total_pausas_minutos: pauseMinutes,
+      cantidad_pausas: pauseEvents.length
+    },
+    alertas,
+    eventos,
+    llamadas
+  };
+}
+
+async function getAgentWeek(client, agenteId, todayDate) {
+  const config = await getConfigMap(client);
+  const today = new Date(todayDate);
+  const day = today.getUTCDay() || 7;
+  const monday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (day - 1)));
+
+  const dates = [];
+  for (let d = new Date(monday); d <= today; d = new Date(d.getTime() + 86400000)) {
+    dates.push(formatDateYmd(d));
+  }
+
+  const callsRes = await client.query(
+    `
+    SELECT fecha, COUNT(*)::int AS llamadas,
+           COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas
+    FROM llamadas
+    WHERE agente_id = $1
+      AND fecha = ANY($2::date[])
+    GROUP BY fecha
+    `,
+    [agenteId, dates]
+  );
+  const callsMap = new Map(callsRes.rows.map((row) => [row.fecha, row]));
+
+  const alertsRes = await client.query(
+    `
+    SELECT fecha, COUNT(*)::int AS alertas
+    FROM alertas
+    WHERE agente_id = $1
+      AND fecha = ANY($2::date[])
+    GROUP BY fecha
+    `,
+    [agenteId, dates]
+  );
+  const alertsMap = new Map(alertsRes.rows.map((row) => [row.fecha, row.alertas]));
+
+  let totalVentasSemana = 0;
+  let totalLlamadasSemana = 0;
+  let totalAlertasSemana = 0;
+
+  const dias = dates.map((fecha) => {
+    const row = callsMap.get(fecha) || { llamadas: 0, ventas: 0 };
+    const llamadas = Number(row.llamadas || 0);
+    const ventas = Number(row.ventas || 0);
+    const conversion = computeConversion(ventas, llamadas);
+    const alertas = Number(alertsMap.get(fecha) || 0);
+    totalVentasSemana += ventas;
+    totalLlamadasSemana += llamadas;
+    totalAlertasSemana += alertas;
+    const diaNombre = new Intl.DateTimeFormat("es-ES", { weekday: "long", timeZone: LOCAL_TZ }).format(new Date(fecha));
+    return {
+      fecha,
+      dia_nombre: diaNombre.charAt(0).toUpperCase() + diaNombre.slice(1),
+      llamadas,
+      ventas,
+      conversion,
+      cantidad_alertas: alertas,
+      bajo_minimo: conversion < config.conversion_minima_porcentaje
+    };
+  });
+
+  return {
+    resumen: {
+      conversion_promedio_semana: computeConversion(totalVentasSemana, totalLlamadasSemana),
+      total_alertas_semana: totalAlertasSemana,
+      total_ventas_semana: totalVentasSemana,
+      total_llamadas_semana: totalLlamadasSemana
+    },
+    dias
+  };
+}
+
+async function createAlert(client, payload) {
+  const result = await client.query(
+    `
+    INSERT INTO alertas (
+      agente_id,
+      tipo,
+      subtipo,
+      descripcion,
+      hora_evento,
+      duracion_minutos,
+      limite_minutos,
+      exceso_minutos,
+      veces_en_semana,
+      fecha,
+      resuelta
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false)
+    RETURNING *
+    `,
+    [
+      payload.agente_id,
+      payload.tipo,
+      payload.subtipo || null,
+      payload.descripcion || null,
+      payload.hora_evento || null,
+      payload.duracion_minutos || null,
+      payload.limite_minutos || null,
+      payload.exceso_minutos || null,
+      payload.veces_en_semana || 0,
+      payload.fecha
+    ]
+  );
+  return result.rows[0];
 }
 
 function parseNumber(value) {
@@ -8936,6 +9425,430 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/config")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const config = await getConfigMap(client);
+        return json(200, config);
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load config",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/api/supervisor/team-summary")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const summary = await getTeamSummary(client, fecha, new Date());
+        return json(200, summary);
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load team summary",
+        error: error.message
+      });
+    }
+  }
+
+  const agentDetailMatch = path.match(/\/api\/supervisor\/agent-detail\/([^/]+)$/);
+  if (method === "GET" && agentDetailMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const data = await getAgentDetail(client, agentDetailMatch[1], fecha, new Date());
+        if (!data) {
+          return json(404, { ok: false, message: "Agente no encontrado" });
+        }
+        return json(200, data);
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load agent detail",
+        error: error.message
+      });
+    }
+  }
+
+  const agentWeekMatch = path.match(/\/api\/supervisor\/agent-week\/([^/]+)$/);
+  if (method === "GET" && agentWeekMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const data = await getAgentWeek(client, agentWeekMatch[1], fecha);
+        return json(200, data);
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load agent week",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/api/agent/event")) {
+    const body = safeParseBody(event) || {};
+    const agenteId = body.agente_id || body.agenteId;
+    const tipo = String(body.tipo || "").toUpperCase();
+    if (!agenteId || !tipo) {
+      return json(400, { ok: false, message: "agente_id y tipo son requeridos" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const now = new Date();
+        const fecha = formatDateYmd(now);
+        const config = await getConfigMap(client);
+
+        const activeRes = await client.query(
+          `
+          SELECT *
+          FROM eventos_turno
+          WHERE agente_id = $1
+            AND fecha = $2
+            AND fin IS NULL
+          ORDER BY inicio DESC
+          LIMIT 1
+          `,
+          [agenteId, fecha]
+        );
+        const activeEvent = activeRes.rows[0] || null;
+
+        const closeEvent = async (eventRow) => {
+          if (!eventRow) return null;
+          const fin = now;
+          let excedido = false;
+          let exceso = 0;
+          if (eventRow.tipo === "BAÑO" || eventRow.tipo === "DESCANSO") {
+            const limite = eventRow.tipo === "BAÑO"
+              ? config.limite_bano_minutos
+              : config.limite_descanso_minutos;
+            const dur = minutesBetween(new Date(eventRow.inicio), fin);
+            excedido = dur > limite;
+            exceso = Math.max(0, dur - limite);
+          }
+          const result = await client.query(
+            `
+            UPDATE eventos_turno
+            SET fin = $1,
+                excedido = $2,
+                exceso_minutos = $3
+            WHERE id = $4
+            RETURNING *
+            `,
+            [fin, excedido, exceso, eventRow.id]
+          );
+          return result.rows[0];
+        };
+
+        let createdAlert = null;
+
+        if (tipo === "LOGIN") {
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, 'LOGIN', $2, $2, $3)
+            `,
+            [agenteId, now, fecha]
+          );
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, 'TRABAJO', $2, NULL, $3)
+            `,
+            [agenteId, now, fecha]
+          );
+        } else if (tipo === "LOGOUT") {
+          if (activeEvent) {
+            await closeEvent(activeEvent);
+          }
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, 'LOGOUT', $2, $2, $3)
+            `,
+            [agenteId, now, fecha]
+          );
+        } else if (tipo === "BAÑO" || tipo === "DESCANSO") {
+          if (activeEvent && activeEvent.tipo === "TRABAJO") {
+            await closeEvent(activeEvent);
+          }
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, $2, $3, NULL, $4)
+            `,
+            [agenteId, tipo, now, fecha]
+          );
+        } else if (tipo === "TRABAJO") {
+          if (activeEvent && (activeEvent.tipo === "BAÑO" || activeEvent.tipo === "DESCANSO")) {
+            const closed = await closeEvent(activeEvent);
+            if (closed?.excedido) {
+              const limite = closed.tipo === "BAÑO"
+                ? config.limite_bano_minutos
+                : config.limite_descanso_minutos;
+              const semanaRes = await client.query(
+                `
+                SELECT COUNT(*)::int AS veces
+                FROM alertas
+                WHERE agente_id = $1
+                  AND tipo = 'pausa_excedida'
+                  AND subtipo = $2
+                  AND fecha >= date_trunc('week', $3::date)
+                  AND fecha <= $3::date
+                `,
+                [agenteId, closed.tipo.toLowerCase(), fecha]
+              );
+              createdAlert = await createAlert(client, {
+                agente_id: agenteId,
+                tipo: "pausa_excedida",
+                subtipo: closed.tipo.toLowerCase(),
+                descripcion: `${closed.tipo} extendido`,
+                hora_evento: closed.inicio,
+                duracion_minutos: minutesBetween(new Date(closed.inicio), new Date(closed.fin)),
+                limite_minutos: limite,
+                exceso_minutos: closed.exceso_minutos,
+                veces_en_semana: Number(semanaRes.rows[0]?.veces || 0),
+                fecha
+              });
+            }
+          }
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, 'TRABAJO', $2, NULL, $3)
+            `,
+            [agenteId, now, fecha]
+          );
+        } else {
+          return json(400, { ok: false, message: "Tipo de evento no valido" });
+        }
+
+        const summary = await getTeamSummary(client, fecha, now);
+        emitRealtime("agent_event", {
+          agente_id: agenteId,
+          evento: { tipo, inicio: formatTimeHm(now), fin: tipo === "LOGOUT" || tipo === "LOGIN" ? formatTimeHm(now) : null }
+        });
+        if (createdAlert) {
+          emitRealtime("new_alert", {
+            agente_id: agenteId,
+            alerta: {
+              tipo: createdAlert.tipo,
+              subtipo: createdAlert.subtipo,
+              descripcion: createdAlert.descripcion,
+              hora_evento: createdAlert.hora_evento
+            }
+          });
+        }
+        emitRealtime("team_update", summary);
+
+        return json(201, { ok: true });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to register agent event",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/api/agent/call")) {
+    const body = safeParseBody(event) || {};
+    const agenteId = body.agente_id || body.agenteId;
+    if (!agenteId) {
+      return json(400, { ok: false, message: "agente_id es requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const now = new Date();
+        const fecha = formatDateYmd(now);
+        const duracion = Number(body.duracion_segundos || body.duracionSegundos || 0);
+        const resultado = String(body.resultado || "").toLowerCase();
+        const corta = duracion < 60 && resultado !== "venta";
+
+        await client.query(
+          `
+          INSERT INTO llamadas (
+            agente_id,
+            cliente_nombre,
+            cliente_telefono,
+            inicio,
+            duracion_segundos,
+            resultado,
+            fecha,
+            corta
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          `,
+          [
+            agenteId,
+            body.cliente_nombre || body.clienteNombre || null,
+            body.cliente_telefono || body.clienteTelefono || null,
+            now,
+            duracion,
+            resultado,
+            fecha,
+            corta
+          ]
+        );
+
+        const config = await getConfigMap(client);
+        const statsRes = await client.query(
+          `
+          SELECT COUNT(*)::int AS llamadas,
+                 COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas
+          FROM llamadas
+          WHERE agente_id = $1
+            AND fecha = $2
+          `,
+          [agenteId, fecha]
+        );
+        const row = statsRes.rows[0];
+        const conversion = computeConversion(Number(row.ventas || 0), Number(row.llamadas || 0));
+
+        let createdAlert = null;
+        if (conversion < config.conversion_minima_porcentaje) {
+          const exists = await client.query(
+            `
+            SELECT 1
+            FROM alertas
+            WHERE agente_id = $1
+              AND fecha = $2
+              AND tipo = 'conversion_baja'
+              AND resuelta = false
+            LIMIT 1
+            `,
+            [agenteId, fecha]
+          );
+          if (!exists.rows.length) {
+            createdAlert = await createAlert(client, {
+              agente_id: agenteId,
+              tipo: "conversion_baja",
+              descripcion: `${conversion}% actual vs mínimo ${config.conversion_minima_porcentaje}%`,
+              hora_evento: now,
+              fecha
+            });
+          }
+        }
+
+        emitRealtime("new_call", {
+          agente_id: agenteId,
+          llamada: { resultado, duracion_segundos: duracion }
+        });
+        if (createdAlert) {
+          emitRealtime("new_alert", {
+            agente_id: agenteId,
+            alerta: {
+              tipo: createdAlert.tipo,
+              descripcion: createdAlert.descripcion,
+              hora_evento: createdAlert.hora_evento
+            }
+          });
+        }
+        const summary = await getTeamSummary(client, fecha, now);
+        emitRealtime("team_update", summary);
+
+        return json(201, { ok: true });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to register call",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/sellers")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -10236,6 +11149,19 @@ export const __testables = {
   mapUserRowToApi,
   validateSuperadminUserPayload,
   requireRole
+};
+
+export {
+  createDbClient,
+  getConfigMap,
+  getTeamSummary,
+  getAgentDetail,
+  getAgentWeek,
+  createAlert,
+  parseFechaParam,
+  formatDateYmd,
+  formatTimeHm,
+  LOCAL_TZ
 };
 
 

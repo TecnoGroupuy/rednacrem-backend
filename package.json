@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.mjs",
     "start:local": "node local-server.mjs",
+    "start:realtime": "node realtime-server.mjs",
     "dev": "node --watch index.mjs",
     "dev:local": "node --watch local-server.mjs",
     "env:supervisor": "powershell -NoProfile -Command \"Copy-Item -Force .env.local.supervisor .env.local\"",
@@ -20,6 +21,7 @@
     "@aws-sdk/client-cognito-identity-provider": "^3.1009.0",
     "@aws-sdk/client-sqs": "^3.1009.0",
     "aws-jwt-verify": "^5.1.1",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "socket.io": "^4.8.1"
   }
 }
