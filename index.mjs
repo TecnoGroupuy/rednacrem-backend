@@ -1357,6 +1357,14 @@ function computeConversion(ventas, llamadas) {
   return Math.round((ventas / llamadas) * 1000) / 10;
 }
 
+function getInitialsFromUser(nombre, apellido) {
+  const n = String(nombre || "").trim();
+  const a = String(apellido || "").trim();
+  const first = n ? n[0] : "";
+  const second = a ? a[0] : (n.split(/\s+/)[1]?.[0] || "");
+  return `${first}${second}`.toUpperCase() || "NA";
+}
+
 async function getConfigMap(client) {
   const result = await client.query("SELECT clave, valor FROM configuracion");
   const map = {};
@@ -1376,83 +1384,48 @@ async function getConfigMap(client) {
 
 async function getTeamSummary(client, fecha, now = new Date()) {
   const config = await getConfigMap(client);
-  const agentsRes = await client.query(
-    `SELECT * FROM agentes WHERE activo = true ORDER BY nombre`
+  const sellersRes = await client.query(
+    `
+    SELECT id, nombre, apellido
+    FROM users
+    WHERE role_key = 'vendedor'
+      AND status = 'approved'
+    ORDER BY nombre
+    `
   );
-  const agents = agentsRes.rows;
-  const agentIds = agents.map((a) => a.id);
+  const sellers = sellersRes.rows;
+  const sellerIds = sellers.map((u) => u.id);
 
-  const eventsRes = agentIds.length
-    ? await client.query(
-      `
-      SELECT *
-      FROM eventos_turno
-      WHERE fecha = $1
-        AND agente_id = ANY($2::uuid[])
-      ORDER BY inicio ASC
-      `,
-      [fecha, agentIds]
-    )
-    : { rows: [] };
-
-  const callsRes = agentIds.length
+  const callsRes = sellerIds.length
     ? await client.query(
       `
       SELECT
-        agente_id,
+        user_id,
         COUNT(*)::int AS total_llamadas,
         COUNT(*) FILTER (WHERE resultado = 'venta')::int AS total_ventas
-      FROM llamadas
-      WHERE fecha = $1
-        AND agente_id = ANY($2::uuid[])
-      GROUP BY agente_id
+      FROM lead_management_history
+      WHERE fecha_gestion::date = $1::date
+        AND user_id = ANY($2::uuid[])
+      GROUP BY user_id
       `,
-      [fecha, agentIds]
+      [fecha, sellerIds]
     )
     : { rows: [] };
 
   const callsMap = new Map();
   for (const row of callsRes.rows) {
-    callsMap.set(row.agente_id, {
+    callsMap.set(row.user_id, {
       total_llamadas: Number(row.total_llamadas || 0),
       total_ventas: Number(row.total_ventas || 0)
     });
   }
 
-  const eventsByAgent = new Map();
-  for (const row of eventsRes.rows) {
-    if (!eventsByAgent.has(row.agente_id)) eventsByAgent.set(row.agente_id, []);
-    eventsByAgent.get(row.agente_id).push(row);
-  }
-
   let totalLlamadas = 0;
   let totalVentas = 0;
   const agentesOutput = [];
-  const pausaMinutesList = [];
 
-  for (const agent of agents) {
-    const events = eventsByAgent.get(agent.id) || [];
-    const login = events.filter((e) => e.tipo === "LOGIN").sort((a, b) => new Date(a.inicio) - new Date(b.inicio))[0];
-    const logoutEvents = events.filter((e) => e.tipo === "LOGOUT").sort((a, b) => new Date(b.inicio) - new Date(a.inicio));
-    const logout = logoutEvents[0] || null;
-    const loginTime = login ? new Date(login.inicio) : null;
-    const logoutTime = logout ? new Date(logout.inicio) : null;
-
-    const connectedMinutes = loginTime
-      ? minutesBetween(loginTime, logoutTime || now)
-      : 0;
-
-    const pauseEvents = events.filter((e) => e.tipo === "DESCANSO" || e.tipo === "BAÑO");
-    const pauseCount = pauseEvents.length;
-    let pauseMinutes = 0;
-    for (const ev of pauseEvents) {
-      if (!ev.fin) continue;
-      pauseMinutes += minutesBetween(new Date(ev.inicio), new Date(ev.fin));
-    }
-
-    pausaMinutesList.push(pauseMinutes);
-
-    const callStats = callsMap.get(agent.id) || { total_llamadas: 0, total_ventas: 0 };
+  for (const seller of sellers) {
+    const callStats = callsMap.get(seller.id) || { total_llamadas: 0, total_ventas: 0 };
     totalLlamadas += callStats.total_llamadas;
     totalVentas += callStats.total_ventas;
 
@@ -1462,43 +1435,31 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     if (conversion >= config.conversion_excelente_porcentaje) estado = "Excelente";
 
     agentesOutput.push({
-      id: agent.id,
-      nombre: agent.nombre,
-      iniciales: agent.iniciales,
-      turno_inicio: agent.turno_inicio,
-      turno_fin: agent.turno_fin,
-      login_time: loginTime ? formatTimeHm(loginTime) : null,
-      logout_time: logoutTime ? formatTimeHm(logoutTime) : null,
-      tiempo_conectado_minutos: connectedMinutes,
+      id: seller.id,
+      nombre: seller.nombre,
+      iniciales: getInitialsFromUser(seller.nombre, seller.apellido),
+      turno_inicio: null,
+      turno_fin: null,
+      login_time: null,
+      logout_time: null,
+      tiempo_conectado_minutos: null,
       total_llamadas: callStats.total_llamadas,
       total_ventas: callStats.total_ventas,
       conversion,
       estado,
-      alerta: false,
-      cantidad_pausas: pauseCount,
-      tiempo_total_pausas_minutos: pauseMinutes
+      alerta: estado === "Atencion",
+      cantidad_pausas: 0,
+      tiempo_total_pausas_minutos: 0
     });
   }
 
-  const avgPausa =
-    pausaMinutesList.length > 0
-      ? Math.round(pausaMinutesList.reduce((a, b) => a + b, 0) / pausaMinutesList.length)
-      : 0;
-
-  let agentesAtencion = 0;
-  for (const agent of agentesOutput) {
-    if (agent.tiempo_total_pausas_minutos > avgPausa + 20) {
-      agent.estado = "Atencion";
-    }
-    agent.alerta = agent.estado === "Atencion";
-    if (agent.alerta) agentesAtencion += 1;
-  }
+  let agentesAtencion = agentesOutput.filter((a) => a.estado === "Atencion").length;
 
   const alertasRes = await client.query(
     `
-    SELECT a.*, ag.nombre AS agente_nombre
+    SELECT a.*, u.nombre AS agente_nombre
     FROM alertas a
-    LEFT JOIN agentes ag ON ag.id = a.agente_id
+    LEFT JOIN users u ON u.id = a.agente_id
     WHERE a.fecha = $1
       AND a.resuelta = false
     ORDER BY a.created_at DESC
@@ -1509,13 +1470,13 @@ async function getTeamSummary(client, fecha, now = new Date()) {
   return {
     fecha,
     resumen_equipo: {
-      agentes_activos: agentesOutput.filter((a) => a.login_time).length,
-      agentes_total: agents.length,
+      agentes_activos: agentesOutput.filter((a) => a.total_llamadas > 0).length,
+      agentes_total: sellers.length,
       agentes_atencion: agentesAtencion,
       total_llamadas: totalLlamadas,
-      meta_llamadas: config.meta_llamadas_dia * agents.length,
+      meta_llamadas: config.meta_llamadas_dia * sellers.length,
       total_ventas: totalVentas,
-      meta_ventas: config.meta_ventas_dia * agents.length,
+      meta_ventas: config.meta_ventas_dia * sellers.length,
       conversion_promedio: computeConversion(totalVentas, totalLlamadas)
     },
     alertas_activas: alertasRes.rows.map((row) => ({
@@ -1528,135 +1489,54 @@ async function getTeamSummary(client, fecha, now = new Date()) {
 
 async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   const config = await getConfigMap(client);
-  const agentRes = await client.query(
-    `SELECT * FROM agentes WHERE id = $1 LIMIT 1`,
+  const sellerRes = await client.query(
+    `SELECT id, nombre, apellido FROM users WHERE id = $1 LIMIT 1`,
     [agenteId]
   );
-  const agent = agentRes.rows[0];
-  if (!agent) return null;
-
-  const eventsRes = await client.query(
-    `
-    SELECT *
-    FROM eventos_turno
-    WHERE agente_id = $1
-      AND fecha = $2
-    ORDER BY inicio ASC
-    `,
-    [agenteId, fecha]
-  );
-  const events = eventsRes.rows;
+  const seller = sellerRes.rows[0];
+  if (!seller) return null;
 
   const callsRes = await client.query(
     `
-    SELECT *
-    FROM llamadas
-    WHERE agente_id = $1
-      AND fecha = $2
-    ORDER BY inicio ASC
+    SELECT lmh.id,
+           lmh.resultado,
+           lmh.nota,
+           lmh.fecha_gestion,
+           d.nombre AS cliente_nombre,
+           d.apellido AS cliente_apellido
+    FROM lead_management_history lmh
+    LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+    WHERE lmh.user_id = $1
+      AND lmh.fecha_gestion::date = $2
+    ORDER BY lmh.fecha_gestion ASC
     `,
     [agenteId, fecha]
   );
   const calls = callsRes.rows;
 
-  const login = events.filter((e) => e.tipo === "LOGIN").sort((a, b) => new Date(a.inicio) - new Date(b.inicio))[0];
-  const logout = events.filter((e) => e.tipo === "LOGOUT").sort((a, b) => new Date(b.inicio) - new Date(a.inicio))[0];
-  const loginTime = login ? new Date(login.inicio) : null;
-  const logoutTime = logout ? new Date(logout.inicio) : null;
-
-  const connectedMinutes = loginTime
-    ? minutesBetween(loginTime, logoutTime || now)
-    : 0;
-
-  const pauseEvents = events.filter((e) => e.tipo === "DESCANSO" || e.tipo === "BAÑO");
-  let pauseMinutes = 0;
-  const eventos = events.map((ev) => {
-    const inicio = new Date(ev.inicio);
-    const fin = ev.fin ? new Date(ev.fin) : null;
-    const duration = fin ? minutesBetween(inicio, fin) : minutesBetween(inicio, now);
-    let excedido = false;
-    let exceso = 0;
-    if (ev.tipo === "DESCANSO" || ev.tipo === "BAÑO") {
-      const limite = ev.tipo === "BAÑO"
-        ? config.limite_bano_minutos
-        : config.limite_descanso_minutos;
-      excedido = fin ? duration > limite : duration > limite;
-      exceso = Math.max(0, duration - limite);
-      if (fin) pauseMinutes += duration;
-    }
-    return {
-      tipo: ev.tipo,
-      inicio: formatTimeHm(inicio),
-      fin: fin ? formatTimeHm(fin) : null,
-      duracion_minutos: duration,
-      excedido,
-      exceso_minutos: exceso,
-      porcentaje_ancho: 0
-    };
-  });
-
   const totalCalls = calls.length;
   const totalVentas = calls.filter((c) => c.resultado === "venta").length;
   const conversion = computeConversion(totalVentas, totalCalls);
 
-  const turnoTotalMin = Math.max(1, timeToMinutes(agent.turno_fin) - timeToMinutes(agent.turno_inicio));
-  for (const ev of eventos) {
-    ev.porcentaje_ancho = Math.round((ev.duracion_minutos / turnoTotalMin) * 1000) / 10;
-  }
-
-  const tiempoProductivo = Math.max(0, connectedMinutes - pauseMinutes);
-  const porcentajeProductivo = Math.round((tiempoProductivo / turnoTotalMin) * 100);
-
   const teamSummary = await getTeamSummary(client, fecha, now);
   const conversionPromedioEquipo = teamSummary.resumen_equipo.conversion_promedio;
 
-  const alertasRes = await client.query(
-    `
-    SELECT *
-    FROM alertas
-    WHERE agente_id = $1
-      AND fecha = $2
-      AND resuelta = false
-    ORDER BY created_at DESC
-    `,
-    [agenteId, fecha]
-  );
-
-  const alertas = alertasRes.rows.map((row) => ({
-    tipo: row.tipo,
-    subtipo: row.subtipo || null,
-    descripcion: row.descripcion || row.tipo,
-    severidad: row.tipo === "conversion_baja" ? "alta" : "media",
-    hora_evento: row.hora_evento ? formatTimeHm(new Date(row.hora_evento)) : null,
-    duracion_minutos: row.duracion_minutos || null,
-    limite_minutos: row.limite_minutos || null,
-    exceso_minutos: row.exceso_minutos || null,
-    veces_en_semana: row.veces_en_semana || 0
-  }));
-
-  const totalPausasEquipo = teamSummary.agentes.reduce(
-    (acc, item) => acc + item.tiempo_total_pausas_minutos,
-    0
-  );
-  const promedioPausasEquipo = teamSummary.agentes.length
-    ? totalPausasEquipo / teamSummary.agentes.length
-    : 0;
-  if (pauseMinutes > promedioPausasEquipo + 20) {
+  const alertas = [];
+  if (conversion < config.conversion_minima_porcentaje) {
     alertas.push({
-      tipo: "pausas_excesivas",
-      descripcion: `${pauseMinutes} min totales vs promedio equipo ${Math.round(promedioPausasEquipo)} min`,
-      severidad: "media",
-      exceso_minutos: Math.max(0, pauseMinutes - promedioPausasEquipo)
+      tipo: "conversion_baja",
+      descripcion: `${conversion}% actual vs mínimo ${config.conversion_minima_porcentaje}%`,
+      severidad: "alta"
     });
   }
 
   const llamadas = calls.map((call) => ({
     id: call.id,
-    hora: formatTimeHm(new Date(call.inicio)),
-    duracion_segundos: call.duracion_segundos,
-    cliente_nombre: call.cliente_nombre,
+    hora: formatTimeHm(new Date(call.fecha_gestion)),
+    duracion_segundos: null,
+    cliente_nombre: [call.cliente_nombre, call.cliente_apellido].filter(Boolean).join(" ").trim() || null,
     resultado: call.resultado,
-    corta: call.corta
+    corta: false
   }));
 
   const estado = conversion < config.conversion_minima_porcentaje
@@ -1667,11 +1547,11 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
 
   return {
     agente: {
-      id: agent.id,
-      nombre: agent.nombre,
-      iniciales: agent.iniciales,
-      turno_inicio: agent.turno_inicio,
-      turno_fin: agent.turno_fin,
+      id: seller.id,
+      nombre: seller.nombre,
+      iniciales: getInitialsFromUser(seller.nombre, seller.apellido),
+      turno_inicio: null,
+      turno_fin: null,
       estado
     },
     metricas: {
@@ -1681,14 +1561,14 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
       meta_ventas: config.meta_ventas_dia,
       conversion,
       conversion_promedio_equipo: conversionPromedioEquipo,
-      tiempo_conectado_minutos: connectedMinutes,
-      tiempo_productivo_minutos: tiempoProductivo,
-      porcentaje_productivo: porcentajeProductivo,
-      tiempo_total_pausas_minutos: pauseMinutes,
-      cantidad_pausas: pauseEvents.length
+      tiempo_conectado_minutos: null,
+      tiempo_productivo_minutos: null,
+      porcentaje_productivo: null,
+      tiempo_total_pausas_minutos: 0,
+      cantidad_pausas: 0
     },
     alertas,
-    eventos,
+    eventos: [],
     llamadas
   };
 }
@@ -1706,42 +1586,28 @@ async function getAgentWeek(client, agenteId, todayDate) {
 
   const callsRes = await client.query(
     `
-    SELECT fecha, COUNT(*)::int AS llamadas,
+    SELECT fecha_gestion::date AS fecha,
+           COUNT(*)::int AS llamadas,
            COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas
-    FROM llamadas
-    WHERE agente_id = $1
-      AND fecha = ANY($2::date[])
-    GROUP BY fecha
+    FROM lead_management_history
+    WHERE user_id = $1
+      AND fecha_gestion::date = ANY($2::date[])
+    GROUP BY fecha_gestion::date
     `,
     [agenteId, dates]
   );
   const callsMap = new Map(callsRes.rows.map((row) => [row.fecha, row]));
 
-  const alertsRes = await client.query(
-    `
-    SELECT fecha, COUNT(*)::int AS alertas
-    FROM alertas
-    WHERE agente_id = $1
-      AND fecha = ANY($2::date[])
-    GROUP BY fecha
-    `,
-    [agenteId, dates]
-  );
-  const alertsMap = new Map(alertsRes.rows.map((row) => [row.fecha, row.alertas]));
-
   let totalVentasSemana = 0;
   let totalLlamadasSemana = 0;
-  let totalAlertasSemana = 0;
 
   const dias = dates.map((fecha) => {
     const row = callsMap.get(fecha) || { llamadas: 0, ventas: 0 };
     const llamadas = Number(row.llamadas || 0);
     const ventas = Number(row.ventas || 0);
     const conversion = computeConversion(ventas, llamadas);
-    const alertas = Number(alertsMap.get(fecha) || 0);
     totalVentasSemana += ventas;
     totalLlamadasSemana += llamadas;
-    totalAlertasSemana += alertas;
     const diaNombre = new Intl.DateTimeFormat("es-ES", { weekday: "long", timeZone: LOCAL_TZ }).format(new Date(fecha));
     return {
       fecha,
@@ -1749,7 +1615,7 @@ async function getAgentWeek(client, agenteId, todayDate) {
       llamadas,
       ventas,
       conversion,
-      cantidad_alertas: alertas,
+      cantidad_alertas: 0,
       bajo_minimo: conversion < config.conversion_minima_porcentaje
     };
   });
@@ -1757,7 +1623,7 @@ async function getAgentWeek(client, agenteId, todayDate) {
   return {
     resumen: {
       conversion_promedio_semana: computeConversion(totalVentasSemana, totalLlamadasSemana),
-      total_alertas_semana: totalAlertasSemana,
+      total_alertas_semana: 0,
       total_ventas_semana: totalVentasSemana,
       total_llamadas_semana: totalLlamadasSemana
     },
@@ -7272,6 +7138,16 @@ export const handler = async (event) => {
         );
 
         await client.query("COMMIT");
+
+        const summary = await getTeamSummary(client, formatDateYmd(new Date()), new Date());
+        emitRealtime("new_call", {
+          agente_id: dbUser?.id || null,
+          llamada: {
+            resultado: effectiveResultado
+          }
+        });
+        emitRealtime("team_update", summary);
+
         return json(200, {
           ok: true,
           success: true,
