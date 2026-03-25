@@ -1917,12 +1917,12 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               INSERT INTO sale_items (
                 sale_id,
                 product_id,
-                cantidad,
-                precio_unitario
+                product_name_snapshot,
+                price
               )
-              VALUES ($1,$2,1,$3)
+              VALUES ($1,$2,$3,$4)
               `,
-              [saleId, productId, precio || 0]
+              [saleId, productId, productName || "Producto", precio || 0]
             );
           }
 
@@ -4717,12 +4717,12 @@ export const handler = async (event) => {
                 INSERT INTO sale_items (
                   sale_id,
                   product_id,
-                  cantidad,
-                  precio_unitario
+                  product_name_snapshot,
+                  price
                 )
-                VALUES ($1,$2,1,$3)
+                VALUES ($1,$2,$3,$4)
                 `,
-                [saleId, productId, precio || 0]
+                [saleId, productId, productName || "Producto", precio || 0]
               );
             }
 
