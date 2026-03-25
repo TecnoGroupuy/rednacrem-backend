@@ -494,7 +494,7 @@ async function getLeadStatusCatalogEntry(client, nombre) {
   if (!nombre) return null;
   const res = await client.query(
     `
-    SELECT id, nombre, es_final, libera_al_cerrar
+    SELECT nombre, es_final, libera_al_cerrar
     FROM lead_status_catalog
     WHERE nombre = $1
     LIMIT 1
