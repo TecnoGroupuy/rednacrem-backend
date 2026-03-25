@@ -9302,7 +9302,7 @@ export const handler = async (event) => {
             OR d.documento ILIKE $${idx}
             OR d.telefono ILIKE $${idx}
             OR d.celular ILIKE $${idx}
-            OR d.correo_electronico ILIKE $${idx}
+            OR d.email ILIKE $${idx}
             OR d.departamento ILIKE $${idx}
             OR d.localidad ILIKE $${idx}
           )`);
@@ -9362,13 +9362,12 @@ export const handler = async (event) => {
             d.fecha_nacimiento,
             d.telefono,
             d.celular,
-            d.correo_electronico,
+            d.email,
             d.direccion,
             d.departamento,
             d.localidad,
             d.origen_dato,
             d.estado,
-            d.pais,
             d.created_at,
             ${blockedExistsSql} AS bloqueado_no_llamar
           FROM datos_para_trabajar d
