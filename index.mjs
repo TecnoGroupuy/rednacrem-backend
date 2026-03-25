@@ -8941,11 +8941,26 @@ export const handler = async (event) => {
 
         let blockedNumbers = new Set();
         if (normalizedNumbers.size) {
+          const normalizedList = Array.from(normalizedNumbers);
           const res = await client.query(
             `SELECT numero FROM no_call_entries WHERE numero = ANY($1::text[])`,
-            [Array.from(normalizedNumbers)]
+            [normalizedList]
           );
           blockedNumbers = new Set(res.rows.map((r) => r.numero));
+
+          const contactsRes = await client.query(
+            `
+            SELECT telefono, celular
+            FROM contacts
+            WHERE telefono = ANY($1::text[])
+               OR celular = ANY($1::text[])
+            `,
+            [normalizedList]
+          );
+          for (const row of contactsRes.rows) {
+            if (row.telefono) blockedNumbers.add(row.telefono);
+            if (row.celular) blockedNumbers.add(row.celular);
+          }
         }
 
         for (const row of rows) {
@@ -8968,10 +8983,9 @@ export const handler = async (event) => {
               departamento,
               localidad,
               origen_dato,
-              pais,
               estado
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             `,
             [
               row.nombre || null,
@@ -8985,7 +8999,6 @@ export const handler = async (event) => {
               row.departamento || null,
               row.localidad || null,
               row.origen_dato || null,
-              row.pais || null,
               isBlocked ? "bloqueado" : "nuevo"
             ]
           );
