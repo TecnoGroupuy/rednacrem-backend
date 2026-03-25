@@ -8931,6 +8931,7 @@ export const handler = async (event) => {
         }
         const batchId = batchRes.rows[0]?.id || null;
         let inserted = 0;
+        let blockedCount = 0;
         const normalizedNumbers = new Set();
         for (const row of rows) {
           const tel = normalizeUyNumber(row.telefono);
@@ -9003,6 +9004,7 @@ export const handler = async (event) => {
             ]
           );
           inserted += 1;
+          if (isBlocked) blockedCount += 1;
         }
         const finalStatus = rows.length === 0 ? "failed" : "processed";
 
@@ -9020,6 +9022,7 @@ export const handler = async (event) => {
           batchId,
           total: rows.length,
           inserted,
+          blockedCount,
           ignoredEmptyRows
         });
       } catch (error) {
