@@ -8631,7 +8631,7 @@ export const handler = async (event) => {
             `
             INSERT INTO lead_batch_contacts (batch_id, contact_id)
             VALUES ($1, $2)
-            ON CONFLICT (batch_id, contact_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             `,
             [batchId, contactId]
           );
