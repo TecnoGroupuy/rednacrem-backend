@@ -1164,6 +1164,7 @@ function csvEscape(value) {
   if (value === null || value === undefined) return "";
   const text = String(value);
   if (/[",\r\n]/.test(text)) {
+
     return `"${text.replace(/"/g, "\"\"")}"`;
   }
   return text;
@@ -2821,7 +2822,8 @@ function buildImportSampleCsv(type) {
       headers.map((header) => csvEscape(exampleRow[header] ?? "")).join(",")
     ];
 
-    return lines.join("\r\n");
+    return lines.join("\n");
+
   }
 
   const headers = [
@@ -2877,7 +2879,8 @@ function buildImportSampleCsv(type) {
     headers.map((header) => csvEscape(exampleRow[header] ?? "")).join(",")
   ];
 
-  return lines.join("\r\n");
+    return lines.join("\n");
+
 }
 
 function validateProductPayload(body, options = {}) {
@@ -5464,7 +5467,8 @@ export const handler = async (event) => {
             const fechaBaja = isAlta ? null : (parseDate(product?.fecha_baja || product?.fechaBaja) || fechaAlta);
             const motivoBaja = isAlta ? null : "otro";
             const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
-            const medioPago = normalizeText(product?.medio_pago || product?.medioPago) || null;\n            const fechaVenta = fechaAlta;
+            const medioPago = normalizeText(product?.medio_pago || product?.medioPago) || null;
+            const fechaVenta = fechaAlta;
 
             let productId = null;
             if (productName) {
@@ -11274,8 +11278,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
-
 
 
 
