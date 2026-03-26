@@ -7031,7 +7031,7 @@ export const handler = async (event) => {
             SELECT DISTINCT contact_id
             FROM lead_management_history
             WHERE user_id = $1
-              AND fecha_gestion::date = $2::date
+              AND (fecha_gestion AT TIME ZONE $3)::date = $2::date
           ),
           ultimo_resultado_hoy AS (
             SELECT DISTINCT ON (lmh.contact_id)
@@ -7040,7 +7040,7 @@ export const handler = async (event) => {
             FROM lead_management_history lmh
             JOIN contactos_tocados_hoy cth ON cth.contact_id = lmh.contact_id
             WHERE lmh.user_id = $1
-              AND (lmh.fecha_gestion AT TIME ZONE $3)::date = $2::date::date
+              AND (lmh.fecha_gestion AT TIME ZONE $3)::date = $2::date
             ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
           )
           SELECT
@@ -7052,7 +7052,7 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE resultado = 'rellamar') AS rellamar_hoy
           FROM ultimo_resultado_hoy
           `,
-          [sellerId, hoy]
+          [sellerId, hoy, LOCAL_TZ]
         );
 
         const seguimientoActivoResult = await client.query(
@@ -11762,6 +11762,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
