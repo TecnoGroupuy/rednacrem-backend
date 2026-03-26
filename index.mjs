@@ -3516,11 +3516,62 @@ async function listContacts() {
   }
 }
 
-async function listClientsDirectory() {
+async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) {
   const client = createDbClient();
 
   try {
     await client.connect();
+
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.min(200, Math.max(1, Number(limit) || 50));
+    const offset = (safePage - 1) * safeLimit;
+    const searchText = String(search || "").trim().toLowerCase();
+
+    const whereParts = ["s.productos_total > 0"];
+    const values = [];
+
+    if (searchText) {
+      values.push(`%${searchText}%`);
+      const idx = values.length;
+      whereParts.push(
+        `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.telefono, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx})`
+      );
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    const countResult = await client.query(
+      `
+      WITH summary AS (
+        ${buildContactSummarySelect()}
+      ),
+      ranked_products AS (
+        SELECT
+          cp.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY cp.contact_id
+            ORDER BY
+              CASE WHEN cp.estado = 'alta' THEN 0 ELSE 1 END,
+              cp.fecha_alta DESC NULLS LAST,
+              cp.created_at DESC
+          ) AS rn
+        FROM contact_products cp
+      )
+      SELECT COUNT(*)::int AS total
+      FROM summary s
+      JOIN ranked_products rp
+        ON rp.contact_id = s.id
+       AND rp.rn = 1
+      ${whereClause}
+      `,
+      values
+    );
+
+    const total = Number(countResult.rows[0]?.total || 0);
+
+    values.push(safeLimit, offset);
+    const limitIdx = values.length - 1;
+    const offsetIdx = values.length;
 
     const result = await client.query(
       `
@@ -3551,21 +3602,27 @@ async function listClientsDirectory() {
       JOIN ranked_products rp
         ON rp.contact_id = s.id
        AND rp.rn = 1
-      WHERE s.productos_total > 0
+      ${whereClause}
       ORDER BY
         CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
         s.created_at DESC,
         s.nombre ASC,
         s.apellido ASC
-      `
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `,
+      values
     );
 
-    return result.rows.map(mapClientRowToApi);
+    return {
+      items: result.rows.map(mapClientRowToApi),
+      total,
+      page: safePage,
+      limit: safeLimit
+    };
   } finally {
     await client.end();
   }
 }
-
 async function getClientMetrics() {
   const client = createDbClient();
 
@@ -5534,11 +5591,15 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const items = await listClientsDirectory();
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const search = normalizeText(getQueryParam(event, "search") || "");
+
+      const result = await listClientsDirectory({ page, limit, search });
 
       return json(200, {
         ok: true,
-        items
+        ...result
       });
     } catch (error) {
       return json(500, {
