@@ -2538,7 +2538,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           }
         }
 
-        if (row.nombre_familiar || row.apellido_familiar || row.telefono_familiar || row.parentesco) {
+        const nombreFamiliar = String(row.nombre_familiar || "").trim();
+        if (nombreFamiliar) {
           const relativeExists = await client.query(
             `
             SELECT id
@@ -2552,7 +2553,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             `,
             [
               contact.id,
-              row.nombre_familiar || "",
+              nombreFamiliar,
               row.apellido_familiar || "",
               row.telefono_familiar || "",
               row.parentesco || ""
@@ -2573,7 +2574,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               `,
               [
                 contact.id,
-                row.nombre_familiar || null,
+                nombreFamiliar,
                 row.apellido_familiar || null,
                 row.telefono_familiar || null,
                 row.parentesco || null
@@ -2620,22 +2621,11 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
 
           const saleInsert = await client.query(
             `
-            INSERT INTO sales (
-              contact_id,
-              seller_user_id,
-              medio_pago,
-              seller_name_snapshot,
-              seller_origin
-            )
+            INSERT INTO sales (contact_id, seller_user_id, medio_pago, seller_name_snapshot, seller_origin, fecha_venta)
             VALUES ($1, $2, $3, $4, 'importado')
             RETURNING id
             `,
-            [
-              contact.id,
-              null,
-              row.medio_pago || null,
-              row.vendedor_nombre || null
-            ]
+            [contact.id, null, row.medio_pago || null, row.vendedor_nombre || null, fechaVenta]
           );
           saleId = saleInsert.rows[0].id;
 
@@ -3636,7 +3626,7 @@ async function getClientDocumentData(clientId) {
         cp.cuotas_pagas,
         cp.carencia_cuotas,
         s.id AS sale_id,
-        s.created_at AS sale_fecha,
+        COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
         s.medio_pago,
         s.seller_origin,
         s.seller_name_snapshot,
@@ -3732,7 +3722,7 @@ async function getClientDetailData(clientId) {
       `
       SELECT
         cp.*,
-        s.created_at AS sale_fecha,
+        COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
         s.medio_pago,
         s.seller_origin,
         s.seller_name_snapshot,
@@ -5417,7 +5407,7 @@ export const handler = async (event) => {
             const fechaBaja = isAlta ? null : (parseDate(product?.fecha_baja || product?.fechaBaja) || fechaAlta);
             const motivoBaja = isAlta ? null : "otro";
             const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
-            const medioPago = normalizeText(product?.medio_pago || product?.medioPago) || null;
+            const medioPago = normalizeText(product?.medio_pago || product?.medioPago) || null;\n            const fechaVenta = fechaAlta;
 
             let productId = null;
             if (productName) {
@@ -5441,23 +5431,11 @@ export const handler = async (event) => {
 
             const saleInsert = await client.query(
               `
-              INSERT INTO sales (
-                contact_id,
-                seller_user_id,
-                medio_pago,
-                seller_name_snapshot,
-                seller_origin
-              )
+              INSERT INTO sales (contact_id, seller_user_id, medio_pago, seller_name_snapshot, seller_origin, fecha_venta)
               VALUES ($1, $2, $3, $4, $5)
               RETURNING id
               `,
-              [
-                contactId,
-                sellerId || null,
-                medioPago,
-                sellerNameSnapshot,
-                sellerOrigin
-              ]
+              [contactId, sellerId || null, medioPago, sellerNameSnapshot, sellerOrigin, fechaVenta]
             );
             const saleId = saleInsert.rows[0]?.id;
 
@@ -5631,7 +5609,7 @@ export const handler = async (event) => {
             s.id,
             s.contact_id,
             s.seller_user_id AS seller_id,
-            s.created_at,
+            s.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
             s.medio_pago,
             s.seller_name_snapshot,
             c.nombre,
@@ -5668,8 +5646,8 @@ export const handler = async (event) => {
           cuota: row.price !== null && row.price !== undefined
             ? Number(row.price)
             : null,
-          fecha_venta: row.created_at || null,
-          fecha_venta_at: row.created_at || null,
+          fecha_venta: row.sale_fecha || null,
+          fecha_venta_at: row.sale_fecha || null,
           medio_pago: row.medio_pago || null
         }));
 
@@ -8886,7 +8864,7 @@ export const handler = async (event) => {
               0 AS error_rows,
               0 AS rejected_missing_documento,
               NULL::int AS processed_rows,
-              stats.created_at,
+              stats.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
               NULL AS user_nombre,
               NULL AS user_apellido,
               'datos_virtual'::text AS source
@@ -8960,7 +8938,7 @@ export const handler = async (event) => {
               0 AS error_rows,
               0 AS rejected_missing_documento,
               NULL::int AS processed_rows,
-              stats.created_at,
+              stats.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
               NULL AS user_nombre,
               NULL AS user_apellido,
               'datos_virtual'::text AS source
