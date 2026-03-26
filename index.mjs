@@ -3516,11 +3516,62 @@ async function listContacts() {
   }
 }
 
-async function listClientsDirectory() {
+async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) {
   const client = createDbClient();
 
   try {
     await client.connect();
+
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.min(200, Math.max(1, Number(limit) || 50));
+    const offset = (safePage - 1) * safeLimit;
+    const searchText = String(search || "").trim().toLowerCase();
+
+    const whereParts = ["s.productos_total > 0"];
+    const values = [];
+
+    if (searchText) {
+      values.push(`%${searchText}%`);
+      const idx = values.length;
+      whereParts.push(
+        `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.telefono, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx})`
+      );
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    const countResult = await client.query(
+      `
+      WITH summary AS (
+        ${buildContactSummarySelect()}
+      ),
+      ranked_products AS (
+        SELECT
+          cp.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY cp.contact_id
+            ORDER BY
+              CASE WHEN cp.estado = 'alta' THEN 0 ELSE 1 END,
+              cp.fecha_alta DESC NULLS LAST,
+              cp.created_at DESC
+          ) AS rn
+        FROM contact_products cp
+      )
+      SELECT COUNT(*)::int AS total
+      FROM summary s
+      JOIN ranked_products rp
+        ON rp.contact_id = s.id
+       AND rp.rn = 1
+      ${whereClause}
+      `,
+      values
+    );
+
+    const total = Number(countResult.rows[0]?.total || 0);
+
+    values.push(safeLimit, offset);
+    const limitIdx = values.length - 1;
+    const offsetIdx = values.length;
 
     const result = await client.query(
       `
@@ -3551,21 +3602,27 @@ async function listClientsDirectory() {
       JOIN ranked_products rp
         ON rp.contact_id = s.id
        AND rp.rn = 1
-      WHERE s.productos_total > 0
+      ${whereClause}
       ORDER BY
         CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
         s.created_at DESC,
         s.nombre ASC,
         s.apellido ASC
-      `
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `,
+      values
     );
 
-    return result.rows.map(mapClientRowToApi);
+    return {
+      items: result.rows.map(mapClientRowToApi),
+      total,
+      page: safePage,
+      limit: safeLimit
+    };
   } finally {
     await client.end();
   }
 }
-
 async function getClientMetrics() {
   const client = createDbClient();
 
@@ -5534,11 +5591,15 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const items = await listClientsDirectory();
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const search = normalizeText(getQueryParam(event, "search") || "");
+
+      const result = await listClientsDirectory({ page, limit, search });
 
       return json(200, {
         ok: true,
-        items
+        ...result
       });
     } catch (error) {
       return json(500, {
@@ -6151,145 +6212,15 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
-      const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 50));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const search = normalizeText(getQueryParam(event, "search") || "");
-      const offset = (page - 1) * pageSize;
 
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
+      const result = await listClientsDirectory({ page, limit, search });
 
-        if (search) {
-          whereParts.push(`(
-            d.nombre ILIKE $${idx}
-            OR d.apellido ILIKE $${idx}
-            OR d.documento ILIKE $${idx}
-            OR d.telefono ILIKE $${idx}
-            OR d.celular ILIKE $${idx}
-            OR d.departamento ILIKE $${idx}
-            OR d.localidad ILIKE $${idx}
-          )`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        if (dbUser?.role_key === "vendedor") {
-          whereParts.push(`lcs.assigned_to = $${idx}`);
-          values.push(dbUser.id);
-          idx += 1;
-        }
-
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-        const countResult = await client.query(
-          `
-          SELECT COUNT(*)::int AS total
-          FROM datos_para_trabajar d
-          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
-          ${whereClause}
-          `,
-          values
-        );
-
-        let total = countResult.rows[0]?.total || 0;
-        let totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-        const itemsResult = await client.query(
-          `
-          SELECT
-            d.id,
-            d.nombre,
-            d.apellido,
-            d.documento,
-            d.telefono,
-            d.celular,
-            d.departamento,
-            d.direccion,
-            d.localidad,
-            d.origen_dato,
-            d.estado,
-            d.created_at,
-            lcs.estado_venta,
-            lcs.intentos,
-            lcs.proxima_accion,
-            lcs.batch_id,
-            lcs.assigned_to,
-            lb.nombre AS batch_nombre,
-            u.nombre AS assigned_nombre,
-            u.apellido AS assigned_apellido,
-            last_m.fecha_gestion AS last_gestion_at,
-            last_m.resultado AS last_resultado,
-            last_m.nota AS last_nota,
-            last_m.user_nombre AS last_user_nombre,
-            last_m.user_apellido AS last_user_apellido
-          FROM datos_para_trabajar d
-          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
-          LEFT JOIN lead_batches lb ON lb.id = lcs.batch_id
-          LEFT JOIN users u ON u.id = lcs.assigned_to
-          LEFT JOIN LATERAL (
-            SELECT
-              lm.fecha_gestion,
-              lm.resultado,
-              lm.nota,
-              u2.nombre AS user_nombre,
-              u2.apellido AS user_apellido
-            FROM lead_management_history lm
-            LEFT JOIN users u2 ON u2.id = lm.user_id
-            WHERE lm.contact_id = d.id
-            ORDER BY lm.fecha_gestion DESC
-            LIMIT 1
-          ) last_m ON true
-          ${whereClause}
-          ORDER BY d.created_at DESC
-          LIMIT $${idx} OFFSET $${idx + 1}
-          `,
-          [...values, pageSize, offset]
-        );
-
-        const items = itemsResult.rows.map((row) => {
-          const assignedTo = [row.assigned_nombre, row.assigned_apellido].filter(Boolean).join(" ").trim();
-          const lastBy = [row.last_user_nombre, row.last_user_apellido].filter(Boolean).join(" ").trim();
-          return {
-            id: row.id,
-            nombre: row.nombre,
-            apellido: row.apellido,
-            documento: row.documento,
-            telefono: row.telefono,
-            celular: row.celular,
-            departamento: row.departamento,
-            direccion: row.direccion,
-            localidad: row.localidad,
-            origen_dato: row.origen_dato,
-            estado: row.estado || "nuevo",
-            created_at: row.created_at,
-            estado_venta: row.estado_venta || "nuevo",
-            intentos: Number(row.intentos || 0),
-            proxima_accion: row.proxima_accion,
-            batch_id: row.batch_id,
-            batch_nombre: row.batch_nombre,
-            assigned_to: row.assigned_to,
-            assigned_to_name: assignedTo,
-            last_gestion_at: row.last_gestion_at,
-            last_resultado: row.last_resultado,
-            last_nota: row.last_nota,
-            last_by: lastBy
-          };
-        });
-
-        return json(200, {
-          ok: true,
-          success: true,
-          items,
-          page,
-          pageSize,
-          total,
-          totalPages,
-          data: { items, page, pageSize, total, totalPages },
-          error: null
-        });
+      return json(200, {
+        ok: true,
+        ...result
+      });
       } finally {
         await client.end();
       }
@@ -8767,303 +8698,15 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
-      const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 8));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const search = normalizeText(getQueryParam(event, "search") || "");
-      const importType = normalizeText(getQueryParam(event, "importType") || "todos").toLowerCase();
-      const statusParam = normalizeText(getQueryParam(event, "status") || "");
-      const statusList = statusParam
-        ? statusParam
-          .split(",")
-          .map((value) => value.trim().toLowerCase())
-          .filter(Boolean)
-        : [];
-      if (statusList.includes("processed") && !statusList.includes("completed")) {
-        statusList.push("completed");
-      }
-      const offset = (page - 1) * pageSize;
 
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
+      const result = await listClientsDirectory({ page, limit, search });
 
-        if (search) {
-          whereParts.push(`file_name ILIKE $${idx}`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        if (importType && importType !== "todos") {
-          whereParts.push(`import_type = $${idx}`);
-          values.push(importType);
-          idx += 1;
-        }
-
-        if (statusList.length > 0) {
-          const expandedStatus = Array.from(new Set([
-            ...statusList,
-            ...(statusList.includes("processed") ? ["completed"] : [])
-          ]));
-          whereParts.push(`status = ANY($${idx})`);
-          values.push(expandedStatus);
-          idx += 1;
-        }
-
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-        const countResult = await client.query(
-          `
-          WITH all_imports AS (
-            SELECT
-              b.id,
-              b.file_name,
-              b.import_type,
-              b.status,
-              b.total_rows,
-              b.valid_rows,
-              b.error_rows,
-              b.rejected_missing_documento,
-              NULL::int AS processed_rows,
-              b.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'batches'::text AS source
-            FROM contact_import_batches b
-            LEFT JOIN users u ON u.id = b.created_by
-
-            UNION ALL
-
-            SELECT
-              j.id,
-              j.file_name,
-              'no_llamar'::text AS import_type,
-              j.status,
-              j.total_rows,
-              j.inserted_rows AS valid_rows,
-              j.skipped_rows AS error_rows,
-              0 AS rejected_missing_documento,
-              j.processed_rows,
-              j.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'no_call_jobs'::text AS source
-            FROM no_call_import_jobs j
-            LEFT JOIN users u ON u.id = j.created_by
-
-            UNION ALL
-
-            SELECT
-              gen_random_uuid() AS id,
-              'CSV Datos para trabajar'::text AS file_name,
-              'datos_para_trabajar'::text AS import_type,
-              'processed'::text AS status,
-              stats.total_rows,
-              stats.total_rows AS valid_rows,
-              0 AS error_rows,
-              0 AS rejected_missing_documento,
-              NULL::int AS processed_rows,
-              stats.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
-              NULL AS user_nombre,
-              NULL AS user_apellido,
-              'datos_virtual'::text AS source
-            FROM (
-              SELECT COUNT(*)::int AS total_rows, MAX(created_at) AS created_at
-              FROM datos_para_trabajar
-            ) stats
-            WHERE stats.total_rows > 0
-              AND NOT EXISTS (
-                SELECT 1 FROM contact_import_batches WHERE import_type = 'datos_para_trabajar'
-              )
-          )
-          SELECT COUNT(*)::int AS total
-          FROM all_imports
-          ${whereClause}
-          `,
-          values
-        );
-
-        const total = countResult.rows[0]?.total || 0;
-        const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-        const itemsResult = await client.query(
-          `
-          WITH all_imports AS (
-            SELECT
-              b.id,
-              b.file_name,
-              b.import_type,
-              b.status,
-              b.total_rows,
-              b.valid_rows,
-              b.error_rows,
-              b.rejected_missing_documento,
-              NULL::int AS processed_rows,
-              b.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'batches'::text AS source
-            FROM contact_import_batches b
-            LEFT JOIN users u ON u.id = b.created_by
-
-            UNION ALL
-
-            SELECT
-              j.id,
-              j.file_name,
-              'no_llamar'::text AS import_type,
-              j.status,
-              j.total_rows,
-              j.inserted_rows AS valid_rows,
-              j.skipped_rows AS error_rows,
-              0 AS rejected_missing_documento,
-              j.processed_rows,
-              j.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'no_call_jobs'::text AS source
-            FROM no_call_import_jobs j
-            LEFT JOIN users u ON u.id = j.created_by
-
-            UNION ALL
-
-            SELECT
-              gen_random_uuid() AS id,
-              'CSV Datos para trabajar'::text AS file_name,
-              'datos_para_trabajar'::text AS import_type,
-              'processed'::text AS status,
-              stats.total_rows,
-              stats.total_rows AS valid_rows,
-              0 AS error_rows,
-              0 AS rejected_missing_documento,
-              NULL::int AS processed_rows,
-              stats.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
-              NULL AS user_nombre,
-              NULL AS user_apellido,
-              'datos_virtual'::text AS source
-            FROM (
-              SELECT COUNT(*)::int AS total_rows, MAX(created_at) AS created_at
-              FROM datos_para_trabajar
-            ) stats
-            WHERE stats.total_rows > 0
-              AND NOT EXISTS (
-                SELECT 1 FROM contact_import_batches WHERE import_type = 'datos_para_trabajar'
-              )
-          )
-          SELECT
-            id,
-            file_name,
-            import_type,
-            status,
-            total_rows,
-            valid_rows,
-            error_rows,
-            rejected_missing_documento,
-            processed_rows,
-            created_at,
-            user_nombre,
-            user_apellido,
-            source
-          FROM all_imports
-          ${whereClause}
-          ORDER BY created_at DESC
-          LIMIT $${idx} OFFSET $${idx + 1}
-          `,
-          [...values, pageSize, offset]
-        );
-
-        const items = itemsResult.rows.map((row) => {
-          const usuario = [row.user_nombre, row.user_apellido].filter(Boolean).join(" ").trim() || "Sistema";
-          let estado = "Cargada";
-          if (row.source === "no_call_jobs") {
-            estado = row.status === "completed"
-              ? "Completada"
-              : row.status === "processing"
-              ? "En proceso"
-              : row.status === "failed"
-              ? "Fallida"
-              : "En cola";
-          } else {
-            estado = row.status === "processed"
-              ? (Number(row.error_rows || 0) ? "Con observaciones" : "Completada")
-              : row.status === "validated"
-              ? "Validada"
-              : row.status === "failed"
-              ? "Fallida"
-              : "Cargada";
-          }
-          const totalRows = Number(row.total_rows || 0);
-          const processedRows = Number(row.processed_rows || 0);
-          const progressPercent =
-            row.source === "no_call_jobs" && totalRows > 0
-              ? Math.min(100, Math.round((processedRows / totalRows) * 100))
-              : null;
-          return {
-            id: row.id,
-            archivo: row.file_name,
-            fecha: formatEsUyDateTime(row.created_at),
-            total: Number(row.total_rows || 0),
-            importados: Number(row.valid_rows || 0),
-            rechazados: Number(row.error_rows || 0),
-            estado,
-            usuario,
-            tipo: row.import_type,
-            tipoLabel: IMPORT_TYPE_LABEL[row.import_type] || row.import_type,
-            rejectedMissingDocumento: Number(row.rejected_missing_documento || 0),
-            progressPercent,
-            processedRows
-          };
-        });
-
-        const normalizedImportType = importType ? importType.replace(/-/g, "_") : "";
-        const wantsDatosParaTrabajar = !normalizedImportType || normalizedImportType === "datos_para_trabajar";
-        const statusAllowsProcessed = statusList.length === 0 || statusList.includes("processed") || statusList.includes("completed");
-
-        let addedFallback = false;
-        if (wantsDatosParaTrabajar && statusAllowsProcessed) {
-          const hasDatosBatch = items.some((item) => item.tipo === "datos_para_trabajar");
-          if (!hasDatosBatch) {
-            const fallbackResult = await client.query(
-              `
-              SELECT COUNT(*)::int AS total,
-                     MAX(created_at) AS last_created_at
-              FROM datos_para_trabajar
-              `
-            );
-            const fallbackTotal = fallbackResult.rows[0]?.total || 0;
-            const fallbackDate = fallbackResult.rows[0]?.last_created_at || null;
-            if (fallbackTotal > 0) {
-              items.unshift({
-                id: "datos-para-trabajar-virtual",
-                archivo: "datos_para_trabajar.csv",
-                fecha: formatEsUyDateTime(fallbackDate),
-                total: fallbackTotal,
-                importados: fallbackTotal,
-                rechazados: 0,
-                estado: "Completada",
-                usuario: "Sistema",
-                tipo: "datos_para_trabajar",
-                tipoLabel: IMPORT_TYPE_LABEL.datos_para_trabajar || "datos_para_trabajar",
-                rejectedMissingDocumento: 0
-              });
-              addedFallback = true;
-            }
-          }
-        }
-
-        if (addedFallback) {
-          total += 1;
-          totalPages = Math.max(1, Math.ceil(total / pageSize));
-        }
-
-        return json(200, {
-          items,
-          page,
-          pageSize,
-          total,
-          totalPages
-        });
+      return json(200, {
+        ok: true,
+        ...result
+      });
       } finally {
         await client.end();
       }
@@ -9241,87 +8884,15 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
-      const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 20));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const search = normalizeText(getQueryParam(event, "search") || "");
-      const fuente = normalizeText(getQueryParam(event, "fuente") || "");
-      const departamento = normalizeText(getQueryParam(event, "departamento") || "");
-      const localidad = normalizeText(getQueryParam(event, "localidad") || "");
-      const offset = (page - 1) * pageSize;
 
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
+      const result = await listClientsDirectory({ page, limit, search });
 
-        if (search) {
-          whereParts.push(`(numero ILIKE $${idx} OR departamento ILIKE $${idx} OR localidad ILIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        if (fuente) {
-          whereParts.push(`fuente = $${idx}`);
-          values.push(fuente);
-          idx += 1;
-        }
-
-        if (departamento) {
-          whereParts.push(`departamento ILIKE $${idx}`);
-          values.push(`%${departamento}%`);
-          idx += 1;
-        }
-
-        if (localidad) {
-          whereParts.push(`localidad ILIKE $${idx}`);
-          values.push(`%${localidad}%`);
-          idx += 1;
-        }
-
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-        const countResult = await client.query(
-          `
-          SELECT COUNT(*)::int AS total
-          FROM no_call_entries
-          ${whereClause}
-          `,
-          values
-        );
-
-        const total = countResult.rows[0]?.total || 0;
-        const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-        const itemsResult = await client.query(
-          `
-          SELECT
-            id,
-            numero,
-            fuente,
-            departamento,
-            localidad,
-            fecha_carga,
-            created_at
-          FROM no_call_entries
-          ${whereClause}
-          ORDER BY created_at DESC
-          LIMIT $${idx} OFFSET $${idx + 1}
-          `,
-          [...values, pageSize, offset]
-        );
-
-        const items = itemsResult.rows.map((row) => ({
-          id: row.id,
-          numero: row.numero,
-          fuente: row.fuente,
-          departamento: row.departamento,
-          localidad: row.localidad,
-          fecha_carga: row.fecha_carga,
-          created_at: row.created_at
-        }));
-
-        return json(200, { items, page, pageSize, total, totalPages });
+      return json(200, {
+        ok: true,
+        ...result
+      });
       } finally {
         await client.end();
       }
@@ -10286,132 +9857,15 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
-      const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 20));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const search = normalizeText(getQueryParam(event, "search") || "");
-      const blockedFilterRaw = getQueryParam(event, "bloqueado_no_llamar");
-      const blockedFilter =
-        blockedFilterRaw === undefined || blockedFilterRaw === null || blockedFilterRaw === ""
-          ? null
-          : String(blockedFilterRaw).toLowerCase();
-      const estadoFilterRaw = getQueryParam(event, "estado");
-      const estadoFilter = estadoFilterRaw ? normalizeText(estadoFilterRaw) : null;
-      const offset = (page - 1) * pageSize;
 
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
+      const result = await listClientsDirectory({ page, limit, search });
 
-        if (search) {
-          whereParts.push(`(
-            d.nombre ILIKE $${idx}
-            OR d.apellido ILIKE $${idx}
-            OR d.documento ILIKE $${idx}
-            OR d.telefono ILIKE $${idx}
-            OR d.celular ILIKE $${idx}
-            OR d.email ILIKE $${idx}
-            OR d.departamento ILIKE $${idx}
-            OR d.localidad ILIKE $${idx}
-          )`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        const normalizedCelular = buildNormalizedPhoneSql("d.celular");
-        const normalizedTelefono = buildNormalizedPhoneSql("d.telefono");
-        const blockedExistsSql = `
-          EXISTS (
-            SELECT 1
-            FROM no_call_entries n
-            WHERE n.numero IN (${normalizedCelular}, ${normalizedTelefono})
-          )
-        `;
-
-        if (blockedFilter === "true") {
-          whereParts.push(blockedExistsSql);
-        } else if (blockedFilter === "false") {
-          whereParts.push(`NOT ${blockedExistsSql}`);
-        }
-
-        if (estadoFilter) {
-          if (estadoFilter === "bloqueado") {
-            whereParts.push(blockedExistsSql);
-          } else if (estadoFilter === "nuevo") {
-            whereParts.push(`(d.estado IS NULL OR d.estado = 'nuevo')`);
-            whereParts.push(`NOT ${blockedExistsSql}`);
-          } else if (estadoFilter === "trabajado") {
-            whereParts.push(`d.estado = 'trabajado'`);
-            whereParts.push(`NOT ${blockedExistsSql}`);
-          }
-        }
-
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-        const countResult = await client.query(
-          `
-          SELECT COUNT(*)::int AS total
-          FROM datos_para_trabajar d
-          ${whereClause}
-          `,
-          values
-        );
-
-        const total = countResult.rows[0]?.total || 0;
-        const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-        const itemsResult = await client.query(
-          `
-          SELECT
-            d.id,
-            d.nombre,
-            d.apellido,
-            d.documento,
-            d.fecha_nacimiento,
-            d.telefono,
-            d.celular,
-            d.email,
-            d.direccion,
-            d.departamento,
-            d.localidad,
-            d.origen_dato,
-            d.estado,
-            d.created_at,
-            ${blockedExistsSql} AS bloqueado_no_llamar
-          FROM datos_para_trabajar d
-          ${whereClause}
-          ORDER BY created_at DESC
-          LIMIT $${idx} OFFSET $${idx + 1}
-          `,
-          [...values, pageSize, offset]
-        );
-
-        const items = itemsResult.rows.map((row) => {
-          const estado =
-            row.bloqueado_no_llamar ? "bloqueado" : (row.estado || "nuevo");
-          const estadoLabel =
-            estado === "bloqueado"
-              ? "Bloqueado"
-              : estado === "trabajado"
-              ? "Trabajado"
-              : "Nuevo";
-
-          return {
-            ...row,
-            bloqueado_no_llamar: Boolean(row.bloqueado_no_llamar),
-            estado,
-            estado_label: estadoLabel
-          };
-        });
-
-        return json(200, {
-          items,
-          page,
-          pageSize,
-          total,
-          totalPages
-        });
+      return json(200, {
+        ok: true,
+        ...result
+      });
       } finally {
         await client.end();
       }
