@@ -1045,12 +1045,14 @@ function formatEsUyDateTime(value) {
   if (!value) return null;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
-  return parsed.toLocaleString("es-UY", {
+  return parsed.toLocaleString("es-AR", {
+    timeZone: LOCAL_TZ,
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
+    hour12: false
   });
 }
 
@@ -1351,7 +1353,36 @@ function parseDate(value) {
   return `${year}-${month}-${day}`;
 }
 
-const LOCAL_TZ = process.env.APP_TIMEZONE || process.env.TIMEZONE || "America/Montevideo";
+const LOCAL_TZ = process.env.APP_TIMEZONE || process.env.TIMEZONE || "America/Argentina/Buenos_Aires";
+function makeLocalDateAtNoon(ymd) {
+  const parts = String(ymd || "").split("-").map((v) => Number(v));
+  if (parts.length !== 3 || parts.some((v) => !Number.isFinite(v))) return new Date();
+  return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], 12, 0, 0));
+}
+
+function addDaysYmd(ymd, deltaDays) {
+  const date = makeLocalDateAtNoon(ymd);
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  return formatDateYmd(date);
+}
+
+function getLocalWeekdayIndex(ymd) {
+  const date = makeLocalDateAtNoon(ymd);
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: LOCAL_TZ,
+    weekday: "short"
+  }).format(date);
+  const map = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7
+  };
+  return map[weekday] || 1;
+}
 
 function formatDateYmd(date, tz = LOCAL_TZ) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -1444,11 +1475,11 @@ async function getTeamSummary(client, fecha, now = new Date()) {
         COUNT(*)::int AS total_llamadas,
         COUNT(*) FILTER (WHERE resultado = 'venta')::int AS total_ventas
       FROM lead_management_history
-      WHERE fecha_gestion::date = $1::date
+      WHERE (fecha_gestion AT TIME ZONE $3)::date = $1::date
         AND user_id = ANY($2::uuid[])
       GROUP BY user_id
       `,
-      [fecha, sellerIds]
+      [fecha, sellerIds, LOCAL_TZ]
     )
     : { rows: [] };
 
@@ -1646,12 +1677,77 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
     FROM lead_management_history lmh
     LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
     WHERE lmh.user_id = $1
-      AND lmh.fecha_gestion::date = $2
+      AND (lmh.fecha_gestion AT TIME ZONE $3)::date = $2::date
     ORDER BY lmh.fecha_gestion ASC
     `,
-    [agenteId, fecha]
+    [agenteId, fecha, LOCAL_TZ]
   );
   const calls = callsRes.rows;
+  const eventosRes = await client.query(
+    `
+    SELECT id, tipo, inicio, fin, excedido, exceso_minutos
+    FROM eventos_turno
+    WHERE agente_id = $1
+      AND (inicio AT TIME ZONE $3)::date = $2::date
+    ORDER BY inicio ASC
+    `,
+    [agenteId, fecha, LOCAL_TZ]
+  );
+  const eventosRows = eventosRes.rows || [];
+
+  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BAÑO", "BAÃ‘O"]);
+  let totalPausas = 0;
+  let totalTrabajo = 0;
+  let pausaCount = 0;
+  let firstLogin = null;
+  let lastLogout = null;
+
+  const eventos = eventosRows.map((row) => {
+    const inicioDate = row.inicio ? new Date(row.inicio) : null;
+    const finDate = row.fin ? new Date(row.fin) : null;
+    const effectiveEnd = finDate || (inicioDate ? now : null);
+    const duracion = inicioDate && effectiveEnd ? minutesBetween(inicioDate, effectiveEnd) : null;
+
+    if (row.tipo === "LOGIN" && inicioDate) {
+      if (!firstLogin || inicioDate < firstLogin) firstLogin = inicioDate;
+    }
+    if (row.tipo === "LOGOUT" && (finDate || inicioDate)) {
+      const logoutAt = finDate || inicioDate;
+      if (!lastLogout || logoutAt > lastLogout) lastLogout = logoutAt;
+    }
+
+    if (pauseTypes.has(row.tipo)) {
+      pausaCount += 1;
+      if (duracion !== null) totalPausas += duracion;
+    }
+    if (row.tipo === "TRABAJO" && duracion !== null) {
+      totalTrabajo += duracion;
+    }
+
+    return {
+      id: row.id,
+      tipo: row.tipo,
+      inicio: inicioDate ? formatTimeHm(inicioDate) : null,
+      fin: finDate ? formatTimeHm(finDate) : null,
+      duracion_minutos: duracion,
+      excedido: row.excedido ?? false,
+      exceso_minutos: Number(row.exceso_minutos || 0)
+    };
+  });
+
+  const tiempoConectadoMin = totalTrabajo + totalPausas;
+  const porcentajeProductivo = tiempoConectadoMin
+    ? Number(((totalTrabajo / tiempoConectadoMin) * 100).toFixed(1))
+    : null;
+
+  const eventosConPorcentaje = tiempoConectadoMin
+    ? eventos.map((evento) => ({
+        ...evento,
+        porcentaje_ancho: evento.duracion_minutos !== null
+          ? Number(((evento.duracion_minutos / tiempoConectadoMin) * 100).toFixed(1))
+          : 0
+      }))
+    : eventos;
 
   const totalCalls = calls.length;
   const totalVentas = calls.filter((c) => c.resultado === "venta").length;
@@ -1700,40 +1796,41 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
       meta_ventas: config.meta_ventas_dia,
       conversion,
       conversion_promedio_equipo: conversionPromedioEquipo,
-      tiempo_conectado_minutos: null,
-      tiempo_productivo_minutos: null,
-      porcentaje_productivo: null,
-      tiempo_total_pausas_minutos: 0,
-      cantidad_pausas: 0
+      tiempo_conectado_minutos: tiempoConectadoMin || null,
+      tiempo_productivo_minutos: totalTrabajo || null,
+      porcentaje_productivo: porcentajeProductivo,
+      tiempo_total_pausas_minutos: totalPausas || 0,
+      cantidad_pausas: pausaCount || 0
     },
     alertas,
-    eventos: [],
+    eventos: eventosConPorcentaje,
     llamadas
   };
 }
 
 async function getAgentWeek(client, agenteId, todayDate) {
   const config = await getConfigMap(client);
-  const today = new Date(todayDate);
-  const day = today.getUTCDay() || 7;
-  const monday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (day - 1)));
+  const todayYmd = parseFechaParam(todayDate);
+  const weekday = getLocalWeekdayIndex(todayYmd);
+  const mondayYmd = addDaysYmd(todayYmd, -(weekday - 1));
 
   const dates = [];
-  for (let d = new Date(monday); d <= today; d = new Date(d.getTime() + 86400000)) {
-    dates.push(formatDateYmd(d));
+  for (let offset = 0; offset <= 6; offset += 1) {
+    const d = addDaysYmd(mondayYmd, offset);
+    if (d <= todayYmd) dates.push(d);
   }
 
   const callsRes = await client.query(
     `
-    SELECT fecha_gestion::date AS fecha,
+    SELECT (fecha_gestion AT TIME ZONE $3)::date AS fecha,
            COUNT(*)::int AS llamadas,
            COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas
     FROM lead_management_history
     WHERE user_id = $1
-      AND fecha_gestion::date = ANY($2::date[])
-    GROUP BY fecha_gestion::date
+      AND (fecha_gestion AT TIME ZONE $3)::date = ANY($2::date[])
+    GROUP BY (fecha_gestion AT TIME ZONE $3)::date
     `,
-    [agenteId, dates]
+    [agenteId, dates, LOCAL_TZ]
   );
   const callsMap = new Map(callsRes.rows.map((row) => [row.fecha, row]));
 
@@ -1747,7 +1844,7 @@ async function getAgentWeek(client, agenteId, todayDate) {
     const conversion = computeConversion(ventas, llamadas);
     totalVentasSemana += ventas;
     totalLlamadasSemana += llamadas;
-    const diaNombre = new Intl.DateTimeFormat("es-ES", { weekday: "long", timeZone: LOCAL_TZ }).format(new Date(fecha));
+    const diaNombre = new Intl.DateTimeFormat("es-ES", { weekday: "long", timeZone: LOCAL_TZ }).format(makeLocalDateAtNoon(fecha));
     return {
       fecha,
       dia_nombre: diaNombre.charAt(0).toUpperCase() + diaNombre.slice(1),
@@ -6943,7 +7040,7 @@ export const handler = async (event) => {
             FROM lead_management_history lmh
             JOIN contactos_tocados_hoy cth ON cth.contact_id = lmh.contact_id
             WHERE lmh.user_id = $1
-              AND lmh.fecha_gestion::date = $2::date
+              AND (lmh.fecha_gestion AT TIME ZONE $3)::date = $2::date::date
             ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
           )
           SELECT
@@ -11547,6 +11644,21 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
