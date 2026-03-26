@@ -87,6 +87,27 @@ async function enqueueDatosTrabajarJob(jobId, startAt) {
   );
 }
 
+function getContactImportQueueUrl() {
+  return process.env.CONTACT_IMPORT_QUEUE_URL || "";
+}
+
+async function enqueueContactImportJob(batchId, options = {}) {
+  const queueUrl = getContactImportQueueUrl();
+  if (!queueUrl) {
+    throw new Error("CONTACT_IMPORT_QUEUE_URL not set");
+  }
+  const payload = {
+    type: "contact_import",
+    batchId,
+    createProducts: options.createProducts !== false
+  };
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(payload),
+    })
+  );
+}
 const VALID_USER_STATUSES = [
   "pending",
   "approved",
@@ -1164,6 +1185,7 @@ function csvEscape(value) {
   if (value === null || value === undefined) return "";
   const text = String(value);
   if (/[",\r\n]/.test(text)) {
+
 
     return `"${text.replace(/"/g, "\"\"")}"`;
   }
@@ -5114,6 +5136,25 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
 }
 
 export const handler = async (event) => {
+  if (Array.isArray(event?.Records) && event.Records[0]?.eventSource === "aws:sqs") {
+    for (const record of event.Records) {
+      let payload = null;
+      try {
+        payload = JSON.parse(record.body || "{}");
+      } catch {
+        continue;
+      }
+      if (!payload) continue;
+      if (payload.type && payload.type !== "contact_import" && payload.type !== "clientes") {
+        continue;
+      }
+      const batchId = payload.batchId || payload.jobId;
+      if (!batchId) continue;
+      const createProducts = payload.createProducts !== false;
+      await processClientImportBatch(batchId, { createProducts });
+    }
+    return { ok: true };
+  }
   if (getMethodFromHttp(event) === "OPTIONS") {
     return handleOptions(event);
   }
@@ -10679,8 +10720,10 @@ export const handler = async (event) => {
         await client.query("COMMIT");
 
         let processResult = null;
+        let enqueued = false;
         if (autoProcess) {
-          processResult = await processClientImportBatch(batch.id, { createProducts });
+          await enqueueContactImportJob(batch.id, { createProducts });
+          enqueued = true;
         }
 
         return json(201, {
@@ -10694,6 +10737,7 @@ export const handler = async (event) => {
           newProducts: missingProducts,
           newProductsCount: missingProducts.length,
           processed: Boolean(processResult),
+          enqueued,
           process: processResult
         });
       } catch (error) {
@@ -10852,8 +10896,8 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const result = await processClientImportBatch(batchId, { createProducts });
-      return json(200, result);
+      await enqueueContactImportJob(batchId, { createProducts });
+      return json(200, { ok: true, batchId, enqueued: true });
     } catch (error) {
       return json(500, {
         ok: false,
@@ -11278,7 +11322,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
 
 
 
