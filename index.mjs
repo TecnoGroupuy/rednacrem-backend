@@ -5112,7 +5112,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
 
 export const handler = async (event) => {
   if (getMethodFromHttp(event) === "OPTIONS") {
-    return handleOptions();
+    return handleOptions(event);
   }
   const path = getPath(event);
   const method = getMethod(event);

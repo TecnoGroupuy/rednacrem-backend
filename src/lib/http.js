@@ -2,9 +2,34 @@ import { AppError } from "./errors.js";
 
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "https://rednacrem.tri.uy",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, x-file-name, x-filename, x-amz-date, x-api-key",
+  "Access-Control-Allow-Headers":
+    "Authorization, Content-Type, x-file-name, x-filename, x-amz-date, x-api-key, x-amz-security-token, x-amz-user-agent",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+  "Access-Control-Allow-Credentials": "true",
 };
+
+function buildCorsHeaders(event) {
+  const headers = event?.headers || {};
+  const origin =
+    headers.origin ||
+    headers.Origin ||
+    CORS_HEADERS["Access-Control-Allow-Origin"];
+  const requestHeaders =
+    headers["access-control-request-headers"] ||
+    headers["Access-Control-Request-Headers"] ||
+    "";
+
+  const allowHeaders = requestHeaders
+    ? `${requestHeaders}, ${CORS_HEADERS["Access-Control-Allow-Headers"]}`
+    : CORS_HEADERS["Access-Control-Allow-Headers"];
+
+  return {
+    ...CORS_HEADERS,
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Headers": allowHeaders,
+    Vary: "Origin",
+  };
+}
 
 function baseResponse(statusCode, payload) {
   return {
@@ -17,10 +42,10 @@ function baseResponse(statusCode, payload) {
   };
 }
 
-export function handleOptions() {
+export function handleOptions(event) {
   return {
     statusCode: 200,
-    headers: CORS_HEADERS,
+    headers: buildCorsHeaders(event),
     body: "",
   };
 }
