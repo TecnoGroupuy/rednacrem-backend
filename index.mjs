@@ -9547,15 +9547,21 @@ export const handler = async (event) => {
         );
         const activeEvent = activeRes.rows[0] || null;
 
+        const normalizeTipo = (rawTipo) => {
+          if (rawTipo === "CON_SUPERVISOR") return "SUPERVISOR";
+          return rawTipo;
+        };
+        const isBanoType = (t) => t === "BAﾑO" || t === "BAﾃ前";
+        const isPauseType = (t) => isBanoType(t) || t === "DESCANSO" || t === "SUPERVISOR";
+        const getPauseLimit = (t) =>
+          isBanoType(t) ? config.limite_bano_minutos : config.limite_descanso_minutos;
         const closeEvent = async (eventRow) => {
           if (!eventRow) return null;
           const fin = now;
           let excedido = false;
           let exceso = 0;
-          if (eventRow.tipo === "BAﾃ前" || eventRow.tipo === "DESCANSO") {
-            const limite = eventRow.tipo === "BAﾃ前"
-              ? config.limite_bano_minutos
-              : config.limite_descanso_minutos;
+          if (isPauseType(eventRow.tipo)) {
+            const limite = getPauseLimit(eventRow.tipo);
             const dur = minutesBetween(new Date(eventRow.inicio), fin);
             excedido = dur > limite;
             exceso = Math.max(0, dur - limite);
@@ -9575,8 +9581,9 @@ export const handler = async (event) => {
         };
 
         let createdAlert = null;
+        const tipoNormalized = normalizeTipo(tipo);
 
-        if (tipo === "LOGIN") {
+        if (tipoNormalized === "LOGIN") {
           await client.query(
             `
             INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
@@ -9591,7 +9598,7 @@ export const handler = async (event) => {
             `,
             [agenteId, now, fecha]
           );
-        } else if (tipo === "LOGOUT") {
+        } else if (tipoNormalized === "LOGOUT") {
           if (activeEvent) {
             await closeEvent(activeEvent);
           }
@@ -9602,7 +9609,7 @@ export const handler = async (event) => {
             `,
             [agenteId, now, fecha]
           );
-        } else if (tipo === "BAﾃ前" || tipo === "DESCANSO") {
+        } else if (isPauseType(tipoNormalized)) {
           if (activeEvent && activeEvent.tipo === "TRABAJO") {
             await closeEvent(activeEvent);
           }
@@ -9611,15 +9618,13 @@ export const handler = async (event) => {
             INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
             VALUES ($1, $2, $3, NULL, $4)
             `,
-            [agenteId, tipo, now, fecha]
+            [agenteId, tipoNormalized, now, fecha]
           );
-        } else if (tipo === "TRABAJO") {
-          if (activeEvent && (activeEvent.tipo === "BAﾃ前" || activeEvent.tipo === "DESCANSO")) {
+        } else if (tipoNormalized === "TRABAJO") {
+          if (activeEvent && isPauseType(activeEvent.tipo)) {
             const closed = await closeEvent(activeEvent);
             if (closed?.excedido) {
-              const limite = closed.tipo === "BAﾃ前"
-                ? config.limite_bano_minutos
-                : config.limite_descanso_minutos;
+              const limite = getPauseLimit(closed.tipo);
               const semanaRes = await client.query(
                 `
                 SELECT COUNT(*)::int AS veces
@@ -9660,7 +9665,7 @@ export const handler = async (event) => {
         const summary = await getTeamSummary(client, fecha, now);
         emitRealtime("agent_event", {
           agente_id: agenteId,
-          evento: { tipo, inicio: formatTimeHm(now), fin: tipo === "LOGOUT" || tipo === "LOGIN" ? formatTimeHm(now) : null }
+          evento: { tipo: tipoNormalized, inicio: formatTimeHm(now), fin: tipoNormalized === "LOGOUT" || tipoNormalized === "LOGIN" ? formatTimeHm(now) : null }
         });
         if (createdAlert) {
           emitRealtime("new_alert", {
@@ -9755,6 +9760,7 @@ export const handler = async (event) => {
         const conversion = computeConversion(Number(row.ventas || 0), Number(row.llamadas || 0));
 
         let createdAlert = null;
+        const tipoNormalized = normalizeTipo(tipo);
         if (conversion < config.conversion_minima_porcentaje) {
           const exists = await client.query(
             `
@@ -11167,6 +11173,11 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
+
+
 
 
 
