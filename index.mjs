@@ -9956,13 +9956,19 @@ export const handler = async (event) => {
           const noContesta = Number(daily.no_contesta || 0);
           const rechazos = Number(daily.rechazos || 0);
           const datosErroneos = Number(daily.datos_erroneos || 0);
-          const contacto = ventas + rechazos + seguimientos + rellamadas;
-          const efectividad = gestiones > 0 ? Math.round((ventas / gestiones) * 100) : 0;
+          const gestionesTotal = gestiones;
+          const contacto = gestionesTotal > 0
+            ? Math.round(((gestionesTotal - noContesta) / gestionesTotal) * 100)
+            : 0;
+          const efectividad = gestionesTotal > 0
+            ? Math.round((ventas / gestionesTotal) * 100)
+            : 0;
 
           return {
             id: seller.id,
             nombre: seller.nombre,
             apellido: seller.apellido,
+            gestiones: gestionesTotal,
             asignados: assignedMap.get(seller.id) || 0,
             ventas,
             seguimientos,
@@ -11759,6 +11765,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
