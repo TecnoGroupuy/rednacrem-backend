@@ -5496,7 +5496,7 @@ export const handler = async (event) => {
             const saleInsert = await client.query(
               `
               INSERT INTO sales (contact_id, seller_user_id, medio_pago, seller_name_snapshot, seller_origin, fecha_venta)
-              VALUES ($1, $2, $3, $4, $5)
+              VALUES ($1, $2, $3, $4, $5, $6)
               RETURNING id
               `,
               [contactId, sellerId || null, medioPago, sellerNameSnapshot, sellerOrigin, fechaVenta]
