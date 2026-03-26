@@ -399,6 +399,22 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
+function splitFullName(value) {
+  const text = normalizeText(value);
+  if (!text) return { nombre: "", apellido: "" };
+  const parts = text.split(/\s+/);
+  if (parts.length === 1) return { nombre: parts[0], apellido: "" };
+  return { nombre: parts.slice(0, -1).join(" "), apellido: parts.slice(-1).join(" ") };
+}
+
+let userProfileColumnsReady = false;
+async function ensureUserProfileColumns(client) {
+  if (userProfileColumnsReady) return;
+  await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS extension TEXT");
+  await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS department TEXT");
+  userProfileColumnsReady = true;
+}
+
 function normalizePhoneDigits(value) {
   const digits = String(value || "").replace(/\D/g, "");
   return digits || "";
@@ -5561,6 +5577,87 @@ export const handler = async (event) => {
         message: "Failed to create contact",
         error: error.message
       });
+    }
+  }
+
+  if (method === "PUT" && (path.endsWith("/users/me") || path.endsWith("/profile"))) {
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const errors = {};
+    const fullName = normalizeText(body.fullName || body.name || "");
+    const email = normalizeEmail(body.email);
+    const phone = normalizeText(body.phone || body.telefono || "");
+    const extension = normalizeText(body.extension || "");
+    const department = normalizeText(body.department || body.departamento || "");
+
+    if (!fullName) {
+      errors.fullName = "fullName requerido";
+    }
+    if (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+      errors.email = "email invalido";
+    }
+    if (phone && !/^\\d{8,15}$/.test(phone)) {
+      errors.phone = "telefono invalido";
+    }
+    if (!department) {
+      errors.department = "department requerido";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return json(422, { ok: false, message: "Validation failed", errors });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await ensureUserProfileColumns(client);
+        const duplicate = await client.query(
+          "SELECT id FROM users WHERE email = $1 AND id <> $2 LIMIT 1",
+          [email, dbUser.id]
+        );
+        if (duplicate.rowCount > 0) {
+          return json(409, { ok: false, message: "Email ya en uso" });
+        }
+        const nameParts = splitFullName(fullName);
+        const updateRes = await client.query(
+          "UPDATE users SET nombre = $1, apellido = $2, email = $3, telefono = $4, extension = $5, department = $6, updated_at = NOW() WHERE id = $7 RETURNING id, nombre, apellido, email, telefono, extension, department",
+          [nameParts.nombre || "", nameParts.apellido || "", email, phone || null, extension || null, department || null, dbUser.id]
+        );
+        const row = updateRes.rows[0];
+        if (!row) {
+          return json(404, { ok: false, message: "User not found" });
+        }
+        return json(200, {
+          ok: true,
+          user: {
+            id: row.id,
+            fullName: `${row.nombre} ${row.apellido}`.trim(),
+            email: row.email,
+            phone: row.telefono,
+            extension: row.extension || null,
+            department: row.department || null
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update profile", error: error.message });
     }
   }
 
@@ -11266,8 +11363,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
-
 
 
 
