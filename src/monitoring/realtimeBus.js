@@ -9,7 +9,11 @@ const REALTIME_SECRET = process.env.REALTIME_INTERNAL_SECRET || "";
 
 function postToRealtime(event, payload) {
   return new Promise((resolve) => {
-    if (!REALTIME_URL) return resolve();
+    console.log("[REALTIME] postToRealtime called", event, REALTIME_URL);
+    if (!REALTIME_URL) {
+      console.log("[REALTIME] No REALTIME_URL set, skipping");
+      return resolve();
+    }
     try {
       const body = JSON.stringify({ event, payload });
       const url = new URL("/internal/event", REALTIME_URL);
