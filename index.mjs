@@ -5902,7 +5902,7 @@ export const handler = async (event) => {
             s.id,
             s.contact_id,
             s.seller_user_id AS seller_id,
-            s.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
+            s.created_at,
             s.medio_pago,
             s.seller_name_snapshot,
             c.nombre,
@@ -9157,7 +9157,7 @@ export const handler = async (event) => {
               0 AS error_rows,
               0 AS rejected_missing_documento,
               NULL::int AS processed_rows,
-              stats.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
+              stats.created_at,
               NULL AS user_nombre,
               NULL AS user_apellido,
               'datos_virtual'::text AS source
@@ -9231,7 +9231,7 @@ export const handler = async (event) => {
               0 AS error_rows,
               0 AS rejected_missing_documento,
               NULL::int AS processed_rows,
-              stats.created_at,\n            COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
+              stats.created_at,
               NULL AS user_nombre,
               NULL AS user_apellido,
               'datos_virtual'::text AS source
