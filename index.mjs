@@ -7178,13 +7178,13 @@ export const handler = async (event) => {
         await client.query("COMMIT");
 
         const summary = await getTeamSummary(client, formatDateYmd(new Date()), new Date());
-        emitRealtime("new_call", {
+        await emitRealtime("new_call", {
           agente_id: dbUser?.id || null,
           llamada: {
             resultado: effectiveResultado
           }
         });
-        emitRealtime("team_update", summary);
+        await emitRealtime("team_update", summary);
 
         return json(200, {
           ok: true,
@@ -9663,12 +9663,12 @@ export const handler = async (event) => {
         }
 
         const summary = await getTeamSummary(client, fecha, now);
-        emitRealtime("agent_event", {
+        await emitRealtime("agent_event", {
           agente_id: agenteId,
           evento: { tipo: tipoNormalized, inicio: formatTimeHm(now), fin: tipoNormalized === "LOGOUT" || tipoNormalized === "LOGIN" ? formatTimeHm(now) : null }
         });
         if (createdAlert) {
-          emitRealtime("new_alert", {
+          await emitRealtime("new_alert", {
             agente_id: agenteId,
             alerta: {
               tipo: createdAlert.tipo,
@@ -9678,7 +9678,7 @@ export const handler = async (event) => {
             }
           });
         }
-        emitRealtime("team_update", summary);
+        await emitRealtime("team_update", summary);
 
         return json(201, { ok: true });
       } finally {
@@ -9785,12 +9785,12 @@ export const handler = async (event) => {
           }
         }
 
-        emitRealtime("new_call", {
+        await emitRealtime("new_call", {
           agente_id: agenteId,
           llamada: { resultado, duracion_segundos: duracion }
         });
         if (createdAlert) {
-          emitRealtime("new_alert", {
+          await emitRealtime("new_alert", {
             agente_id: agenteId,
             alerta: {
               tipo: createdAlert.tipo,
@@ -9800,7 +9800,7 @@ export const handler = async (event) => {
           });
         }
         const summary = await getTeamSummary(client, fecha, now);
-        emitRealtime("team_update", summary);
+        await emitRealtime("team_update", summary);
 
         return json(201, { ok: true });
       } finally {
