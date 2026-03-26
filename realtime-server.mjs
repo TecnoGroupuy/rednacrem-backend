@@ -90,6 +90,31 @@ const corsOrigin = corsOriginRaw
 
 const server = http.createServer(async (req, res) => {
   try {
+    const host = req.headers.host || `localhost:${process.env.PORT || 3001}`;
+    const requestUrl = new URL(req.url || "/", `http://${host}`);
+
+    if (req.method === "POST" && requestUrl.pathname === "/internal/event") {
+      const secret = process.env.REALTIME_INTERNAL_SECRET || "";
+      if (secret && req.headers["x-internal-secret"] !== secret) {
+        res.statusCode = 401;
+        res.end("Unauthorized");
+        return;
+      }
+      const body = await readBody(req);
+      try {
+        const { event, payload } = JSON.parse(body || "{}");
+        if (event && io) {
+          io.emit(event, payload);
+        }
+        res.statusCode = 200;
+        res.end("ok");
+      } catch (_) {
+        res.statusCode = 400;
+        res.end("bad request");
+      }
+      return;
+    }
+
     const body = await readBody(req);
     const event = buildEvent(req, body);
     const response = await handler(event);
