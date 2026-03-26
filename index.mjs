@@ -2127,9 +2127,6 @@ function validateImportRow(item) {
   if (!item.nombre && !item.apellido) {
     errors.push("nombre o apellido requerido");
   }
-  if (!item.documento) {
-    errors.push("documento requerido");
-  }
   return errors;
 }
 
@@ -2449,10 +2446,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
       try {
         await client.query("BEGIN");
 
-        const documento = normalizeText(row.documento);
-        if (!documento) {
-          throw new Error("Documento requerido");
-        }
+        const documentoRaw = normalizeText(row.documento);
+        const documento = documentoRaw || null;
         const email = normalizeText(row.email).toLowerCase() || null;
         const vendedorNombre = normalizeText(row.vendedor_nombre);
         const medioPago = normalizeText(row.medio_pago);
@@ -11271,7 +11266,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
 
 
 
