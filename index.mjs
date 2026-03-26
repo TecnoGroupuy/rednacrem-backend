@@ -9872,6 +9872,124 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/supervisor/sellers-summary")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const sellersRes = await client.query(
+          `
+          SELECT id, nombre, apellido
+          FROM users
+          WHERE role_key = 'vendedor'
+            AND status = 'approved'
+          ORDER BY nombre
+          `
+        );
+        const sellers = sellersRes.rows || [];
+        const sellerIds = sellers.map((row) => row.id);
+        if (!sellerIds.length) {
+          return json(200, { ok: true, fecha, items: [] });
+        }
+
+        const assignedRes = await client.query(
+          `
+          SELECT lcs.assigned_to AS user_id,
+                 COUNT(*) FILTER (WHERE lcs.estado_venta != 'dato_erroneo')::int AS asignados
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = ANY($1::uuid[])
+            AND lb.estado IN ('activo', 'asignado')
+          GROUP BY lcs.assigned_to
+          `,
+          [sellerIds]
+        );
+        const assignedMap = new Map(assignedRes.rows.map((row) => [row.user_id, Number(row.asignados || 0)]));
+
+        const dailyRes = await client.query(
+          `
+          WITH day_events AS (
+            SELECT lmh.user_id,
+                   lmh.contact_id,
+                   lmh.resultado,
+                   lmh.fecha_gestion
+            FROM lead_management_history lmh
+            WHERE lmh.user_id = ANY($1::uuid[])
+              AND (lmh.fecha_gestion AT TIME ZONE $2)::date = $3::date
+          ), last_result AS (
+            SELECT DISTINCT ON (user_id, contact_id)
+              user_id,
+              contact_id,
+              resultado
+            FROM day_events
+            ORDER BY user_id, contact_id, fecha_gestion DESC
+          )
+          SELECT user_id,
+                 COUNT(*)::int AS gestiones,
+                 COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas,
+                 COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS seguimientos,
+                 COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS rellamadas,
+                 COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS no_contesta,
+                 COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS rechazos,
+                 COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS datos_erroneos
+          FROM last_result
+          GROUP BY user_id
+          `,
+          [sellerIds, LOCAL_TZ, fecha]
+        );
+        const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
+
+        const items = sellers.map((seller) => {
+          const daily = dailyMap.get(seller.id) || {};
+          const gestiones = Number(daily.gestiones || 0);
+          const ventas = Number(daily.ventas || 0);
+          const seguimientos = Number(daily.seguimientos || 0);
+          const rellamadas = Number(daily.rellamadas || 0);
+          const noContesta = Number(daily.no_contesta || 0);
+          const rechazos = Number(daily.rechazos || 0);
+          const datosErroneos = Number(daily.datos_erroneos || 0);
+          const contacto = ventas + rechazos + seguimientos + rellamadas;
+          const efectividad = gestiones > 0 ? Math.round((ventas / gestiones) * 100) : 0;
+
+          return {
+            id: seller.id,
+            nombre: seller.nombre,
+            apellido: seller.apellido,
+            asignados: assignedMap.get(seller.id) || 0,
+            ventas,
+            seguimientos,
+            rellamadas,
+            no_contesta: noContesta,
+            rechazos,
+            datos_erroneos: datosErroneos,
+            contacto,
+            efectividad
+          };
+        });
+
+        return json(200, { ok: true, fecha, items });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load sellers summary",
+        error: error.message
+      });
+    }
+  }
   const agentDetailMatch = path.match(/\/api\/supervisor\/agent-detail\/([^/]+)$/);
   if (method === "GET" && agentDetailMatch) {
     try {
@@ -11644,6 +11762,9 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
 
 
 
