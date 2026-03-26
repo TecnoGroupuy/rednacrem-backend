@@ -1421,8 +1421,39 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     });
   }
 
+  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BAÑO", "BAÃ‘O"];
+  const eventsRes = sellerIds.length
+    ? await client.query(
+      `
+      SELECT
+        agente_id,
+        MIN(CASE WHEN tipo = 'LOGIN' THEN inicio END) AS login_time,
+        MAX(CASE WHEN tipo = 'LOGOUT' THEN fin END) AS logout_time,
+        SUM(CASE WHEN tipo = ANY($3::text[]) AND fin IS NOT NULL THEN EXTRACT(EPOCH FROM (fin - inicio))/60 ELSE 0 END)::int AS pause_minutes,
+        COUNT(*) FILTER (WHERE tipo = ANY($3::text[]))::int AS pause_count
+      FROM eventos_turno
+      WHERE fecha = $1
+        AND agente_id = ANY($2::uuid[])
+      GROUP BY agente_id
+      `,
+      [fecha, sellerIds, pauseTypes]
+    )
+    : { rows: [] };
+
+  const eventsMap = new Map();
+  for (const row of eventsRes.rows) {
+    eventsMap.set(row.agente_id, {
+      login_time: row.login_time ? new Date(row.login_time) : null,
+      logout_time: row.logout_time ? new Date(row.logout_time) : null,
+      pause_minutes: Number(row.pause_minutes || 0),
+      pause_count: Number(row.pause_count || 0)
+    });
+  }
+
   let totalLlamadas = 0;
   let totalVentas = 0;
+  let totalPauseMinutes = 0;
+  let agentesActivos = 0;
   const agentesOutput = [];
 
   for (const seller of sellers) {
@@ -1430,10 +1461,26 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     totalLlamadas += callStats.total_llamadas;
     totalVentas += callStats.total_ventas;
 
+    const eventStats = eventsMap.get(seller.id) || {
+      login_time: null,
+      logout_time: null,
+      pause_minutes: 0,
+      pause_count: 0
+    };
+
     const conversion = computeConversion(callStats.total_ventas, callStats.total_llamadas);
-    let estado = "Activo";
-    if (conversion < config.conversion_minima_porcentaje) estado = "Atencion";
-    if (conversion >= config.conversion_excelente_porcentaje) estado = "Excelente";
+
+    let tiempoConectadoMinutos = null;
+    if (eventStats.login_time) {
+      const end = eventStats.logout_time || now;
+      tiempoConectadoMinutos = minutesBetween(eventStats.login_time, end);
+    }
+
+    if (eventStats.login_time && !eventStats.logout_time) {
+      agentesActivos += 1;
+    }
+
+    totalPauseMinutes += eventStats.pause_minutes;
 
     agentesOutput.push({
       id: seller.id,
@@ -1441,17 +1488,32 @@ async function getTeamSummary(client, fecha, now = new Date()) {
       iniciales: getInitialsFromUser(seller.nombre, seller.apellido),
       turno_inicio: null,
       turno_fin: null,
-      login_time: null,
-      logout_time: null,
-      tiempo_conectado_minutos: null,
+      login_time: eventStats.login_time ? formatTimeHm(eventStats.login_time) : null,
+      logout_time: eventStats.logout_time ? formatTimeHm(eventStats.logout_time) : null,
+      tiempo_conectado_minutos: tiempoConectadoMinutos,
       total_llamadas: callStats.total_llamadas,
       total_ventas: callStats.total_ventas,
       conversion,
-      estado,
-      alerta: estado === "Atencion",
-      cantidad_pausas: 0,
-      tiempo_total_pausas_minutos: 0
+      estado: "Activo",
+      alerta: false,
+      cantidad_pausas: eventStats.pause_count,
+      tiempo_total_pausas_minutos: eventStats.pause_minutes
     });
+  }
+
+  const avgPauseMinutes = sellers.length
+    ? Math.round(totalPauseMinutes / sellers.length)
+    : 0;
+
+  for (const agent of agentesOutput) {
+    let estado = "Activo";
+    if (agent.conversion < config.conversion_minima_porcentaje) estado = "Atencion";
+    if (agent.conversion >= config.conversion_excelente_porcentaje) estado = "Excelente";
+    if (avgPauseMinutes && agent.tiempo_total_pausas_minutos > avgPauseMinutes + 20) {
+      estado = "Atencion";
+    }
+    agent.estado = estado;
+    agent.alerta = estado === "Atencion";
   }
 
   let agentesAtencion = agentesOutput.filter((a) => a.estado === "Atencion").length;
@@ -1469,7 +1531,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
   );
 
   const resumen_equipo = {
-    agentes_activos: agentesOutput.filter((a) => a.total_llamadas > 0).length,
+    agentes_activos: agentesActivos,
     agentes_total: sellers.length,
     agentes_atencion: agentesAtencion,
     total_llamadas: totalLlamadas,
@@ -1493,9 +1555,9 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     salesGoal: resumen_equipo.meta_ventas,
     avgConversion: resumen_equipo.conversion_promedio,
     avgConversionNote: null,
-    avgPauseMinutes: 0,
+    avgPauseMinutes,
     attentionNote: alertas_activas[0]
-      ? `${alertas_activas[0].agente_nombre} requiere atenciÃ³n â€” ${alertas_activas[0].descripcion}`
+      ? `${alertas_activas[0].agente_nombre} requiere atención — ${alertas_activas[0].descripcion}`
       : null
   };
 
