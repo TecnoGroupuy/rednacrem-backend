@@ -7004,7 +7004,7 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta IN ('no_contesta','rellamar')) AS no_contesta,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazos,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS ventas,
-            COUNT(*) FILTER (WHERE lcs.estado_venta != 'nuevo' AND lcs.estado_venta != 'dato_erroneo') AS tocados
+            COUNT(DISTINCT lcs.contact_id) FILTER (WHERE lcs.estado_venta != 'nuevo' AND lcs.estado_venta != 'dato_erroneo') AS tocados
           FROM lead_contact_status lcs
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
@@ -11759,6 +11759,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
