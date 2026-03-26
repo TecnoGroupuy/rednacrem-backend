@@ -2463,18 +2463,6 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         if (medioPago) paymentMethodsSeen.add(medioPago.toLowerCase());
         if (productoNombre) productsSeen.add(productoNombre.toLowerCase());
 
-        const contactLookupResult = await client.query(
-          `
-          SELECT *
-          FROM contacts
-          WHERE documento = $1
-          LIMIT 1
-          `,
-          [documento]
-        );
-
-        let contact = contactLookupResult.rows[0];
-
         const contactPayload = {
           nombre: row.nombre || null,
           apellido: row.apellido || null,
@@ -2488,79 +2476,40 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           pais: row.pais || null
         };
 
-        if (!contact) {
-          const insertContact = await client.query(
-            `
-            INSERT INTO contacts (
-              nombre,
-              apellido,
-              email,
-              telefono,
-              celular,
-              documento,
-              fecha_nacimiento,
-              direccion,
-              departamento,
-              pais,
-              status
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'activo')
-            RETURNING *
-            `,
-            [
-              contactPayload.nombre || "",
-              contactPayload.apellido,
-              contactPayload.email,
-              contactPayload.telefono,
-              contactPayload.celular,
-              contactPayload.documento,
-              contactPayload.fecha_nacimiento,
-              contactPayload.direccion,
-              contactPayload.departamento,
-              contactPayload.pais || "Uruguay"
-            ]
-          );
-          contact = insertContact.rows[0];
-          newContacts += 1;
-        } else {
-          const updates = [];
-          const values = [];
-          let index = 1;
-
-          function pushUpdate(column, value, allowOverwrite = false) {
-            if (value === null || value === undefined || value === "") return;
-            if (!allowOverwrite && contact[column] !== null && contact[column] !== undefined && String(contact[column]).trim() !== "") {
-              return;
-            }
-            updates.push(`${column} = $${index}`);
-            values.push(value);
-            index += 1;
-          }
-
-          pushUpdate("nombre", contactPayload.nombre, true);
-          pushUpdate("apellido", contactPayload.apellido, true);
-          pushUpdate("email", contactPayload.email, true);
-          pushUpdate("telefono", contactPayload.telefono);
-          pushUpdate("celular", contactPayload.celular);
-          pushUpdate("documento", contactPayload.documento);
-          pushUpdate("fecha_nacimiento", contactPayload.fecha_nacimiento);
-          pushUpdate("direccion", contactPayload.direccion);
-          pushUpdate("departamento", contactPayload.departamento);
-          pushUpdate("pais", contactPayload.pais);
-
-          if (updates.length > 0) {
-            values.push(contact.id);
-            await client.query(
-              `
-              UPDATE contacts
-              SET ${updates.join(", ")}, updated_at = now()
-              WHERE id = $${index}
-              `,
-              values
-            );
-          }
-        }
-
+        // Siempre crear un contacto nuevo para imports de clientes (sin deduplicar por documento).
+        const insertContact = await client.query(
+          `
+          INSERT INTO contacts (
+            nombre,
+            apellido,
+            email,
+            telefono,
+            celular,
+            documento,
+            fecha_nacimiento,
+            direccion,
+            departamento,
+            pais,
+            status
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'activo')
+          RETURNING *
+          `,
+          [
+            contactPayload.nombre || "",
+            contactPayload.apellido,
+            contactPayload.email,
+            contactPayload.telefono,
+            contactPayload.celular,
+            contactPayload.documento,
+            contactPayload.fecha_nacimiento,
+            contactPayload.direccion,
+            contactPayload.departamento,
+            contactPayload.pais || "Uruguay"
+          ]
+        );
+        const contact = insertContact.rows[0];
+        newContacts += 1;
         const nombreFamiliar = String(row.nombre_familiar || "").trim();
         if (nombreFamiliar) {
           const relativeExists = await client.query(
