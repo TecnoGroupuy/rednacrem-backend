@@ -137,20 +137,26 @@ export async function findCurrentUserFromClaims(claims) {
       client
     );
 
-    await insertRoleHistory({
-      userId: created.id,
-      oldRole: null,
-      newRole: created.role_key,
-      changedBy: null,
-      reason: "auto_create_from_cognito"
-    });
-    await insertStatusHistory({
-      userId: created.id,
-      oldStatus: null,
-      newStatus: created.status,
-      changedBy: null,
-      reason: "auto_create_from_cognito"
-    });
+    await insertRoleHistory(
+      {
+        userId: created.id,
+        oldRole: null,
+        newRole: created.role_key,
+        changedBy: null,
+        reason: "auto_create_from_cognito"
+      },
+      client
+    );
+    await insertStatusHistory(
+      {
+        userId: created.id,
+        oldStatus: null,
+        newStatus: created.status,
+        changedBy: null,
+        reason: "auto_create_from_cognito"
+      },
+      client
+    );
 
     return created;
   });
