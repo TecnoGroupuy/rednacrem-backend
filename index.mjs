@@ -7075,17 +7075,14 @@ export const handler = async (event) => {
         const h = hoyResult.rows[0] || {};
         const sa = seguimientoActivoResult.rows[0] || {};
         const seguimientoActivo = parseInt(agendaResult.rows[0]?.seguimiento_activo || "0", 10);
-        const tocados = parseInt(t.tocados || "0", 10) || 1;
-        const contactosReales =
-          seguimientoActivo +
-          parseInt(t.ventas || "0", 10) +
-          parseInt(t.rechazos || "0", 10);
-        const gestiHoy = parseInt(h.gestiones_hoy || "0", 10) || 1;
-        const contactoRealHoy =
-          parseInt(sa.seguimiento_activo_hoy || "0", 10) +
-          parseInt(h.rechazos_hoy || "0", 10) +
-          parseInt(h.ventas_hoy || "0", 10) +
-          parseInt(h.rellamar_hoy || "0", 10);
+        const tocadosRaw = parseInt(t.tocados || "0", 10);
+        const tocados = tocadosRaw > 0 ? tocadosRaw : 1;
+        const noContestaTotal = parseInt(t.no_contesta || "0", 10);
+        const contactosReales = Math.max(0, tocadosRaw - noContestaTotal);
+        const gestiHoyRaw = parseInt(h.gestiones_hoy || "0", 10);
+        const gestiHoy = gestiHoyRaw > 0 ? gestiHoyRaw : 1;
+        const noContestaHoy = parseInt(h.no_contesta_hoy || "0", 10);
+        const contactoRealHoy = Math.max(0, gestiHoyRaw - noContestaHoy);
 
         return json(200, {
           ok: true,
@@ -11762,6 +11759,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
