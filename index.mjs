@@ -1378,7 +1378,8 @@ async function getConfigMap(client) {
     conversion_minima_porcentaje: Number(map.conversion_minima_porcentaje ?? 10),
     conversion_excelente_porcentaje: Number(map.conversion_excelente_porcentaje ?? 16),
     meta_llamadas_dia: Number(map.meta_llamadas_dia ?? 40),
-    meta_ventas_dia: Number(map.meta_ventas_dia ?? 6)
+    meta_ventas_dia: Number(map.meta_ventas_dia ?? 6),
+    realtimeUrl: map.realtimeUrl || map.realtime_url || null
   };
 }
 
