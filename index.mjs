@@ -5632,18 +5632,20 @@ export const handler = async (event) => {
 
     const errors = {};
     const fullName = normalizeText(body.fullName || body.name || "");
-    const email = normalizeEmail(body.email);
-    const phone = normalizeText(body.phone || body.telefono || "");
+    const emailRaw = normalizeText(body.email || "");
+    const email = normalizeEmail(emailRaw) || emailRaw;
+    const phoneRaw = normalizeText(body.phone || body.telefono || "");
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, "") : "";
     const extension = normalizeText(body.extension || "");
     const department = normalizeText(body.department || body.departamento || "");
 
     if (!fullName) {
       errors.fullName = "fullName requerido";
     }
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      errors.email = "email invalido";
+    if (!emailRaw) {
+      errors.email = "email requerido";
     }
-    if (phone && !/^\d{8,15}$/.test(phone)) {
+    if (phoneRaw && (phoneDigits.length < 8 || phoneDigits.length > 15)) {
       errors.phone = "telefono invalido";
     }
     if (!department) {
@@ -5696,7 +5698,7 @@ export const handler = async (event) => {
         const nameParts = splitFullName(fullName);
         const updateRes = await client.query(
           "UPDATE users SET nombre = $1, apellido = $2, email = $3, telefono = $4, extension = $5, department = $6, updated_at = NOW() WHERE id = $7 RETURNING id, nombre, apellido, email, telefono, extension, department",
-          [nameParts.nombre || "", nameParts.apellido || "", email, phone || null, extension || null, department || null, dbUser.id]
+          [nameParts.nombre || "", nameParts.apellido || "", email, phoneDigits || null, extension || null, department || null, dbUser.id]
         );
         const row = updateRes.rows[0];
         if (!row) {
@@ -5728,18 +5730,20 @@ export const handler = async (event) => {
 
     const errors = {};
     const fullName = normalizeText(body.fullName || body.name || "");
-    const email = normalizeEmail(body.email);
-    const phone = normalizeText(body.phone || body.telefono || "");
+    const emailRaw = normalizeText(body.email || "");
+    const email = normalizeEmail(emailRaw) || emailRaw;
+    const phoneRaw = normalizeText(body.phone || body.telefono || "");
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, "") : "";
     const extension = normalizeText(body.extension || "");
     const department = normalizeText(body.department || body.departamento || "");
 
     if (!fullName) {
       errors.fullName = "fullName requerido";
     }
-    if (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
-      errors.email = "email invalido";
+    if (!emailRaw) {
+      errors.email = "email requerido";
     }
-    if (phone && !/^\\d{8,15}$/.test(phone)) {
+    if (phoneRaw && (phoneDigits.length < 8 || phoneDigits.length > 15)) {
       errors.phone = "telefono invalido";
     }
     if (!department) {
@@ -5776,7 +5780,7 @@ export const handler = async (event) => {
         const nameParts = splitFullName(fullName);
         const updateRes = await client.query(
           "UPDATE users SET nombre = $1, apellido = $2, email = $3, telefono = $4, extension = $5, department = $6, updated_at = NOW() WHERE id = $7 RETURNING id, nombre, apellido, email, telefono, extension, department",
-          [nameParts.nombre || "", nameParts.apellido || "", email, phone || null, extension || null, department || null, dbUser.id]
+          [nameParts.nombre || "", nameParts.apellido || "", email, phoneDigits || null, extension || null, department || null, dbUser.id]
         );
         const row = updateRes.rows[0];
         if (!row) {
