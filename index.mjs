@@ -5226,6 +5226,8 @@ export const handler = async (event) => {
           nombre: dbUser.nombre,
           apellido: dbUser.apellido,
           telefono: dbUser.telefono,
+          extension: dbUser.extension || null,
+          department: dbUser.department || null,
           email: dbUser.email,
           role: dbUser.role_key || authUser.fallbackRole,
           status: dbUser.status,
