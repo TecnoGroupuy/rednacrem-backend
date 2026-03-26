@@ -1468,23 +1468,60 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     [fecha]
   );
 
+  const resumen_equipo = {
+    agentes_activos: agentesOutput.filter((a) => a.total_llamadas > 0).length,
+    agentes_total: sellers.length,
+    agentes_atencion: agentesAtencion,
+    total_llamadas: totalLlamadas,
+    meta_llamadas: config.meta_llamadas_dia * sellers.length,
+    total_ventas: totalVentas,
+    meta_ventas: config.meta_ventas_dia * sellers.length,
+    conversion_promedio: computeConversion(totalVentas, totalLlamadas)
+  };
+
+  const alertas_activas = alertasRes.rows.map((row) => ({
+    agente_nombre: row.agente_nombre,
+    descripcion: row.descripcion || row.tipo
+  }));
+
+  const summary = {
+    agentsActive: `${resumen_equipo.agentes_activos} / ${resumen_equipo.agentes_total}`,
+    attentionCount: resumen_equipo.agentes_atencion,
+    calls: resumen_equipo.total_llamadas,
+    callsGoal: resumen_equipo.meta_llamadas,
+    sales: resumen_equipo.total_ventas,
+    salesGoal: resumen_equipo.meta_ventas,
+    avgConversion: resumen_equipo.conversion_promedio,
+    avgConversionNote: null,
+    avgPauseMinutes: 0,
+    attentionNote: alertas_activas[0]
+      ? `${alertas_activas[0].agente_nombre} requiere atención — ${alertas_activas[0].descripcion}`
+      : null
+  };
+
+  const agents = agentesOutput.map((agent) => ({
+    id: agent.id,
+    name: agent.nombre,
+    apellido: null,
+    calls: agent.total_llamadas,
+    sales: agent.total_ventas,
+    conversion: agent.conversion,
+    status: agent.estado,
+    pausesMinutes: agent.tiempo_total_pausas_minutos || 0,
+    pausesCount: agent.cantidad_pausas || 0,
+    login: agent.login_time,
+    workTime: agent.tiempo_conectado_minutos
+      ? `${Math.floor(agent.tiempo_conectado_minutos / 60)}h ${agent.tiempo_conectado_minutos % 60}m`
+      : null
+  }));
+
   return {
     fecha,
-    resumen_equipo: {
-      agentes_activos: agentesOutput.filter((a) => a.total_llamadas > 0).length,
-      agentes_total: sellers.length,
-      agentes_atencion: agentesAtencion,
-      total_llamadas: totalLlamadas,
-      meta_llamadas: config.meta_llamadas_dia * sellers.length,
-      total_ventas: totalVentas,
-      meta_ventas: config.meta_ventas_dia * sellers.length,
-      conversion_promedio: computeConversion(totalVentas, totalLlamadas)
-    },
-    alertas_activas: alertasRes.rows.map((row) => ({
-      agente_nombre: row.agente_nombre,
-      descripcion: row.descripcion || row.tipo
-    })),
-    agentes: agentesOutput
+    resumen_equipo,
+    alertas_activas,
+    agentes: agentesOutput,
+    summary,
+    agents
   };
 }
 
