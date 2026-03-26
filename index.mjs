@@ -10495,6 +10495,44 @@ export const handler = async (event) => {
                 dbUser?.id || null
               ]
             );
+          } else if (message.includes('contact_import_batches_status_check')) {
+            await client.query(
+              `
+              ALTER TABLE public.contact_import_batches
+              DROP CONSTRAINT IF EXISTS contact_import_batches_status_check;
+              `
+            );
+            await client.query(
+              `
+              ALTER TABLE public.contact_import_batches
+              ADD CONSTRAINT contact_import_batches_status_check
+              CHECK (status IN ('uploaded', 'validated', 'processed', 'processing', 'failed'));
+              `
+            );
+            batchRes = await client.query(
+              `
+              INSERT INTO contact_import_batches (
+                file_name,
+                status,
+                import_type,
+                total_rows,
+                valid_rows,
+                error_rows,
+                created_by
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+              RETURNING id
+              `,
+              [
+                fileName,
+                "processed",
+                "datos_para_trabajar",
+                rows.length,
+                0,
+                0,
+                dbUser?.id || null
+              ]
+            );
           } else {
             throw err;
           }
