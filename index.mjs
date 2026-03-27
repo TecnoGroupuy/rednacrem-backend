@@ -6819,7 +6819,7 @@ const items = result.rows.map((row) => ({
                 AND lb.tipo = 'recupero'
               ORDER BY lmh.fecha_gestion DESC
               LIMIT 1
-            ) AS ultima_gestion_fecha,
+            ) AS ultima_gestion_fecha
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
           WHERE ${where}
