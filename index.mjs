@@ -6719,9 +6719,24 @@ const items = result.rows.map((row) => ({
       if (roleError) return roleError;
 
       const productoRaw = getQueryParam(event, "producto");
+      const searchRaw = getQueryParam(event, "search");
+      const sortRaw = getQueryParam(event, "sort");
+      const dirRaw = getQueryParam(event, "dir");
       const departamentoRaw = getQueryParam(event, "departamento");
       const producto = productoRaw ? productoRaw.trim() : "";
       const departamento = departamentoRaw ? departamentoRaw.trim() : "";
+      const search = searchRaw ? searchRaw.trim() : "";
+      const sort = sortRaw ? sortRaw.trim() : "";
+      const dir = dirRaw === "desc" ? "DESC" : "ASC";
+
+      const sortableColumns = {
+        edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
+        telefono: "c.telefono",
+        departamento: "c.departamento",
+        nombre_producto: "cp.nombre_producto",
+        precio: "cp.precio",
+        fecha_baja: "cp.fecha_baja"
+      };
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
@@ -6752,6 +6767,11 @@ const items = result.rows.map((row) => ({
           idx += 1;
         }
 
+        if (search) {
+          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
         if (departamento) {
           conditions.push(`c.departamento = $${idx}`);
           values.push(departamento);
@@ -6759,6 +6779,10 @@ const items = result.rows.map((row) => ({
         }
 
         const where = conditions.join(" AND ");
+        const orderBy = sort && sortableColumns[sort]
+          ? `${sortableColumns[sort]} ${dir}`
+          : "cp.fecha_baja DESC";
+
 
         const itemsRes = await client.query(
           `
@@ -6778,7 +6802,7 @@ const items = result.rows.map((row) => ({
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
           WHERE ${where}
-          ORDER BY c.telefono, cp.fecha_baja DESC
+          ORDER BY c.telefono, ${orderBy}
           LIMIT $${idx} OFFSET $${idx + 1}
           `,
           [...values, limit, offset]
@@ -8376,7 +8400,12 @@ const items = result.rows.map((row) => ({
         AND localidad <> ''
         AND estado = 'nuevo'
       `;
-      if (departamento) {
+              if (search) {
+          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
+if (departamento) {
         values.push(departamento);
         where += ` AND departamento = $1`;
       }
@@ -8498,7 +8527,12 @@ const items = result.rows.map((row) => ({
       }
 
       const departamento = getQueryParam(event, "departamento");
-      if (departamento) {
+              if (search) {
+          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
+if (departamento) {
         const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
         if (deptos.length) {
           conditions.push(`departamento = ANY($${i})`);
@@ -8566,6 +8600,10 @@ const items = result.rows.map((row) => ({
       }
 
       const where = conditions.join(" AND ");
+        const orderBy = sort && sortableColumns[sort]
+          ? `${sortableColumns[sort]} ${dir}`
+          : "cp.fecha_baja DESC";
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -8615,7 +8653,12 @@ const items = result.rows.map((row) => ({
       }
 
       const departamento = getQueryParam(event, "departamento");
-      if (departamento) {
+              if (search) {
+          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
+if (departamento) {
         const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
         if (deptos.length) {
           conditions.push(`departamento = ANY($${i})`);
@@ -8686,6 +8729,10 @@ const items = result.rows.map((row) => ({
       const pagina = Math.max(1, parseInt(getQueryParam(event, "pagina") || "1", 10));
       const offset = (pagina - 1) * limite;
       const where = conditions.join(" AND ");
+        const orderBy = sort && sortableColumns[sort]
+          ? `${sortableColumns[sort]} ${dir}`
+          : "cp.fecha_baja DESC";
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -9900,7 +9947,12 @@ const items = result.rows.map((row) => ({
           idx += 1;
         }
 
-        if (departamento) {
+                if (search) {
+          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
+if (departamento) {
           whereParts.push(`departamento ILIKE $${idx}`);
           values.push(`%${departamento}%`);
           idx += 1;
@@ -12011,6 +12063,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
