@@ -6847,8 +6847,8 @@ const items = result.rows.map((row) => ({
 
         const batchRes = await client.query(
           `
-          INSERT INTO lead_batches (nombre, estado, created_by, seller_id, asignado_a)
-          VALUES ($1, 'asignado', $2, $3, $3)
+          INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a)
+          VALUES ($1, 'asignado', $2, 'recupero', $3, $3)
           RETURNING id
           `,
           [nombre, dbUser?.id || null, sellerIds[0] || null]
@@ -12009,6 +12009,12 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
+
+
+
 
 
 
