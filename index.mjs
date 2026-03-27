@@ -7113,9 +7113,7 @@ const items = result.rows.map((row) => ({
             ) AS ultima_gestion_real
           FROM lead_contact_status lcs
           LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
-            AND lcs.contact_id IS NOT NULL
-          LEFT JOIN contacts c ON c.id = lcs.client_contact_id
-            AND lcs.client_contact_id IS NOT NULL
+          LEFT JOIN contacts c ON c.id = lcs.contact_id
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
