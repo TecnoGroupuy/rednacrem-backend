@@ -6577,6 +6577,18 @@ const items = result.rows.map((row) => ({
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+        const paramMatches = whereClause.match(/\$(\d+)/g) || [];
+        const maxParam = paramMatches.reduce((max, token) => Math.max(max, Number(token.slice(1))), 0);
+        if (values.length < maxParam) {
+          console.warn("[leads] Param mismatch", {
+            whereClause,
+            valuesLength: values.length,
+            maxParam
+          });
+          while (values.length < maxParam) {
+            values.push(dbUser?.id ?? null);
+          }
+        }
 
         const countResult = await client.query(
           `
