@@ -5987,58 +5987,54 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const sellerId = dbUser?.id || null;
-      const sellerName = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim();
-      const sellerNamePattern = sellerName ? `%${sellerName}%` : "";
-
       const client = createDbClient();
       await client.connect();
       try {
-        const result = await client.query(
+              const result = await client.query(
           `
           SELECT
-            s.id,
-            s.contact_id,
-            s.seller_user_id AS seller_id,
-            s.created_at,
+            s.id AS sale_id,
             s.medio_pago,
+            s.fecha_venta,
             s.seller_name_snapshot,
-            c.nombre,
-            c.apellido,
+            cp.nombre_producto,
+            cp.plan,
+            cp.precio,
+            cp.estado AS producto_estado,
+            c.nombre AS contact_nombre,
+            c.apellido AS contact_apellido,
             c.telefono,
-            c.celular,
-            si.product_id,
-            si.price,
-            COALESCE(p.nombre, si.product_name_snapshot) AS producto_nombre
+            c.ubicacion,
+            c.documento,
+            c.email,
+            c.direccion
           FROM sales s
+          JOIN contact_products cp ON cp.sale_id = s.id
           JOIN contacts c ON c.id = s.contact_id
-          LEFT JOIN LATERAL (
-            SELECT product_id, price, product_name_snapshot
-            FROM sale_items
-            WHERE sale_id = s.id
-            ORDER BY created_at DESC NULLS LAST
-            LIMIT 1
-          ) si ON true
-          LEFT JOIN products p ON p.id = si.product_id
           WHERE s.seller_user_id = $1
-             OR ($2 <> '' AND s.seller_name_snapshot ILIKE $3)
-          ORDER BY s.created_at DESC NULLS LAST
+          ORDER BY s.fecha_venta DESC
           `,
-          [sellerId, sellerName, sellerNamePattern]
+          [sellerId]
         );
-
-        const items = result.rows.map((row) => ({
-          id: row.id,
-          contact_id: row.contact_id,
-          cliente_nombre: [row.nombre, row.apellido].filter(Boolean).join(" ").trim(),
-          telefono: row.celular || row.telefono || "",
-          producto_id: row.product_id || null,
-          producto_nombre: row.producto_nombre || null,
-          cuota: row.price !== null && row.price !== undefined
-            ? Number(row.price)
+const items = result.rows.map((row) => ({
+          id: row.sale_id,
+          sale_id: row.sale_id,
+          medio_pago: row.medio_pago || null,
+          fecha_venta: row.fecha_venta || null,
+          seller_name_snapshot: row.seller_name_snapshot || null,
+          nombre_producto: row.nombre_producto || null,
+          plan: row.plan || null,
+          precio: row.precio !== null && row.precio !== undefined
+            ? Number(row.precio)
             : null,
-          fecha_venta: row.sale_fecha || null,
-          fecha_venta_at: row.sale_fecha || null,
-          medio_pago: row.medio_pago || null
+          producto_estado: row.producto_estado || null,
+          contact_nombre: row.contact_nombre || null,
+          contact_apellido: row.contact_apellido || null,
+          telefono: row.telefono || null,
+          ubicacion: row.ubicacion || null,
+          documento: row.documento || null,
+          email: row.email || null,
+          direccion: row.direccion || null
         }));
 
         return json(200, {
@@ -8643,10 +8639,7 @@ export const handler = async (event) => {
       if (statusError) return statusError;
 
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const sellerName = normalizeText(body?.sellerName || body?.seller);
-      const sellerId = body?.sellerId || null;
+      if (roleError) return roleError;      const sellerId = body?.sellerId || null;
 
       const client = createDbClient();
       await client.connect();
@@ -11717,6 +11710,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
