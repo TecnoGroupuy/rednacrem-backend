@@ -10237,26 +10237,32 @@ const items = result.rows.map((row) => ({
 
         const items = sellers.map((seller) => {
           const daily = dailyMap.get(seller.id) || {};
-          const gestiones = Number(daily.gestiones || 0);
           const ventas = Number(daily.ventas || 0);
           const seguimientos = Number(daily.seguimientos || 0);
           const rellamadas = Number(daily.rellamadas || 0);
           const noContesta = Number(daily.no_contesta || 0);
           const rechazos = Number(daily.rechazos || 0);
           const datosErroneos = Number(daily.datos_erroneos || 0);
-          const gestionesTotal = gestiones;
-          const contacto = gestionesTotal > 0
-            ? Math.round(((gestionesTotal - noContesta) / gestionesTotal) * 100)
+          const totalGestionado =
+            ventas +
+            seguimientos +
+            rellamadas +
+            noContesta +
+            rechazos +
+            datosErroneos;
+          const datosUtiles = ventas + seguimientos + rechazos;
+          const contacto = totalGestionado > 0
+            ? Math.round((datosUtiles / totalGestionado) * 100)
             : 0;
-          const efectividad = gestionesTotal > 0
-            ? Math.round((ventas / gestionesTotal) * 100)
+          const efectividad = datosUtiles > 0
+            ? Math.round((ventas / datosUtiles) * 100)
             : 0;
 
           return {
             id: seller.id,
             nombre: seller.nombre,
             apellido: seller.apellido,
-            gestiones: gestionesTotal,
+            gestiones: totalGestionado,
             asignados: assignedMap.get(seller.id) || 0,
             ventas,
             seguimientos,
