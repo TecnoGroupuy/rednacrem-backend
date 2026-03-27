@@ -6073,14 +6073,16 @@ const items = result.rows.map((row) => ({
         const result = await client.query(
           `
           SELECT
-            d.id,
-            d.nombre,
-            d.apellido,
-            d.telefono,
-            d.celular,
-            d.departamento,
-            d.localidad,
-            d.origen_dato          AS fuente,
+            s.contact_id            AS id,
+            COALESCE(c.nombre, d.nombre)            AS nombre,
+            COALESCE(c.apellido, d.apellido)        AS apellido,
+            COALESCE(c.telefono, d.telefono)        AS telefono,
+            COALESCE(c.celular, d.celular)          AS celular,
+            COALESCE(c.departamento, d.departamento) AS departamento,
+            d.localidad                              AS localidad,
+            d.origen_dato                            AS fuente,
+            COALESCE(c.email, d.correo_electronico, d.email) AS email,
+            COALESCE(c.direccion, d.direccion)       AS direccion,
             s.fecha_venta,
             s.medio_pago,
             s.id                   AS sale_id,
@@ -6093,9 +6095,10 @@ const items = result.rows.map((row) => ({
             lmh.nota               AS nota_venta
 
           FROM sales s
-          JOIN datos_para_trabajar d  ON d.id = s.contact_id
-          LEFT JOIN contact_products cp ON cp.sale_id = s.id
-          LEFT JOIN lead_batches lb     ON lb.id = (
+          LEFT JOIN contacts c           ON c.id = s.contact_id
+          LEFT JOIN datos_para_trabajar d ON d.id = s.contact_id
+          LEFT JOIN contact_products cp   ON cp.sale_id = s.id
+          LEFT JOIN lead_batches lb       ON lb.id = (
             SELECT lcs2.batch_id 
             FROM lead_contact_status lcs2 
             WHERE lcs2.contact_id = s.contact_id 
@@ -11721,6 +11724,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
