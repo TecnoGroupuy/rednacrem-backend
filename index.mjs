@@ -1088,7 +1088,7 @@ function buildContactSummarySelect() {
       c.email,
       c.telefono,
       c.documento,
-            DATE_PART('year', AGE(c.fecha_nacimiento))::int AS edad,
+            CASE\n              WHEN c.fecha_nacimiento IS NULL THEN NULL\n              ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int\n            END AS edad,
       c.status AS contacto_estado,
       COUNT(cp.id)::int AS productos_total,
       COUNT(*) FILTER (WHERE cp.estado = 'alta')::int AS productos_activos,
@@ -6769,7 +6769,7 @@ const items = result.rows.map((row) => ({
             c.telefono,
             c.celular,
             c.documento,
-            DATE_PART('year', AGE(c.fecha_nacimiento))::int AS edad,
+            CASE WHEN c.fecha_nacimiento IS NULL THEN NULL ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int END AS edad,
             c.departamento,
             cp.nombre_producto,
             cp.precio,
@@ -12011,6 +12011,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
