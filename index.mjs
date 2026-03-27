@@ -6915,7 +6915,6 @@ const items = result.rows.map((row) => ({
 
         for (let i = 0; i < contactIds.length; i += 1) {
           const contactId = contactIds[i];
-          const assignedTo = sellerIds[i % sellerIds.length];
 
           await client.query(
             `
@@ -6925,37 +6924,6 @@ const items = result.rows.map((row) => ({
             `,
             [batchId, contactId]
           );
-
-          const updated = await client.query(
-            `
-            UPDATE lead_contact_status
-            SET batch_id = $2,
-                assigned_to = $3,
-                estado_venta = 'nuevo',
-                intentos = 0,
-                updated_at = now()
-            WHERE client_contact_id = $1
-            RETURNING client_contact_id
-            `,
-            [contactId, batchId, assignedTo]
-          );
-
-          if (!updated.rows.length) {
-            await client.query(
-              `
-              INSERT INTO lead_contact_status (
-                client_contact_id,
-                estado_venta,
-                intentos,
-                batch_id,
-                assigned_to
-              )
-              VALUES ($1, 'nuevo', 0, $2, $3)
-              ON CONFLICT (client_contact_id) DO NOTHING
-              `,
-              [contactId, batchId, assignedTo]
-            );
-          }
         }
 
         await client.query("COMMIT");
