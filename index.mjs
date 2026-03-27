@@ -6072,7 +6072,7 @@ const items = result.rows.map((row) => ({
       try {
         const result = await client.query(
           `
-          SELECT 
+          SELECT
             d.id,
             d.nombre,
             d.apellido,
@@ -6080,25 +6080,35 @@ const items = result.rows.map((row) => ({
             d.celular,
             d.departamento,
             d.localidad,
-            d.origen_dato AS fuente,
-            lcs.ultimo_intento_at AS fecha_venta,
-            lb.nombre AS nombre_lote,
-            lb.id AS batch_id,
-            (
-              SELECT lmh.nota 
-              FROM lead_management_history lmh
-              WHERE lmh.contact_id = d.id
-                AND lmh.batch_id = lcs.batch_id
-                AND lmh.resultado = 'venta'
-              ORDER BY lmh.fecha_gestion DESC
-              LIMIT 1
-            ) AS nota_venta
-          FROM lead_contact_status lcs
-          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
-          JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE lcs.assigned_to = $1
-            AND lcs.estado_venta = 'venta'
-          ORDER BY lcs.ultimo_intento_at DESC
+            d.origen_dato          AS fuente,
+            s.fecha_venta,
+            s.medio_pago,
+            s.id                   AS sale_id,
+            lb.nombre              AS nombre_lote,
+            lb.id                  AS batch_id,
+            cp.nombre_producto,
+            cp.plan,
+            cp.precio,
+            cp.estado              AS producto_estado,
+            lmh.nota               AS nota_venta
+
+          FROM sales s
+          JOIN datos_para_trabajar d  ON d.id = s.contact_id
+          LEFT JOIN contact_products cp ON cp.sale_id = s.id
+          LEFT JOIN lead_batches lb     ON lb.id = (
+            SELECT lcs2.batch_id 
+            FROM lead_contact_status lcs2 
+            WHERE lcs2.contact_id = s.contact_id 
+            ORDER BY lcs2.updated_at DESC 
+            LIMIT 1
+          )
+          LEFT JOIN lead_management_history lmh ON (
+            lmh.contact_id = s.contact_id
+            AND lmh.resultado = 'venta'
+            AND lmh.user_id = s.seller_user_id
+          )
+          WHERE s.seller_user_id = $1
+          ORDER BY s.fecha_venta DESC
           `,
           [sellerId]
         );
@@ -11711,6 +11721,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
