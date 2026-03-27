@@ -6798,7 +6798,28 @@ const items = result.rows.map((row) => ({
             cp.nombre_producto,
             cp.precio,
             cp.fecha_baja,
-            cp.motivo_baja
+            cp.motivo_baja,
+            (
+              SELECT lmh.resultado
+              FROM lead_management_history lmh
+              JOIN lead_batch_contacts lbc ON lbc.client_contact_id = lmh.contact_id
+              JOIN lead_batches lb ON lb.id = lbc.batch_id
+              WHERE lmh.contact_id = c.id
+                AND lb.tipo = 'recupero'
+              ORDER BY lmh.fecha_gestion DESC
+              LIMIT 1
+            ) AS ultima_gestion_resultado,
+
+            (
+              SELECT (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date
+              FROM lead_management_history lmh
+              JOIN lead_batch_contacts lbc ON lbc.client_contact_id = lmh.contact_id
+              JOIN lead_batches lb ON lb.id = lbc.batch_id
+              WHERE lmh.contact_id = c.id
+                AND lb.tipo = 'recupero'
+              ORDER BY lmh.fecha_gestion DESC
+              LIMIT 1
+            ) AS ultima_gestion_fecha,
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
           WHERE ${where}
@@ -12063,6 +12084,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
