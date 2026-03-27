@@ -1,4 +1,4 @@
-import fs from "node:fs";
+Ôªøimport fs from "node:fs";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -503,15 +503,15 @@ function getDepartamentoFromFixed(numero) {
   if (n.startsWith("444")) return "Lavalleja";
   if (n.startsWith("477")) return "Artigas";
   if (n.startsWith("473")) return "Salto";
-  if (n.startsWith("472")) return "Paysand˙";
-  if (n.startsWith("456")) return "RÌo Negro";
+  if (n.startsWith("472")) return "Paysand√∫";
+  if (n.startsWith("456")) return "R√≠o Negro";
   if (n.startsWith("453")) return "Soriano";
-  if (n.startsWith("434")) return "San JosÈ";
+  if (n.startsWith("434")) return "San Jos√©";
   if (n.startsWith("447")) return "Rocha";
   if (n.startsWith("445")) return "Treinta y Tres";
   if (n.startsWith("464")) return "Cerro Largo";
   if (n.startsWith("462")) return "Rivera";
-  if (n.startsWith("463")) return "TacuarembÛ";
+  if (n.startsWith("463")) return "Tacuaremb√≥";
   return null;
 }
 
@@ -555,10 +555,10 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2314": "Cerro",
   "2601": "Carrasco",
   "2916": "Ciudad Vieja",
-  "2320": "ColÛn",
+  "2320": "Col√≥n",
   "2222": "Piedras Blancas",
-  "2401": "CordÛn",
-  "2487": "Hosp. ClÌnicas",
+  "2401": "Cord√≥n",
+  "2487": "Hosp. Cl√≠nicas",
   "2292": "Pando",
   "2294": "Sauce",
   "2295": "Empalme Olmos",
@@ -568,51 +568,51 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2312": "Paso de la Arena",
   "2355": "Sayago",
   "2409": "Tres Cruces",
-  "2506": "UniÛn",
-  "2347": "AutÛdromo",
+  "2506": "Uni√≥n",
+  "2347": "Aut√≥dromo",
   "2362": "La Paz",
   "2364": "Las Piedras",
   "2369": "Progreso",
-  "2372": "Atl·ntida",
+  "2372": "Atl√°ntida",
   "2682": "Lagomar",
   "2696": "Solymar",
   "4332": "Canelones",
-  "4530": "CaÒada Nieto",
+  "4530": "Ca√±ada Nieto",
   "4222": "Maldonado",
   "4223": "Maldonado",
   "4224": "Maldonado",
   "4225": "Maldonado",
-  "4244": "Punta del Este (PenÌnsula)",
+  "4244": "Punta del Este (Pen√≠nsula)",
   "4248": "Punta del Este Parada 5",
   "4249": "Punta del Este Parada 5",
   "4255": "Laguna del Sauce",
   "4257": "Portezuelo",
   "4266": "San Carlos",
   "4277": "La Barra",
-  "4311": "Casup·",
-  "4312": "San RamÛn",
+  "4311": "Casup√°",
+  "4312": "San Ram√≥n",
   "4313": "San Antonio",
   "4315": "Tala",
   "4317": "Miguez",
   "4318": "Cerro Colorado",
   "4319": "Chamizo",
-  "4334": "Santa LucÌa",
-  "4335": "JuanicÛ",
+  "4334": "Santa Luc√≠a",
+  "4335": "Juanic√≥",
   "4336": "Los Cerrillos",
   "4338": "Colonia Etchepare",
   "4339": "Cardal",
-  "4342": "San JosÈ",
-  "4345": "Kiy˙",
+  "4342": "San Jos√©",
+  "4345": "Kiy√∫",
   "4346": "Rafael Peraza",
   "4348": "Villa Rodriguez",
   "4349": "Colonia Agra.Delta",
   "4352": "Florida",
-  "4354": "SarandÌ Grande",
+  "4354": "Sarand√≠ Grande",
   "4360": "Blanquillo",
   "4362": "Durazno",
   "4364": "Trinidad",
   "4365": "Carmen",
-  "4367": "SarandÌ del Yi",
+  "4367": "Sarand√≠ del Yi",
   "4368": "Carlos Reyles",
   "4369": "La Paloma",
   "4373": "La Floresta",
@@ -623,77 +623,77 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "4378": "Cuchilla Alta",
   "4399": "San Jacinto",
   "4430": "Gregorio Aznarez",
-  "4432": "Piri·polis",
-  "4434": "Pan de Az˙car",
-  "4438": "Balneario SolÌs",
+  "4432": "Piri√°polis",
+  "4434": "Pan de Az√∫car",
+  "4438": "Balneario Sol√≠s",
   "4442": "Minas",
-  "4446": "Aigu·",
-  "4447": "SolÌs de Mataojo",
-  "4448": "Piraraj·",
+  "4446": "Aigu√°",
+  "4447": "Sol√≠s de Mataojo",
+  "4448": "Piraraj√°",
   "4449": "Mariscala",
   "4452": "Treinta y Tres",
-  "4455": "JosÈ P. Varela",
+  "4455": "Jos√© P. Varela",
   "4456": "Lascano",
-  "4457": "Vel·zquez",
+  "4457": "Vel√°zquez",
   "4458": "Vergara",
-  "4459": "CebollatÌ",
-  "4463": "Zapic·n",
+  "4459": "Cebollat√≠",
+  "4463": "Zapic√°n",
   "4464": "Santa Clara de Olimar",
   "4466": "Cerro Chato",
-  "4469": "Batlle y OrdoÒez",
+  "4469": "Batlle y Ordo√±ez",
   "4472": "Rocha",
   "4474": "Barra del Chuy",
   "4475": "Aguas Dulces",
   "4476": "La Coronilla",
   "4477": "Santa Teresa",
   "4479": "La Paloma (Rocha)",
-  "4486": "Faro JosÈ Ignacio",
+  "4486": "Faro Jos√© Ignacio",
   "4522": "Colonia",
   "4534": "Dolores",
   "4536": "Cardona",
   "4537": "Palmitas",
-  "4538": "JosÈ E. RodÛ",
+  "4538": "Jos√© E. Rod√≥",
   "4539": "Ismael Cortinas",
-  "4542": "Balneario Zagaraz˙",
+  "4542": "Balneario Zagaraz√∫",
   "4544": "Nueva Palmira",
   "4552": "Rosario",
   "4554": "Nueva Helvecia",
   "4558": "Colonia Valdense",
   "4562": "Fray Bentos",
   "4567": "Young",
-  "4568": "Nuevo BerlÌn",
+  "4568": "Nuevo Berl√≠n",
   "4569": "San Javier",
   "4574": "Semillero",
   "4575": "Colonia Miguelete",
-  "4576": "Omb˙es de Lavalle",
+  "4576": "Omb√∫es de Lavalle",
   "4577": "Conchillas",
   "4586": "Juan Lacaze",
   "4587": "Playa Fomento",
   "4588": "Santa Ana",
   "4622": "Rivera",
-  "4632": "TacuarembÛ",
-  "4640": "Acegu·",
+  "4632": "Tacuaremb√≥",
+  "4640": "Acegu√°",
   "4642": "Melo",
   "4654": "Vichadero",
   "4656": "Tranqueras",
   "4658": "Minas de Corrales",
   "4664": "Paso de los Toros",
-  "4675": "RÌo Branco",
-  "4679": "Lago MerÌn",
-  "4722": "Paysand˙",
+  "4675": "R√≠o Branco",
+  "4679": "Lago Mer√≠n",
+  "4722": "Paysand√∫",
   "4730": "Defensa (Salto)",
   "4732": "Pueblo Lavalleja",
   "4733": "Cuchilla de Salto",
-  "4742": "GuichÛn",
+  "4742": "Guich√≥n",
   "4747": "Piedras Coloradas",
   "4754": "Quebracho",
-  "4764": "ConstituciÛn",
-  "4766": "BelÈn",
+  "4764": "Constituci√≥n",
+  "4766": "Bel√©n",
   "4772": "Artigas",
   "4776": "Baltasar Brum",
-  "4777": "Tom·s Gomensoro",
+  "4777": "Tom√°s Gomensoro",
   "4778": "Mones Quintela",
-  "4779": "Bella UniÛn",
+  "4779": "Bella Uni√≥n",
   "4888": "Fraile Muerto",
   "5432": "Mercedes"
 };
@@ -1195,7 +1195,7 @@ function mapProductRowToApi(row) {
 const IMPORT_TYPE_LABEL = {
   clientes: "CSV de clientes",
   no_llamar: "CSV Base No llamar",
-  resultados: "CSV de resultados telefÛnicos",
+  resultados: "CSV de resultados telef√≥nicos",
   datos_para_trabajar: "CSV Datos para trabajar"
 };
 
@@ -1491,7 +1491,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     });
   }
 
-  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BA?O", "BA—O"];
+  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BA?O", "BA√ëO"];
   const eventsRes = sellerIds.length
     ? await client.query(
       `
@@ -1695,7 +1695,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   );
   const eventosRows = eventosRes.rows || [];
 
-  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BA?O", "BA—O"]);
+  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BA?O", "BA√ëO"]);
   let totalPausas = 0;
   let totalTrabajo = 0;
   let pausaCount = 0;
@@ -1760,7 +1760,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   if (conversion < config.conversion_minima_porcentaje) {
     alertas.push({
       tipo: "conversion_baja",
-      descripcion: `${conversion}% actual vs mÌnimo ${config.conversion_minima_porcentaje}%`,
+      descripcion: `${conversion}% actual vs m√≠nimo ${config.conversion_minima_porcentaje}%`,
       severidad: "alta"
     });
   }
@@ -1991,10 +1991,10 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "telefono": "telefono",
   "celular": "celular",
   "correo electronico": "correo_electronico",
-  "correo electrÛnico": "correo_electronico",
+  "correo electr√≥nico": "correo_electronico",
   "email": "correo_electronico",
   "direccion": "direccion",
-  "direcciÛn": "direccion",
+  "direcci√≥n": "direccion",
   "departamento": "departamento",
   "localidad": "localidad",
   "pais": "pais",
@@ -2913,7 +2913,7 @@ function buildImportSampleCsv(type) {
     "telefono",
     "Celular",
     "Correo electronico",
-    "DirecciÛn",
+    "Direcci√≥n",
     "Departamento",
     "Pais",
     "Nombre del familiar",
@@ -2937,7 +2937,7 @@ function buildImportSampleCsv(type) {
     "telefono": "099123456",
     "Celular": "099123456",
     "Correo electronico": "ana.pereira@example.com",
-    "DirecciÛn": "18 de Julio 1234",
+    "Direcci√≥n": "18 de Julio 1234",
     "Departamento": "Montevideo",
     "Pais": "Uruguay",
     "Nombre del familiar": "Luis",
@@ -2979,7 +2979,7 @@ function validateProductPayload(body, options = {}) {
 
   const parsedPrecio = Number(String(precio || 0).replace(/[^0-9.-]/g, ""));
   if (Number.isNaN(parsedPrecio)) {
-    errors.precio = ["precio inv·lido"];
+    errors.precio = ["precio inv√°lido"];
   }
 
   if (Object.keys(errors).length > 0) {
@@ -3198,13 +3198,13 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!email) {
       errors.email = "El email es obligatorio";
     } else if (!isValidEmail(email)) {
-      errors.email = "El email no es v·lido";
+      errors.email = "El email no es v√°lido";
     }
   }
 
   if (!options.partial || body?.telefono !== undefined) {
     if (!telefono) {
-      errors.telefono = "El telÈfono es obligatorio";
+      errors.telefono = "El tel√©fono es obligatorio";
     }
   }
 
@@ -3212,7 +3212,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!rol) {
       errors.rol = "El rol es obligatorio";
     } else if (!VALID_ROLES.includes(rol)) {
-      errors.rol = "El rol no es v·lido";
+      errors.rol = "El rol no es v√°lido";
     }
   }
 
@@ -3220,7 +3220,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!status) {
       errors.status = "El estado es obligatorio";
     } else if (!VALID_USER_STATUSES.includes(status)) {
-      errors.status = "El estado no es v·lido";
+      errors.status = "El estado no es v√°lido";
     }
   }
 
@@ -3258,7 +3258,7 @@ function validateVendorRegistrationPayload(body) {
   if (!nombre) errors.nombre = "El nombre es obligatorio";
   if (!apellido) errors.apellido = "El apellido es obligatorio";
   if (!email) errors.email = "El email es obligatorio";
-  if (!telefono) errors.telefono = "El telÈfono es obligatorio";
+  if (!telefono) errors.telefono = "El tel√©fono es obligatorio";
 
   return {
     valid: Object.keys(errors).length === 0,
@@ -4708,7 +4708,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.role_key,
           updatedUser.role_key,
           actorUserId,
-          "ActualizaciÛn desde superadmin/users"
+          "Actualizaci√≥n desde superadmin/users"
         ]
       );
     }
@@ -4731,7 +4731,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.status,
           updatedUser.status,
           actorUserId,
-          "ActualizaciÛn desde superadmin/users"
+          "Actualizaci√≥n desde superadmin/users"
         ]
       );
     }
@@ -4792,7 +4792,7 @@ function requireApproved(event, dbUser) {
 function requireRole(event, dbUser, allowedRoles) {
   console.log("[role-check] roles requeridos:", allowedRoles);
   console.log("[role-check] rol del usuario:", dbUser?.role_key);
-  console.log("[role-check] øtiene acceso?:", allowedRoles.includes(dbUser?.role_key));
+  console.log("[role-check] ¬øtiene acceso?:", allowedRoles.includes(dbUser?.role_key));
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
     return json(403, {
       ok: false,
@@ -5020,7 +5020,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
     if (requestRow.status !== "pending") {
       return {
         invalidState: true,
-        message: "La solicitud ya no est· pendiente"
+        message: "La solicitud ya no est√° pendiente"
       };
     }
 
@@ -5093,7 +5093,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
         null,
         "vendedor",
         reviewerUserId,
-        "AprobaciÛn de solicitud de vendedor"
+        "Aprobaci√≥n de solicitud de vendedor"
       ]
     );
 
@@ -5161,7 +5161,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
       await client.query("ROLLBACK");
       return {
         invalidState: true,
-        message: "La solicitud ya no est· pendiente"
+        message: "La solicitud ya no est√° pendiente"
       };
     }
 
@@ -6849,7 +6849,7 @@ const items = result.rows.map((row) => ({
             ok: true,
             success: true,
             data: null,
-            message: "No tenÈs lotes activos asignados",
+            message: "No ten√©s lotes activos asignados",
             error: null
           });
         }
@@ -6937,8 +6937,8 @@ const items = result.rows.map((row) => ({
               success: true,
               data: null,
               message: enOla2
-                ? `No hay contactos disponibles en esta franja. VolvÈ a las ${ola1Inicio}`
-                : `No hay contactos disponibles en esta franja. VolvÈ a las ${ola2Inicio}`,
+                ? `No hay contactos disponibles en esta franja. Volv√© a las ${ola1Inicio}`
+                : `No hay contactos disponibles en esta franja. Volv√© a las ${ola2Inicio}`,
               error: null
             });
           }
@@ -6947,7 +6947,7 @@ const items = result.rows.map((row) => ({
             ok: true,
             success: true,
             data: null,
-            message: "Todos los contactos del lote fueron gestionados. °Buen trabajo!",
+            message: "Todos los contactos del lote fueron gestionados. ¬°Buen trabajo!",
             error: null
           });
         }
@@ -6987,7 +6987,8 @@ const items = result.rows.map((row) => ({
       if (roleError) return roleError;
 
       const sellerId = dbUser?.id || null;
-      const hoy = new Date().toISOString().split("T")[0];
+      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
       const client = createDbClient();
       await client.connect();
@@ -7026,7 +7027,7 @@ const items = result.rows.map((row) => ({
           WHERE user_id = $1
             AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
           `,
-          [sellerId, hoy]
+          [sellerId, fecha]
         );
 
         const s = statsResult.rows[0] || {};
@@ -7414,12 +7415,12 @@ const items = result.rows.map((row) => ({
         const validationErrors = [];
 
         if (!resultadoInput || resultadoInput === "nuevo") {
-          validationErrors.push({ field: "estado_venta", message: "Estado inv·lido" });
+          validationErrors.push({ field: "estado_venta", message: "Estado inv√°lido" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
-          validationErrors.push({ field: "estado_venta", message: "Estado no existe en cat·logo" });
+          validationErrors.push({ field: "estado_venta", message: "Estado no existe en cat√°logo" });
         }
 
         if (resultadoInput === "seguimiento" && !fechaAgenda) {
@@ -7435,7 +7436,7 @@ const items = result.rows.map((row) => ({
               success: false,
               data: null,
               error: {
-                message: "Contacto ya est· en estado final",
+                message: "Contacto ya est√° en estado final",
                 estado_actual: currentEstadoVenta
               }
             });
@@ -7449,7 +7450,7 @@ const items = result.rows.map((row) => ({
             success: false,
             data: null,
             error: {
-              message: "ValidaciÛn",
+              message: "Validaci√≥n",
               errors: validationErrors
             }
           });
@@ -8887,7 +8888,7 @@ const items = result.rows.map((row) => ({
             success: false,
             data: null,
             error: {
-              message: "Contactos inv·lidos para asignar",
+              message: "Contactos inv√°lidos para asignar",
               errors
             }
           });
@@ -10047,7 +10048,7 @@ const items = result.rows.map((row) => ({
           if (rawTipo === "CON_SUPERVISOR") return "SUPERVISOR";
           return rawTipo;
         };
-        const isBanoType = (t) => t === "BA?O" || t === "BA—O";
+        const isBanoType = (t) => t === "BA?O" || t === "BA√ëO";
         const isPauseType = (t) => isBanoType(t) || t === "DESCANSO" || t === "SUPERVISOR";
         const getPauseLimit = (t) =>
           isBanoType(t) ? config.limite_bano_minutos : config.limite_descanso_minutos;
@@ -10274,7 +10275,7 @@ const items = result.rows.map((row) => ({
             createdAlert = await createAlert(client, {
               agente_id: agenteId,
               tipo: "conversion_baja",
-              descripcion: `${conversion}% actual vs mÌnimo ${config.conversion_minima_porcentaje}%`,
+              descripcion: `${conversion}% actual vs m√≠nimo ${config.conversion_minima_porcentaje}%`,
               hora_evento: now,
               fecha
             });
@@ -10440,7 +10441,7 @@ const items = result.rows.map((row) => ({
         }
         const status = statusRes.rows[0]?.status || "";
         if (status === "processing") {
-          return json(409, { ok: false, message: "El job est· en proceso" });
+          return json(409, { ok: false, message: "El job est√° en proceso" });
         }
         const deleted = await client.query(
           `
@@ -11710,6 +11711,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
