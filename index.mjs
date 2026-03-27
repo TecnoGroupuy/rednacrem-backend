@@ -6572,6 +6572,8 @@ const items = result.rows.map((row) => ({
 
         if (dbUser?.role_key === "vendedor") {
           whereParts.push(`lcs.assigned_to = $${idx}`);
+          values.push(dbUser?.id);
+          idx += 1;
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
