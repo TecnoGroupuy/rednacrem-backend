@@ -5662,57 +5662,25 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
-          data: { id: contactId }
-        });
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to create contact",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && (path.endsWith("/users/me") || path.endsWith("/profile"))) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        await ensureUserProfileColumns(client);
-        const result = await client.query(
-          "SELECT id, nombre, apellido, email, telefono, extension, department FROM users WHERE id = $1",
-          [dbUser.id]
-        );
-        const row = result.rows[0];
-        if (!row) {
-          return json(404, { ok: false, message: "User not found" });
-        }
-        return json(200, {
-          ok: true,
-          user: {
-            id: row.id,
-            fullName: `${row.nombre} ${row.apellido}`.trim(),
-            email: row.email,
-            phone: row.telefono,
-            extension: row.extension || null,
-            department: row.department || null
+          data: {
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
           }
         });
       } finally {
@@ -6790,11 +6758,24 @@ export const handler = async (event) => {
           ok: true,
           success: true,
           data: {
-            contactos: result.rows,
-            total,
-            page,
-            limit,
-            totalPages: Math.ceil(total / limit)
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
           }
         });
       } finally {
@@ -6996,120 +6977,72 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-        const totalesResult = await client.query(
+                        const lotesResult = await client.query(
           `
-          SELECT 
-            COUNT(*) FILTER (WHERE lcs.estado_venta != 'dato_erroneo') AS total_asignados,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'nuevo') AS nuevos,
-            COUNT(*) FILTER (WHERE lcs.estado_venta IN ('no_contesta','rellamar')) AS no_contesta,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazos,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS ventas,
-            COUNT(DISTINCT lcs.contact_id) FILTER (WHERE lcs.estado_venta != 'nuevo' AND lcs.estado_venta != 'dato_erroneo') AS tocados
-          FROM lead_contact_status lcs
-          JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE lcs.assigned_to = $1
-            AND lb.estado IN ('activo', 'asignado')
-          `,
-          [sellerId]
-        );
-
-        const agendaResult = await client.query(
-          `
-          SELECT COUNT(*) AS seguimiento_activo
-          FROM lead_agenda la
-          JOIN lead_batches lb ON lb.id = la.batch_id
-          WHERE la.seller_id = $1
-            AND la.cumplida = false
-            AND lb.estado IN ('activo', 'asignado')
-          `,
-          [sellerId]
-        );
-
-        const hoyResult = await client.query(
-          `
-          WITH contactos_tocados_hoy AS (
-            SELECT DISTINCT contact_id
-            FROM lead_management_history
-            WHERE user_id = $1
-              AND (fecha_gestion AT TIME ZONE $3)::date = $2::date
-          ),
-          ultimo_resultado_hoy AS (
-            SELECT DISTINCT ON (lmh.contact_id)
-              lmh.contact_id,
-              lmh.resultado
-            FROM lead_management_history lmh
-            JOIN contactos_tocados_hoy cth ON cth.contact_id = lmh.contact_id
-            WHERE lmh.user_id = $1
-              AND (lmh.fecha_gestion AT TIME ZONE $3)::date = $2::date
-            ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
-          )
           SELECT
-            COUNT(*) AS gestiones_hoy,
-            COUNT(*) FILTER (WHERE resultado = 'venta') AS ventas_hoy,
-            COUNT(*) FILTER (WHERE resultado = 'no_contesta') AS no_contesta_hoy,
-            COUNT(*) FILTER (WHERE resultado = 'seguimiento') AS tipificados_seguimiento_hoy,
-            COUNT(*) FILTER (WHERE resultado = 'rechazo') AS rechazos_hoy,
-            COUNT(*) FILTER (WHERE resultado = 'rellamar') AS rellamar_hoy
-          FROM ultimo_resultado_hoy
-          `,
-          [sellerId, hoy, LOCAL_TZ]
-        );
-
-        const seguimientoActivoResult = await client.query(
-          `
-          SELECT COUNT(*) AS seguimiento_activo_hoy
-          FROM lead_agenda la
-          JOIN lead_contact_status lcs
-            ON lcs.contact_id = la.contact_id
-            AND lcs.batch_id = la.batch_id
-          JOIN lead_batches lb ON lb.id = la.batch_id
-          WHERE la.seller_id = $1
-            AND la.cumplida = false
+            COUNT(DISTINCT lcs.contact_id) AS total_asignados,
+            COUNT(DISTINCT lcs.contact_id) FILTER (WHERE lcs.estado_venta = 'nuevo') AS nuevos
+          FROM lead_contact_status lcs
+          JOIN lead_batch_sellers lbs ON lbs.batch_id = lcs.batch_id
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lbs.seller_id = $1
+            AND lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
-            AND lcs.estado_venta NOT IN ('rechazo', 'venta', 'dato_erroneo')
           `,
           [sellerId]
         );
 
-        const t = totalesResult.rows[0] || {};
-        const h = hoyResult.rows[0] || {};
-        const sa = seguimientoActivoResult.rows[0] || {};
-        const seguimientoActivo = parseInt(agendaResult.rows[0]?.seguimiento_activo || "0", 10);
-        const tocadosRaw = parseInt(t.tocados || "0", 10);
+        const statsResult = await client.query(
+          `
+          SELECT
+            COUNT(DISTINCT contact_id) AS tocados,
+            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'no_contesta') AS no_contesta,
+            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'rellamar') AS rellamar,
+            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'seguimiento') AS seguimiento,
+            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'rechazo') AS rechazos,
+            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'venta') AS ventas,
+            ROUND(
+              100.0
+              * COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'venta')
+              / NULLIF(COUNT(DISTINCT contact_id), 0),
+              1
+            ) AS efectividad_pct
+          FROM lead_management_history
+          WHERE user_id = $1
+            AND (fecha_gestion AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $2::date
+          `,
+          [sellerId, hoy]
+        );
+
+        const s = statsResult.rows[0] || {};
+        const l = lotesResult.rows[0] || {};
+        const tocadosRaw = parseInt(s.tocados || "0", 10);
         const tocados = tocadosRaw > 0 ? tocadosRaw : 1;
-        const noContestaTotal = parseInt(t.no_contesta || "0", 10);
+        const noContestaTotal = parseInt(s.no_contesta || "0", 10);
         const contactosReales = Math.max(0, tocadosRaw - noContestaTotal);
-        const gestiHoyRaw = parseInt(h.gestiones_hoy || "0", 10);
-        const gestiHoy = gestiHoyRaw > 0 ? gestiHoyRaw : 1;
-        const noContestaHoy = parseInt(h.no_contesta_hoy || "0", 10);
-        const contactoRealHoy = Math.max(0, gestiHoyRaw - noContestaHoy);
 
         return json(200, {
           ok: true,
           success: true,
           data: {
-            total_asignados: parseInt(t.total_asignados || "0", 10),
-            nuevos: parseInt(t.nuevos || "0", 10),
-            no_contesta: parseInt(t.no_contesta || "0", 10),
-            seguimiento: seguimientoActivo,
-            rechazos: parseInt(t.rechazos || "0", 10),
-            ventas: parseInt(t.ventas || "0", 10),
-            tocados: parseInt(t.tocados || "0", 10),
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
             contactos_reales: contactosReales,
             pct_contacto: Math.round(contactosReales / tocados * 100),
-            pct_efectividad: Math.round(
-              parseInt(t.ventas || "0", 10) / tocados * 100
-            ),
-            gestiones_hoy: parseInt(h.gestiones_hoy || "0", 10),
-            ventas_hoy: parseInt(h.ventas_hoy || "0", 10),
-            no_contesta_hoy: parseInt(h.no_contesta_hoy || "0", 10),
-            tipificados_seguimiento_hoy: parseInt(sa.seguimiento_activo_hoy || "0", 10),
-            rechazos_hoy: parseInt(h.rechazos_hoy || "0", 10),
-            rellamar_hoy: parseInt(h.rellamar_hoy || "0", 10),
-            pct_contacto_hoy: Math.round(contactoRealHoy / gestiHoy * 100),
-            pct_efectividad_hoy: Math.round(
-              parseInt(h.ventas_hoy || "0", 10) / gestiHoy * 100
-            )
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
           }
         });
       } finally {
@@ -7378,82 +7311,29 @@ export const handler = async (event) => {
       }
 
       return json(200, {
-        ok: true,
-        success: true,
-        data: { batchId, sellerId: resolvedSellerId },
-        error: null
-      });
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to update lead",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "POST" && path.match(/\/leads\/([^/]+)\/management$/)) {
-    const match = path.match(/\/leads\/([^/]+)\/management$/);
-    const leadId = match?.[1];
-    const body = safeParseBody(event);
-    if (!leadId) {
-      return json(400, { ok: false, message: "Lead id requerido" });
-    }
-    if (body === null) {
-      return json(400, { ok: false, message: "Invalid JSON body" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-      console.log("[management] method:", method, "path:", path);
-      console.log("[management] dbUser:", JSON.stringify({
-        id: dbUser?.id,
-        role_key: dbUser?.role_key,
-        sub: dbUser?.sub
-      }));
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const resultadoInput = normalizeLeadResultado(body?.status || body?.resultado);
-      const nota = normalizeText(body?.note || body?.nota || "");
-      const proximaAccion = normalizeNextAction(body?.nextAction || body?.proxima_accion);
-      const fechaAgenda = normalizeNextAction(body?.fecha_agenda || body?.fechaAgenda);
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        await client.query("BEGIN");
-
-        const currentStatusRes = await client.query(
-          `
-          SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
-          FROM lead_contact_status
-          WHERE contact_id = $1
-            AND assigned_to = $2
-          LIMIT 1
-          `,
-          [leadId, dbUser.id]
-        );
-
-        if (!currentStatusRes.rows.length) {
-          await client.query("ROLLBACK");
-          return json(404, {
-            ok: false,
-            success: false,
-            data: null,
-            error: {
-              message: "Contacto no encontrado en tu lote"
-            }
-          });
+          ok: true,
+          success: true,
+          data: {
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
+          }
+        });
         }
 
         const currentAttempts = currentStatusRes.rows[0]?.intentos || 0;
@@ -7616,892 +7496,25 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
-          data: { resultado: effectiveResultado, intentos: nextAttempts },
-          error: null
-        });
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to register lead management",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/agenda")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const sellerIdParam = getQueryParam(event, "seller_id");
-      const dateParam = getQueryParam(event, "fecha");
-      const incluirCumplidas = getQueryParam(event, "incluir_cumplidas") === "true";
-      const sellerId = dbUser?.role_key === "vendedor" ? dbUser.id : (sellerIdParam || dbUser.id);
-      console.log("[agenda] dbUser.id:", dbUser?.id);
-      console.log("[agenda] dbUser.role_key:", dbUser?.role_key);
-      console.log("[agenda] sellerIdParam:", sellerIdParam);
-      console.log("[agenda] sellerId usado en query:", sellerId);
-
-      const values = [sellerId];
-      const whereParts = ["a.seller_id = $1"];
-      let idx = 2;
-
-      if (dateParam) {
-        whereParts.push(`a.fecha_agenda::date = $${idx}::date`);
-        values.push(dateParam);
-        idx += 1;
-      }
-      if (!incluirCumplidas) {
-        whereParts.push("a.cumplida = false");
-      }
-
-      const whereClause = `WHERE ${whereParts.join(" AND ")}`;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const res = await client.query(
-          `
-          SELECT
-            a.id,
-            a.contact_id,
-            a.seller_id,
-            a.batch_id,
-            a.fecha_agenda,
-            a.nota,
-            a.cumplida,
-            d.nombre,
-            d.apellido,
-            d.telefono,
-            d.celular,
-            d.documento,
-            d.fecha_nacimiento,
-            DATE_PART('year', AGE(d.fecha_nacimiento))::int AS edad,
-            d.departamento,
-            d.localidad,
-            d.email AS correo_electronico,
-            lcs.intentos,
-            lcs.estado_venta,
-            (
-              SELECT lmh.resultado
-              FROM lead_management_history lmh
-              WHERE lmh.contact_id = a.contact_id
-                AND lmh.batch_id = a.batch_id
-                AND lmh.resultado IN ('seguimiento', 'rellamar')
-              ORDER BY lmh.fecha_gestion DESC
-              LIMIT 1
-            ) AS tipo_agenda,
-            (
-              SELECT JSON_AGG(
-                JSON_BUILD_OBJECT(
-                  'resultado', lmh.resultado,
-                  'nota', lmh.nota,
-                  'fecha', lmh.fecha_gestion
-                ) ORDER BY lmh.created_at DESC
-              )
-              FROM lead_management_history lmh
-              WHERE lmh.contact_id = a.contact_id
-                AND lmh.batch_id = a.batch_id
-            ) AS historial
-          FROM lead_agenda a
-          JOIN datos_para_trabajar d ON d.id = a.contact_id
-          LEFT JOIN lead_contact_status lcs
-            ON lcs.contact_id = a.contact_id
-            AND lcs.batch_id = a.batch_id
-          ${whereClause}
-          ORDER BY a.fecha_agenda ASC
-          `,
-          values
-        );
-
-        return json(200, {
-          ok: true,
-          success: true,
-          data: { items: res.rows },
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to load agenda",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "PATCH" && path.match(/\/agenda\/([^/]+)\/complete$/)) {
-    const match = path.match(/\/agenda\/([^/]+)\/complete$/);
-    const agendaId = match?.[1];
-    if (!agendaId) {
-      return json(400, { ok: false, message: "Agenda id requerido" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        await client.query(
-          `
-          UPDATE lead_agenda
-          SET cumplida = true
-          WHERE id = $1
-          `,
-          [agendaId]
-        );
-
-        return json(200, {
-          ok: true,
-          success: true,
-          data: { id: agendaId, cumplida: true },
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to update agenda",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/lead-batches")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          SELECT
-            lb.*,
-            u.nombre AS assigned_nombre,
-            u.apellido AS assigned_apellido,
-            COALESCE(cnt.total, 0) AS total_contactos,
-            COALESCE(vnd.vendedores, '[]') AS vendedores
-          FROM lead_batches lb
-          LEFT JOIN users u ON u.id = lb.asignado_a
-          LEFT JOIN (
-            SELECT batch_id, COUNT(*) AS total
-            FROM lead_batch_contacts
-            GROUP BY batch_id
-          ) cnt ON cnt.batch_id = lb.id
-          LEFT JOIN (
-            SELECT
-              lbs.batch_id,
-              JSON_AGG(
-                JSON_BUILD_OBJECT(
-                  'id', u.id,
-                  'nombre', u.nombre,
-                  'apellido', u.apellido,
-                  'email', u.email
-                )
-              ) AS vendedores
-            FROM lead_batch_sellers lbs
-            JOIN users u ON u.id = lbs.seller_id
-            GROUP BY lbs.batch_id
-          ) vnd ON vnd.batch_id = lb.id
-          ORDER BY lb.created_at DESC
-          `
-        );
-        const items = result.rows.map((row) => {
-          const totalContactos = Number.parseInt(row.total_contactos, 10) || 0;
-          let vendedores = row.vendedores || [];
-          if (typeof vendedores === "string") {
-            try {
-              vendedores = JSON.parse(vendedores);
-            } catch {
-              vendedores = [];
-            }
-          }
-          return {
-            id: row.id,
-            nombre: row.nombre,
-            estado: row.estado,
-            seller_id: row.seller_id,
-            max_intentos: row.max_intentos,
-            fecha_vencimiento: row.fecha_vencimiento,
-            criterios: row.criterios,
-            franja_ola1_inicio: row.franja_ola1_inicio,
-            franja_ola1_fin: row.franja_ola1_fin,
-            franja_ola2_inicio: row.franja_ola2_inicio,
-            franja_ola2_fin: row.franja_ola2_fin,
-            dias_entre_olas: row.dias_entre_olas,
-            created_at: row.created_at,
-            assigned_to_name: [row.assigned_nombre, row.assigned_apellido].filter(Boolean).join(" ").trim(),
-            total_contactos: totalContactos,
-            cantidad_contactos: totalContactos,
-            vendedores
-          };
-        });
-        return json(200, {
-          ok: true,
-          success: true,
-          items,
-          data: { items },
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list lead batches",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.match(/\/lead-batches\/([^/]+)\/metrics$/)) {
-    const match = path.match(/\/lead-batches\/([^/]+)\/metrics$/);
-    const batchId = match?.[1];
-    if (!batchId) {
-      return json(400, { ok: false, message: "Batch id requerido" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const statusRes = await client.query(
-          `
-          SELECT estado_venta, ola_actual, COUNT(*)::int AS total
-          FROM lead_contact_status
-          WHERE batch_id = $1
-          GROUP BY estado_venta, ola_actual
-          ORDER BY ola_actual, estado_venta
-          `,
-          [batchId]
-        );
-        const totalRes = await client.query(
-          `
-          SELECT COUNT(*)::int AS total
-          FROM lead_batch_contacts
-          WHERE batch_id = $1
-          `,
-          [batchId]
-        );
-        return json(200, {
-          ok: true,
-          success: true,
           data: {
-            total_contactos: totalRes.rows[0]?.total || 0,
-            estados: statusRes.rows
-          },
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to load lead batch metrics",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path === "/sellers") {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          SELECT id, nombre, apellido, email
-          FROM users
-          WHERE role_key = 'vendedor'
-            AND status = 'approved'
-          ORDER BY nombre
-          `
-        );
-        return json(200, {
-          ok: true,
-          success: true,
-          data: result.rows,
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list sellers",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/lead-sources")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          SELECT DISTINCT origen_dato AS id, origen_dato AS nombre
-          FROM datos_para_trabajar
-          WHERE origen_dato IS NOT NULL
-            AND origen_dato <> ''
-            AND estado = 'nuevo'
-          ORDER BY origen_dato
-          `
-        );
-        return json(200, {
-          ok: true,
-          success: true,
-          data: result.rows,
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list lead sources",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/departamentos")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          SELECT DISTINCT departamento AS id, departamento AS nombre
-          FROM datos_para_trabajar
-          WHERE departamento IS NOT NULL
-            AND departamento <> ''
-            AND estado = 'nuevo'
-          ORDER BY departamento
-          `
-        );
-        return json(200, {
-          ok: true,
-          success: true,
-          data: result.rows,
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list departamentos",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/localidades")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const departamento = getQueryParam(event, "departamento");
-      const values = [];
-      let where = `
-        localidad IS NOT NULL
-        AND localidad <> ''
-        AND estado = 'nuevo'
-      `;
-      if (departamento) {
-        values.push(departamento);
-        where += ` AND departamento = $1`;
-      }
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          SELECT DISTINCT localidad AS id, localidad AS nombre
-          FROM datos_para_trabajar
-          WHERE ${where}
-          ORDER BY localidad
-          `,
-          values
-        );
-        return json(200, {
-          ok: true,
-          success: true,
-          data: result.rows,
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list localidades",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/area-codes")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          SELECT DISTINCT code AS id, code AS nombre
-          FROM (
-            SELECT SUBSTRING(regexp_replace(celular, '\\D', '', 'g') FROM 1 FOR 2) AS code
-            FROM datos_para_trabajar
-            WHERE celular IS NOT NULL
-              AND celular <> ''
-              AND estado = 'nuevo'
-              AND LENGTH(regexp_replace(celular, '\\D', '', 'g')) >= 8
-            UNION
-            SELECT SUBSTRING(regexp_replace(telefono, '\\D', '', 'g') FROM 1 FOR 2) AS code
-            FROM datos_para_trabajar
-            WHERE telefono IS NOT NULL
-              AND telefono <> ''
-              AND estado = 'nuevo'
-              AND LENGTH(regexp_replace(telefono, '\\D', '', 'g')) >= 8
-          ) t
-          WHERE code IS NOT NULL AND code <> ''
-          ORDER BY code
-          `
-        );
-        return json(200, {
-          ok: true,
-          success: true,
-          data: result.rows,
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list area codes",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && (path.endsWith("/datos-para-trabajar/preview") || path.endsWith("/preview"))) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const conditions = ["estado = 'nuevo'"];
-      const params = [];
-      let i = 1;
-
-      const nombre = getQueryParam(event, "nombre");
-      if (nombre) {
-        conditions.push(`(nombre ILIKE $${i} OR apellido ILIKE $${i})`);
-        params.push(`%${nombre}%`);
-        i += 1;
-      }
-
-      const departamento = getQueryParam(event, "departamento");
-      if (departamento) {
-        const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
-        if (deptos.length) {
-          conditions.push(`departamento = ANY($${i})`);
-          params.push(deptos);
-          i += 1;
-        }
-      }
-
-      const localidad = getQueryParam(event, "localidad");
-      if (localidad) {
-        const locs = String(localidad).split(",").map((v) => v.trim()).filter(Boolean);
-        if (locs.length) {
-          conditions.push(`localidad = ANY($${i})`);
-          params.push(locs);
-          i += 1;
-        }
-      }
-
-      const origenDato = getQueryParam(event, "origen_dato");
-      if (origenDato) {
-        const origenes = String(origenDato).split(",").map((v) => v.trim()).filter(Boolean);
-        if (origenes.length) {
-          conditions.push(`origen_dato = ANY($${i})`);
-          params.push(origenes);
-          i += 1;
-        }
-      }
-
-      const edadDesde = getQueryParam(event, "edad_desde");
-      if (edadDesde) {
-        conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) >= $${i}`);
-        params.push(parseInt(edadDesde, 10));
-        i += 1;
-      }
-
-      const edadHasta = getQueryParam(event, "edad_hasta");
-      if (edadHasta) {
-        conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) <= $${i}`);
-        params.push(parseInt(edadHasta, 10));
-        i += 1;
-      }
-
-      const telefonoTipo = getQueryParam(event, "telefono_tipo");
-      if (telefonoTipo) {
-        if (telefonoTipo === "solo_celular") {
-          conditions.push("celular IS NOT NULL AND celular <> '' AND (telefono IS NULL OR telefono = '')");
-        } else if (telefonoTipo === "solo_fijo") {
-          conditions.push("telefono IS NOT NULL AND telefono <> '' AND (celular IS NULL OR celular = '')");
-        } else if (telefonoTipo === "ambos") {
-          conditions.push("celular IS NOT NULL AND celular <> '' AND telefono IS NOT NULL AND telefono <> ''");
-        }
-      }
-
-      const diasSinGestion = getQueryParam(event, "dias_sin_gestion");
-      if (diasSinGestion) {
-        conditions.push(`
-          id NOT IN (
-            SELECT DISTINCT contact_id
-            FROM lead_management_history
-            WHERE created_at >= NOW() - ($${i}::text || ' days')::interval
-          )
-        `);
-        params.push(parseInt(diasSinGestion, 10));
-        i += 1;
-      }
-
-      const where = conditions.join(" AND ");
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `SELECT COUNT(*)::int AS total FROM datos_para_trabajar WHERE ${where}`,
-          params
-        );
-        return json(200, {
-          ok: true,
-          success: true,
-          data: { total: result.rows[0]?.total || 0 },
-          error: null
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to preview datos para trabajar",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/datos-para-trabajar/list")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const conditions = ["estado = 'nuevo'"];
-      const params = [];
-      let i = 1;
-
-      const nombre = getQueryParam(event, "nombre");
-      if (nombre) {
-        conditions.push(`(nombre ILIKE $${i} OR apellido ILIKE $${i})`);
-        params.push(`%${nombre}%`);
-        i += 1;
-      }
-
-      const departamento = getQueryParam(event, "departamento");
-      if (departamento) {
-        const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
-        if (deptos.length) {
-          conditions.push(`departamento = ANY($${i})`);
-          params.push(deptos);
-          i += 1;
-        }
-      }
-
-      const localidad = getQueryParam(event, "localidad");
-      if (localidad) {
-        const locs = String(localidad).split(",").map((v) => v.trim()).filter(Boolean);
-        if (locs.length) {
-          conditions.push(`localidad = ANY($${i})`);
-          params.push(locs);
-          i += 1;
-        }
-      }
-
-      const origenDato = getQueryParam(event, "origen_dato");
-      if (origenDato) {
-        const origenes = String(origenDato).split(",").map((v) => v.trim()).filter(Boolean);
-        if (origenes.length) {
-          conditions.push(`origen_dato = ANY($${i})`);
-          params.push(origenes);
-          i += 1;
-        }
-      }
-
-      const edadDesde = getQueryParam(event, "edad_desde");
-      if (edadDesde) {
-        conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) >= $${i}`);
-        params.push(parseInt(edadDesde, 10));
-        i += 1;
-      }
-
-      const edadHasta = getQueryParam(event, "edad_hasta");
-      if (edadHasta) {
-        conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) <= $${i}`);
-        params.push(parseInt(edadHasta, 10));
-        i += 1;
-      }
-
-      const telefonoTipo = getQueryParam(event, "telefono_tipo");
-      if (telefonoTipo) {
-        if (telefonoTipo === "solo_celular") {
-          conditions.push("celular IS NOT NULL AND celular <> '' AND (telefono IS NULL OR telefono = '')");
-        } else if (telefonoTipo === "solo_fijo") {
-          conditions.push("telefono IS NOT NULL AND telefono <> '' AND (celular IS NULL OR celular = '')");
-        } else if (telefonoTipo === "ambos") {
-          conditions.push("celular IS NOT NULL AND celular <> '' AND telefono IS NOT NULL AND telefono <> ''");
-        }
-      }
-
-      const diasSinGestion = getQueryParam(event, "dias_sin_gestion");
-      if (diasSinGestion) {
-        conditions.push(`
-          id NOT IN (
-            SELECT DISTINCT contact_id
-            FROM lead_management_history
-            WHERE created_at >= NOW() - ($${i}::text || ' days')::interval
-          )
-        `);
-        params.push(parseInt(diasSinGestion, 10));
-        i += 1;
-      }
-
-      const limite = Math.min(5000, Math.max(1, parseInt(getQueryParam(event, "limite") || "50", 10)));
-      const pagina = Math.max(1, parseInt(getQueryParam(event, "pagina") || "1", 10));
-      const offset = (pagina - 1) * limite;
-      const where = conditions.join(" AND ");
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `SELECT id, nombre, apellido, departamento, localidad, telefono, celular,
-                  origen_dato AS fuente,
-                  DATE_PART('year', AGE(fecha_nacimiento))::int AS edad
-           FROM datos_para_trabajar
-           WHERE ${where}
-           ORDER BY id ASC
-           LIMIT $${i} OFFSET $${i + 1}`,
-          [...params, limite, offset]
-        );
-        return json(200, {
-          success: true,
-          data: { contactos: result.rows, pagina, limite }
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list datos para trabajar for batch",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "POST" && path.endsWith("/lead-batches")) {
-    const body = safeParseBody(event);
-    if (body === null) {
-      return json(400, { ok: false, message: "Invalid JSON body" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const nombre = normalizeText(body?.nombre || body?.name);
-      const sellerIdsRaw = Array.isArray(body?.sellerIds)
-        ? body.sellerIds
-        : Array.isArray(body?.seller_ids)
-        ? body.seller_ids
-        : null;
-      const sellerId = body?.sellerId || body?.seller_id || null;
-      const sellerIds = sellerIdsRaw && sellerIdsRaw.length ? sellerIdsRaw : (sellerId ? [sellerId] : []);
-
-      if (!nombre || !sellerIds.length) {
-        return json(422, {
-          ok: false,
-          success: false,
-          data: null,
-          error: {
-            message: "nombre y sellerIds son requeridos"
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
           }
         });
       }
@@ -8748,167 +7761,29 @@ export const handler = async (event) => {
       }
 
       return json(200, {
-        ok: true,
-        success: true,
-        data: { batchId, sellerId: resolvedSellerId },
-        error: null
-      });
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to assign lead batch",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/close$/)) {
-    const match = path.match(/\/lead-batches\/([^/]+)\/close$/);
-    const batchId = match?.[1];
-    if (!batchId) {
-      return json(400, { ok: false, message: "Batch id requerido" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        await client.query("BEGIN");
-
-        const contactsRes = await client.query(
-          `
-          SELECT
-            lbc.contact_id,
-            lcs.estado_venta,
-            c.es_final,
-            c.libera_al_cerrar
-          FROM lead_batch_contacts lbc
-          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = lbc.contact_id
-          LEFT JOIN lead_status_catalog c ON c.nombre = lcs.estado_venta
-          WHERE lbc.batch_id = $1
-          `,
-          [batchId]
-        );
-
-        const rows = contactsRes.rows;
-        const liberar = rows.filter((row) => row.libera_al_cerrar).map((row) => row.contact_id);
-        const finales = rows.filter((row) => row.es_final).map((row) => row.contact_id);
-        const seguimiento = rows.filter((row) => row.estado_venta === "seguimiento").map((row) => row.contact_id);
-
-        if (liberar.length) {
-          await client.query(
-            `
-            UPDATE datos_para_trabajar
-            SET estado = 'nuevo', updated_at = now()
-            WHERE id = ANY($1::uuid[])
-              AND estado <> 'bloqueado'
-            `,
-            [liberar]
-          );
-        }
-
-        await client.query(
-          `
-          UPDATE lead_batches
-          SET estado = 'finalizado', updated_at = now()
-          WHERE id = $1
-          `,
-          [batchId]
-        );
-
-        await client.query("COMMIT");
-
-        return json(200, {
           ok: true,
           success: true,
           data: {
-            batchId,
-            total: rows.length,
-            liberados: liberar.length,
-            finales: finales.length,
-            seguimiento: seguimiento.length
-          },
-          warning: seguimiento.length
-            ? "Hay contactos en seguimiento; revisar agenda antes de cerrar definitivamente."
-            : null,
-          error: null
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
+          }
         });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to close lead batch",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "POST" && path.endsWith("/lead-batches/assign")) {
-    const body = safeParseBody(event);
-    if (body === null) {
-      return json(400, { ok: false, message: "Invalid JSON body" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const contactIds = Array.isArray(body?.contactIds) ? body.contactIds : [];
-      const batchId = body?.batchId || null;
-      console.log("[assign] body recibido:", JSON.stringify(body));
-      console.log("[assign] batchId:", batchId, "contactIds count:", contactIds?.length);
-
-      if (!batchId || !contactIds.length) {
-        return json(422, { ok: false, message: "batchId y contactIds requeridos" });
-      }
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const sellersRes = await client.query(
-          `
-          SELECT seller_id
-          FROM lead_batch_sellers
-          WHERE batch_id = $1
-          ORDER BY id ASC
-          `,
-          [batchId]
-        );
-        const sellers = sellersRes.rows.map((row) => row.seller_id);
-        if (!sellers.length) {
-          return json(422, {
-            ok: false,
-            success: false,
-            data: null,
-            error: {
-              message: "El lote no tiene vendedores asignados"
-            }
-          });
         }
 
         const contactosRes = await client.query(
@@ -9028,776 +7903,24 @@ export const handler = async (event) => {
           ok: true,
           success: true,
           data: {
-            asignados: contactIds.length,
-            vendedores: sellers.length,
-            distribucion
-          },
-          error: null
-        });
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to assign leads to batch",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/imports/sample")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const importTypeRaw = normalizeText(event?.queryStringParameters?.type || "clientes");
-      const importType = importTypeRaw.replace(/-/g, "_");
-      const csv = buildImportSampleCsv(importType);
-      const safeType = importType || "clientes";
-      const filename = `import_${safeType}_sample.csv`;
-
-      return {
-        statusCode: 200,
-        headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${filename}"`,
-          ...CORS_HEADERS
-        },
-        body: csv
-      };
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to generate import sample",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/no-llamar/stats")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const statsResult = await client.query(
-          `
-          SELECT
-            COUNT(*)::int AS total,
-            COUNT(*) FILTER (WHERE fuente = 'celular')::int AS celulares,
-            COUNT(*) FILTER (WHERE departamento = 'Montevideo')::int AS montevideo,
-            COUNT(*) FILTER (WHERE departamento IS NOT NULL AND departamento <> 'Montevideo')::int AS interior
-          FROM no_call_entries
-          `
-        );
-
-        return json(200, statsResult.rows[0] || {
-          total: 0,
-          celulares: 0,
-          montevideo: 0,
-          interior: 0
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to load no-llamar stats",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/imports")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
-      const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 8));
-      const search = normalizeText(getQueryParam(event, "search") || "");
-      const importType = normalizeText(getQueryParam(event, "importType") || "todos").toLowerCase();
-      const statusParam = normalizeText(getQueryParam(event, "status") || "");
-      const statusList = statusParam
-        ? statusParam
-          .split(",")
-          .map((value) => value.trim().toLowerCase())
-          .filter(Boolean)
-        : [];
-      if (statusList.includes("processed") && !statusList.includes("completed")) {
-        statusList.push("completed");
-      }
-      const offset = (page - 1) * pageSize;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
-
-        if (search) {
-          whereParts.push(`file_name ILIKE $${idx}`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        if (importType && importType !== "todos") {
-          whereParts.push(`import_type = $${idx}`);
-          values.push(importType);
-          idx += 1;
-        }
-
-        if (statusList.length > 0) {
-          const expandedStatus = Array.from(new Set([
-            ...statusList,
-            ...(statusList.includes("processed") ? ["completed"] : [])
-          ]));
-          whereParts.push(`status = ANY($${idx})`);
-          values.push(expandedStatus);
-          idx += 1;
-        }
-
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-        const countResult = await client.query(
-          `
-          WITH all_imports AS (
-            SELECT
-              b.id,
-              b.file_name,
-              b.import_type,
-              b.status,
-              b.total_rows,
-              b.valid_rows,
-              b.error_rows,
-              b.rejected_missing_documento,
-              NULL::int AS processed_rows,
-              b.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'batches'::text AS source
-            FROM contact_import_batches b
-            LEFT JOIN users u ON u.id = b.created_by
-
-            UNION ALL
-
-            SELECT
-              j.id,
-              j.file_name,
-              'no_llamar'::text AS import_type,
-              j.status,
-              j.total_rows,
-              j.inserted_rows AS valid_rows,
-              j.skipped_rows AS error_rows,
-              0 AS rejected_missing_documento,
-              j.processed_rows,
-              j.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'no_call_jobs'::text AS source
-            FROM no_call_import_jobs j
-            LEFT JOIN users u ON u.id = j.created_by
-
-            UNION ALL
-
-            SELECT
-              gen_random_uuid() AS id,
-              'CSV Datos para trabajar'::text AS file_name,
-              'datos_para_trabajar'::text AS import_type,
-              'processed'::text AS status,
-              stats.total_rows,
-              stats.total_rows AS valid_rows,
-              0 AS error_rows,
-              0 AS rejected_missing_documento,
-              NULL::int AS processed_rows,
-              stats.created_at,
-              NULL AS user_nombre,
-              NULL AS user_apellido,
-              'datos_virtual'::text AS source
-            FROM (
-              SELECT COUNT(*)::int AS total_rows, MAX(created_at) AS created_at
-              FROM datos_para_trabajar
-            ) stats
-            WHERE stats.total_rows > 0
-              AND NOT EXISTS (
-                SELECT 1 FROM contact_import_batches WHERE import_type = 'datos_para_trabajar'
-              )
-          )
-          SELECT COUNT(*)::int AS total
-          FROM all_imports
-          ${whereClause}
-          `,
-          values
-        );
-
-        const total = countResult.rows[0]?.total || 0;
-        const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-        const itemsResult = await client.query(
-          `
-          WITH all_imports AS (
-            SELECT
-              b.id,
-              b.file_name,
-              b.import_type,
-              b.status,
-              b.total_rows,
-              b.valid_rows,
-              b.error_rows,
-              b.rejected_missing_documento,
-              NULL::int AS processed_rows,
-              b.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'batches'::text AS source
-            FROM contact_import_batches b
-            LEFT JOIN users u ON u.id = b.created_by
-
-            UNION ALL
-
-            SELECT
-              j.id,
-              j.file_name,
-              'no_llamar'::text AS import_type,
-              j.status,
-              j.total_rows,
-              j.inserted_rows AS valid_rows,
-              j.skipped_rows AS error_rows,
-              0 AS rejected_missing_documento,
-              j.processed_rows,
-              j.created_at,
-              u.nombre AS user_nombre,
-              u.apellido AS user_apellido,
-              'no_call_jobs'::text AS source
-            FROM no_call_import_jobs j
-            LEFT JOIN users u ON u.id = j.created_by
-
-            UNION ALL
-
-            SELECT
-              gen_random_uuid() AS id,
-              'CSV Datos para trabajar'::text AS file_name,
-              'datos_para_trabajar'::text AS import_type,
-              'processed'::text AS status,
-              stats.total_rows,
-              stats.total_rows AS valid_rows,
-              0 AS error_rows,
-              0 AS rejected_missing_documento,
-              NULL::int AS processed_rows,
-              stats.created_at,
-              NULL AS user_nombre,
-              NULL AS user_apellido,
-              'datos_virtual'::text AS source
-            FROM (
-              SELECT COUNT(*)::int AS total_rows, MAX(created_at) AS created_at
-              FROM datos_para_trabajar
-            ) stats
-            WHERE stats.total_rows > 0
-              AND NOT EXISTS (
-                SELECT 1 FROM contact_import_batches WHERE import_type = 'datos_para_trabajar'
-              )
-          )
-          SELECT
-            id,
-            file_name,
-            import_type,
-            status,
-            total_rows,
-            valid_rows,
-            error_rows,
-            rejected_missing_documento,
-            processed_rows,
-            created_at,
-            user_nombre,
-            user_apellido,
-            source
-          FROM all_imports
-          ${whereClause}
-          ORDER BY created_at DESC
-          LIMIT $${idx} OFFSET $${idx + 1}
-          `,
-          [...values, pageSize, offset]
-        );
-
-        const items = itemsResult.rows.map((row) => {
-          const usuario = [row.user_nombre, row.user_apellido].filter(Boolean).join(" ").trim() || "Sistema";
-          let estado = "Cargada";
-          if (row.source === "no_call_jobs") {
-            estado = row.status === "completed"
-              ? "Completada"
-              : row.status === "processing"
-              ? "En proceso"
-              : row.status === "failed"
-              ? "Fallida"
-              : "En cola";
-          } else {
-            estado = row.status === "processed"
-              ? (Number(row.error_rows || 0) ? "Con observaciones" : "Completada")
-              : row.status === "validated"
-              ? "Validada"
-              : row.status === "failed"
-              ? "Fallida"
-              : "Cargada";
-          }
-          const totalRows = Number(row.total_rows || 0);
-          const processedRows = Number(row.processed_rows || 0);
-          const progressPercent =
-            row.source === "no_call_jobs" && totalRows > 0
-              ? Math.min(100, Math.round((processedRows / totalRows) * 100))
-              : null;
-          return {
-            id: row.id,
-            archivo: row.file_name,
-            fecha: formatEsUyDateTime(row.created_at),
-            total: Number(row.total_rows || 0),
-            importados: Number(row.valid_rows || 0),
-            rechazados: Number(row.error_rows || 0),
-            estado,
-            usuario,
-            tipo: row.import_type,
-            tipoLabel: IMPORT_TYPE_LABEL[row.import_type] || row.import_type,
-            rejectedMissingDocumento: Number(row.rejected_missing_documento || 0),
-            progressPercent,
-            processedRows
-          };
-        });
-
-        const normalizedImportType = importType ? importType.replace(/-/g, "_") : "";
-        const wantsDatosParaTrabajar = !normalizedImportType || normalizedImportType === "datos_para_trabajar";
-        const statusAllowsProcessed = statusList.length === 0 || statusList.includes("processed") || statusList.includes("completed");
-
-        let addedFallback = false;
-        if (wantsDatosParaTrabajar && statusAllowsProcessed) {
-          const hasDatosBatch = items.some((item) => item.tipo === "datos_para_trabajar");
-          if (!hasDatosBatch) {
-            const fallbackResult = await client.query(
-              `
-              SELECT COUNT(*)::int AS total,
-                     MAX(created_at) AS last_created_at
-              FROM datos_para_trabajar
-              `
-            );
-            const fallbackTotal = fallbackResult.rows[0]?.total || 0;
-            const fallbackDate = fallbackResult.rows[0]?.last_created_at || null;
-            if (fallbackTotal > 0) {
-              items.unshift({
-                id: "datos-para-trabajar-virtual",
-                archivo: "datos_para_trabajar.csv",
-                fecha: formatEsUyDateTime(fallbackDate),
-                total: fallbackTotal,
-                importados: fallbackTotal,
-                rechazados: 0,
-                estado: "Completada",
-                usuario: "Sistema",
-                tipo: "datos_para_trabajar",
-                tipoLabel: IMPORT_TYPE_LABEL.datos_para_trabajar || "datos_para_trabajar",
-                rejectedMissingDocumento: 0
-              });
-              addedFallback = true;
-            }
-          }
-        }
-
-        if (addedFallback) {
-          total += 1;
-          totalPages = Math.max(1, Math.ceil(total / pageSize));
-        }
-
-        return json(200, {
-          items,
-          page,
-          pageSize,
-          total,
-          totalPages
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list imports",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "POST" && path.endsWith("/imports/no-llamar")) {
-    const fileName =
-      event?.headers?.["x-file-name"] ||
-      event?.headers?.["X-File-Name"] ||
-      event?.headers?.["x-filename"] ||
-      event?.headers?.["X-Filename"] ||
-      "import_no_llamar.csv";
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    const rawBody = event?.body || "";
-    const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("utf8")
-      : typeof rawBody === "string"
-      ? rawBody
-      : JSON.stringify(rawBody);
-
-    let csvText = bodyText;
-    if (contentType.includes("application/json")) {
-      const parsed = safeParseBody(event);
-      if (parsed && parsed.csv) {
-        csvText = parsed.csv;
-      }
-    }
-
-    if (!csvText || !csvText.trim()) {
-      return json(400, { ok: false, message: "CSV vacio" });
-    }
-
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const parsedRows = parseCsv(csvText);
-      const rows = parsedRows.slice(1);
-      const client = createDbClient();
-      await client.connect();
-
-      let inserted = 0;
-      let skipped = 0;
-
-      try {
-        await client.query("BEGIN");
-        const batchResult = await client.query(
-          `
-          INSERT INTO contact_import_batches (
-            file_name,
-            status,
-            import_type,
-            total_rows,
-            valid_rows,
-            error_rows,
-            created_by
-          )
-          VALUES ($1, 'uploaded', 'no_llamar', 0, 0, 0, $2)
-          RETURNING *
-          `,
-          [fileName, dbUser?.id || null]
-        );
-        const batch = batchResult.rows[0];
-
-        for (const row of rows) {
-          const rawValue = row[0];
-          const numero = normalizeUyNumber(rawValue);
-          if (!numero) {
-            skipped += 1;
-            continue;
-          }
-          const fuente = getFuenteFromNumber(numero);
-          const departamento = fuente === "tel_fijo" ? getDepartamentoFromFixed(numero) : null;
-          const localidad = fuente === "tel_fijo" ? getLocalidadFromFixed(numero) : null;
-
-          const result = await client.query(
-            `
-            INSERT INTO no_call_entries (numero, fuente, departamento, localidad)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (numero) DO NOTHING
-            `,
-            [numero, fuente, departamento, localidad]
-          );
-          if (result.rowCount > 0) inserted += 1;
-          else skipped += 1;
-        }
-
-        const normalizedCelular = buildNormalizedPhoneSql("d.celular");
-        const normalizedTelefono = buildNormalizedPhoneSql("d.telefono");
-        await client.query(
-          `
-          UPDATE datos_para_trabajar d
-          SET estado = 'bloqueado', updated_at = now()
-          WHERE EXISTS (
-            SELECT 1
-            FROM no_call_entries n
-            WHERE n.numero IN (${normalizedCelular}, ${normalizedTelefono})
-          )
-          `
-        );
-
-        const finalStatus =
-          rows.length > 0 && inserted === 0 && skipped > 0
-            ? "failed"
-            : "processed";
-
-        await client.query(
-          `
-          UPDATE contact_import_batches
-          SET total_rows = $1,
-              valid_rows = $2,
-              error_rows = $3,
-              status = $4,
-              updated_at = now()
-          WHERE id = $5
-          `,
-          [rows.length, inserted, skipped, finalStatus, batch.id]
-        );
-
-        await client.query("COMMIT");
-        return json(201, {
-          ok: true,
-          total: rows.length,
-          inserted,
-          skipped,
-          batchId: batch.id
-        });
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to import no-llamar CSV",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "GET" && path.endsWith("/no-llamar")) {
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
-      const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 20));
-      const search = normalizeText(getQueryParam(event, "search") || "");
-      const fuente = normalizeText(getQueryParam(event, "fuente") || "");
-      const departamento = normalizeText(getQueryParam(event, "departamento") || "");
-      const localidad = normalizeText(getQueryParam(event, "localidad") || "");
-      const offset = (page - 1) * pageSize;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
-
-        if (search) {
-          whereParts.push(`(numero ILIKE $${idx} OR departamento ILIKE $${idx} OR localidad ILIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        if (fuente) {
-          whereParts.push(`fuente = $${idx}`);
-          values.push(fuente);
-          idx += 1;
-        }
-
-        if (departamento) {
-          whereParts.push(`departamento ILIKE $${idx}`);
-          values.push(`%${departamento}%`);
-          idx += 1;
-        }
-
-        if (localidad) {
-          whereParts.push(`localidad ILIKE $${idx}`);
-          values.push(`%${localidad}%`);
-          idx += 1;
-        }
-
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-        const countResult = await client.query(
-          `
-          SELECT COUNT(*)::int AS total
-          FROM no_call_entries
-          ${whereClause}
-          `,
-          values
-        );
-
-        const total = countResult.rows[0]?.total || 0;
-        const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-        const itemsResult = await client.query(
-          `
-          SELECT
-            id,
-            numero,
-            fuente,
-            departamento,
-            localidad,
-            fecha_carga,
-            created_at
-          FROM no_call_entries
-          ${whereClause}
-          ORDER BY created_at DESC
-          LIMIT $${idx} OFFSET $${idx + 1}
-          `,
-          [...values, pageSize, offset]
-        );
-
-        const items = itemsResult.rows.map((row) => ({
-          id: row.id,
-          numero: row.numero,
-          fuente: row.fuente,
-          departamento: row.departamento,
-          localidad: row.localidad,
-          fecha_carga: row.fecha_carga,
-          created_at: row.created_at
-        }));
-
-        return json(200, { items, page, pageSize, total, totalPages });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to list no-llamar entries",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "POST" && path.endsWith("/imports/no-llamar/jobs")) {
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    const fileName =
-      event?.headers?.["x-file-name"] ||
-      event?.headers?.["X-File-Name"] ||
-      event?.headers?.["x-filename"] ||
-      event?.headers?.["X-Filename"] ||
-      "import_no_llamar.csv";
-    const rawBody = event?.body || "";
-    const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("utf8")
-      : typeof rawBody === "string"
-      ? rawBody
-      : JSON.stringify(rawBody);
-
-    let csvText = bodyText;
-    if (contentType.includes("application/json")) {
-      const parsed = safeParseBody(event);
-      if (parsed && parsed.csv) {
-        csvText = parsed.csv;
-      }
-    }
-
-    if (!csvText || !csvText.trim()) {
-      return json(400, { ok: false, message: "CSV vacio" });
-    }
-
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const jobResult = await client.query(
-          `
-          INSERT INTO no_call_import_jobs (
-            file_name,
-            status,
-            total_rows,
-            processed_rows,
-            inserted_rows,
-            skipped_rows,
-            csv_text,
-            created_by
-          )
-          VALUES ($1, 'queued', 0, 0, 0, 0, $2, $3)
-          RETURNING id, status, file_name, created_at
-          `,
-          [fileName, csvText, dbUser?.id || null]
-        );
-        const job = jobResult.rows[0];
-        const jobId = job.id;
-        await enqueueNoCallJob(jobId);
-        return json(201, {
-          ok: true,
-          job: {
-            id: jobId,
-            status: job.status,
-            fileName: job.file_name,
-            createdAt: job.created_at,
-            total: 0,
-            processed: 0,
-            inserted: 0,
-            skipped: 0,
-            progressPercent: 0
+            total_asignados: parseInt(l.total_asignados || "0", 10),
+            nuevos: parseInt(l.nuevos || "0", 10),
+            no_contesta: parseInt(s.no_contesta || "0", 10),
+            seguimiento: parseInt(s.seguimiento || "0", 10),
+            rechazos: parseInt(s.rechazos || "0", 10),
+            ventas: parseInt(s.ventas || "0", 10),
+            tocados: parseInt(s.tocados || "0", 10),
+            contactos_reales: contactosReales,
+            pct_contacto: Math.round(contactosReales / tocados * 100),
+            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
+            gestiones_hoy: parseInt(s.tocados || "0", 10),
+            ventas_hoy: parseInt(s.ventas || "0", 10),
+            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
+            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
+            rechazos_hoy: parseInt(s.rechazos || "0", 10),
+            rellamar_hoy: parseInt(s.rellamar || "0", 10),
+            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
+            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
           }
         });
       } finally {
@@ -11765,6 +9888,14 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
+
+
+
+
+
 
 
 
