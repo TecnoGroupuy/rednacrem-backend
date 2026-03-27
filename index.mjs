@@ -7071,32 +7071,32 @@ const items = result.rows.map((row) => ({
         const result = await client.query(
           `
           SELECT
-            d.id,
-            d.nombre,
-            d.apellido,
-            d.documento,
-            d.fecha_nacimiento,
-            DATE_PART('year', AGE(d.fecha_nacimiento))::int AS edad,
-            d.telefono,
-            d.celular,
-            d.email AS correo_electronico,
-            d.direccion,
-            d.departamento,
-            d.localidad,
-            NULL::text AS pais,
-            d.origen_dato,
+            COALESCE(d.id, c.id)                    AS id,
+            COALESCE(d.nombre, c.nombre)            AS nombre,
+            COALESCE(d.apellido, c.apellido)        AS apellido,
+            COALESCE(d.documento, c.documento)      AS documento,
+            COALESCE(d.fecha_nacimiento, c.fecha_nacimiento) AS fecha_nacimiento,
+            DATE_PART('year', AGE(
+              COALESCE(d.fecha_nacimiento, c.fecha_nacimiento)
+            ))::int                                 AS edad,
+            COALESCE(d.telefono, c.telefono)        AS telefono,
+            COALESCE(d.celular, c.celular)          AS celular,
+            COALESCE(d.departamento, c.departamento) AS departamento,
+            COALESCE(d.origen_dato, 'recupero')     AS origen_dato,
+            lb.tipo                                 AS lote_tipo,
             lcs.estado_venta,
-            lcs.intentos,
             lcs.batch_id,
-            lcs.ultimo_intento_at,
-            lb.nombre AS nombre_lote,
+            lb.nombre                               AS lote_nombre,
             (SELECT MAX(lmh.created_at)
              FROM lead_management_history lmh
-             WHERE lmh.contact_id = d.id
+             WHERE lmh.contact_id = COALESCE(d.id, c.id)
                AND lmh.batch_id = lcs.batch_id
             ) AS ultima_gestion_real
           FROM lead_contact_status lcs
-          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+            AND lcs.contact_id IS NOT NULL
+          LEFT JOIN contacts c ON c.id = lcs.client_contact_id
+            AND lcs.client_contact_id IS NOT NULL
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
