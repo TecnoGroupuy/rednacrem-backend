@@ -6556,6 +6556,7 @@ const items = result.rows.map((row) => ({
         const values = [];
         let idx = 1;
 
+        if (search) {
           whereParts.push(`(
             d.nombre ILIKE $${idx}
             OR d.apellido ILIKE $${idx}
@@ -6565,6 +6566,8 @@ const items = result.rows.map((row) => ({
             OR d.departamento ILIKE $${idx}
             OR d.localidad ILIKE $${idx}
           )`);
+          values.push(`%${search}%`);
+          idx += 1;
         }
 
         if (dbUser?.role_key === "vendedor") {
@@ -6752,11 +6755,13 @@ const items = result.rows.map((row) => ({
 
         if (producto) {
           conditions.push(`cp.nombre_producto = $${idx}`);
-        }
-
+          values.push(producto);
+          idx += 1;
         }
         if (departamento) {
           conditions.push(`c.departamento = $${idx}`);
+          values.push(departamento);
+          idx += 1;
         }
 
         const where = conditions.join(" AND ");
@@ -8397,9 +8402,9 @@ const items = result.rows.map((row) => ({
         AND localidad <> ''
         AND estado = 'nuevo'
       `;
-        }
-if (departamento) {
+      if (departamento) {
         where += ` AND departamento = $1`;
+        values.push(departamento);
       }
 
       const client = createDbClient();
@@ -8641,8 +8646,7 @@ if (departamento) {
       }
 
       const departamento = getQueryParam(event, "departamento");
-        }
-if (departamento) {
+      if (departamento) {
         const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
         if (deptos.length) {
           conditions.push(`departamento = ANY($${i})`);
@@ -9448,11 +9452,16 @@ if (departamento) {
         const values = [];
         let idx = 1;
 
+        if (search) {
           whereParts.push(`file_name ILIKE $${idx}`);
+          values.push(`%${search}%`);
+          idx += 1;
         }
 
         if (importType && importType !== "todos") {
           whereParts.push(`import_type = $${idx}`);
+          values.push(importType);
+          idx += 1;
         }
 
         if (statusList.length > 0) {
@@ -9461,6 +9470,8 @@ if (departamento) {
             ...(statusList.includes("processed") ? ["completed"] : [])
           ]));
           whereParts.push(`status = ANY($${idx})`);
+          values.push(expandedStatus);
+          idx += 1;
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -9907,20 +9918,28 @@ if (departamento) {
         const values = [];
         let idx = 1;
 
+        if (search) {
           whereParts.push(`(numero ILIKE $${idx} OR departamento ILIKE $${idx} OR localidad ILIKE $${idx})`);
+          values.push(`%${search}%`);
+          idx += 1;
         }
 
         if (fuente) {
           whereParts.push(`fuente = $${idx}`);
+          values.push(fuente);
+          idx += 1;
         }
 
-        }
-if (departamento) {
+        if (departamento) {
           whereParts.push(`departamento ILIKE $${idx}`);
+          values.push(`%${departamento}%`);
+          idx += 1;
         }
 
         if (localidad) {
           whereParts.push(`localidad ILIKE $${idx}`);
+          values.push(`%${localidad}%`);
+          idx += 1;
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -11110,6 +11129,7 @@ if (departamento) {
         const values = [];
         let idx = 1;
 
+        if (search) {
           whereParts.push(`(
             d.nombre ILIKE $${idx}
             OR d.apellido ILIKE $${idx}
@@ -11120,6 +11140,8 @@ if (departamento) {
             OR d.departamento ILIKE $${idx}
             OR d.localidad ILIKE $${idx}
           )`);
+          values.push(`%${search}%`);
+          idx += 1;
         }
 
         const normalizedCelular = buildNormalizedPhoneSql("d.celular");
