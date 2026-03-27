@@ -1677,10 +1677,10 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
     FROM lead_management_history lmh
     LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
     WHERE lmh.user_id = $1
-      AND (lmh.fecha_gestion AT TIME ZONE )::date = ::date
+      AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
     ORDER BY lmh.fecha_gestion ASC
     `,
-    [agenteId, fecha, LOCAL_TZ]
+    [agenteId, fecha]
   );
   const calls = callsRes.rows;
   const eventosRes = await client.query(
