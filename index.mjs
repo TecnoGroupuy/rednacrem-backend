@@ -1677,7 +1677,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
     FROM lead_management_history lmh
     LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
     WHERE lmh.user_id = $1
-      AND (lmh.fecha_gestion AT TIME ZONE $3)::date = $2::date
+      AND (lmh.fecha_gestion AT TIME ZONE )::date = ::date
     ORDER BY lmh.fecha_gestion ASC
     `,
     [agenteId, fecha, LOCAL_TZ]
@@ -7028,7 +7028,7 @@ export const handler = async (event) => {
             ) AS efectividad_pct
           FROM lead_management_history
           WHERE user_id = $1
-            AND (fecha_gestion AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $2::date
+            AND (fecha_gestion - INTERVAL '3 hours')::date = $2::date
           `,
           [sellerId, hoy]
         );
@@ -9875,7 +9875,7 @@ export const handler = async (event) => {
                    lmh.fecha_gestion
             FROM lead_management_history lmh
             WHERE lmh.user_id = ANY($1::uuid[])
-              AND (lmh.fecha_gestion AT TIME ZONE $2)::date = $3::date
+              AND (lmh.fecha_gestion - INTERVAL '3 hours')::date = $2::date
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
               user_id,
@@ -9895,7 +9895,7 @@ export const handler = async (event) => {
           FROM last_result
           GROUP BY user_id
           `,
-          [sellerIds, LOCAL_TZ, fecha]
+          [sellerIds, fecha]
         );
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
@@ -11717,6 +11717,13 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
+
+
+
+
 
 
 
