@@ -6919,8 +6919,8 @@ const items = result.rows.map((row) => ({
 
           await client.query(
             `
-            INSERT INTO lead_batch_contacts (batch_id, contact_id)
-            VALUES ($1, $2)
+            INSERT INTO lead_batch_contacts (batch_id, client_contact_id, tipo_origen)
+            VALUES ($1, $2, 'cliente')
             ON CONFLICT DO NOTHING
             `,
             [batchId, contactId]
@@ -6934,8 +6934,8 @@ const items = result.rows.map((row) => ({
                 estado_venta = 'nuevo',
                 intentos = 0,
                 updated_at = now()
-            WHERE contact_id = $1
-            RETURNING contact_id
+            WHERE client_contact_id = $1
+            RETURNING client_contact_id
             `,
             [contactId, batchId, assignedTo]
           );
@@ -6944,14 +6944,14 @@ const items = result.rows.map((row) => ({
             await client.query(
               `
               INSERT INTO lead_contact_status (
-                contact_id,
+                client_contact_id,
                 estado_venta,
                 intentos,
                 batch_id,
                 assigned_to
               )
               VALUES ($1, 'nuevo', 0, $2, $3)
-              ON CONFLICT (contact_id) DO NOTHING
+              ON CONFLICT (client_contact_id) DO NOTHING
               `,
               [contactId, batchId, assignedTo]
             );
