@@ -6081,7 +6081,7 @@ const items = result.rows.map((row) => ({
             COALESCE(c.departamento, d.departamento) AS departamento,
             d.localidad                              AS localidad,
             d.origen_dato                            AS fuente,
-            COALESCE(c.email, d.correo_electronico, d.email) AS email,
+            COALESCE(c.email, d.email) AS email,
             COALESCE(c.direccion, d.direccion)       AS direccion,
             s.fecha_venta,
             s.medio_pago,
@@ -11724,6 +11724,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
