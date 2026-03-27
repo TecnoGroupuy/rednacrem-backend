@@ -7028,7 +7028,7 @@ export const handler = async (event) => {
             ) AS efectividad_pct
           FROM lead_management_history
           WHERE user_id = $1
-            AND (fecha_gestion - INTERVAL '3 hours')::date = $2::date
+            AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
           `,
           [sellerId, hoy]
         );
@@ -9875,7 +9875,7 @@ export const handler = async (event) => {
                    lmh.fecha_gestion
             FROM lead_management_history lmh
             WHERE lmh.user_id = ANY($1::uuid[])
-              AND (lmh.fecha_gestion - INTERVAL '3 hours')::date = $2::date
+              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
               user_id,
@@ -11717,6 +11717,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
