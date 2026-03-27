@@ -2223,7 +2223,6 @@ function buildContactImportInsertBatch(batchRows) {
   const values = [];
   const placeholders = batchRows.map((row, index) => {
     const base = index * CONTACT_IMPORT_COLUMNS.length;
-    values.push(...row);
     const params = CONTACT_IMPORT_COLUMNS.map((_, colIndex) => `$${base + colIndex + 1}`);
     return `(${params.join(", ")})`;
   });
@@ -2287,7 +2286,6 @@ function buildDatosTrabajarInsertBatch(batchRows) {
   const values = [];
   const placeholders = batchRows.map((row, index) => {
     const base = index * columns.length;
-    values.push(...row);
     const params = columns.map((_, colIndex) => `$${base + colIndex + 1}`);
     return `(${params.join(", ")})`;
   });
@@ -3614,7 +3612,6 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
     const values = [];
 
     if (searchText) {
-      values.push(`%${searchText}%`);
       const idx = values.length;
       whereParts.push(
         `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.telefono, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx})`
@@ -3652,7 +3649,6 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
 
     const total = Number(countResult.rows[0]?.total || 0);
 
-    values.push(safeLimit, offset);
     const limitIdx = values.length - 1;
     const offsetIdx = values.length;
 
@@ -4189,7 +4185,6 @@ async function listManualTickets({ clienteId } = {}) {
     const values = [];
     let where = "";
     if (clienteId) {
-      values.push(clienteId);
       where = `WHERE cliente_id = $${values.length}`;
     }
 
@@ -4512,7 +4507,6 @@ async function findUserByEmailForSuperadmin(client, email, excludeUserId = null)
   let where = "WHERE lower(email) = lower($1)";
 
   if (excludeUserId) {
-    values.push(excludeUserId);
     where += ` AND id <> $${values.length}`;
   }
 
@@ -6562,7 +6556,6 @@ const items = result.rows.map((row) => ({
         const values = [];
         let idx = 1;
 
-        if (search) {
           whereParts.push(`(
             d.nombre ILIKE $${idx}
             OR d.apellido ILIKE $${idx}
@@ -6572,14 +6565,10 @@ const items = result.rows.map((row) => ({
             OR d.departamento ILIKE $${idx}
             OR d.localidad ILIKE $${idx}
           )`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 
         if (dbUser?.role_key === "vendedor") {
           whereParts.push(`lcs.assigned_to = $${idx}`);
-          values.push(dbUser.id);
-          idx += 1;
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -6763,19 +6752,11 @@ const items = result.rows.map((row) => ({
 
         if (producto) {
           conditions.push(`cp.nombre_producto = $${idx}`);
-          values.push(producto);
-          idx += 1;
         }
 
-        if (search) {
-          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
         if (departamento) {
           conditions.push(`c.departamento = $${idx}`);
-          values.push(departamento);
-          idx += 1;
         }
 
         const where = conditions.join(" AND ");
@@ -7647,15 +7628,12 @@ const items = result.rows.map((row) => ({
       for (const [key, value] of Object.entries(fields)) {
         if (!value) continue;
         updates.push(`${key} = $${idx}`);
-        values.push(value);
-        idx += 1;
       }
 
       if (!updates.length) {
         return json(200, { ok: true, success: true, data: null, error: null });
       }
 
-      values.push(leadId);
       const client = createDbClient();
       await client.connect();
       try {
@@ -7959,8 +7937,6 @@ const items = result.rows.map((row) => ({
 
       if (dateParam) {
         whereParts.push(`a.fecha_agenda::date = $${idx}::date`);
-        values.push(dateParam);
-        idx += 1;
       }
       if (!incluirCumplidas) {
         whereParts.push("a.cumplida = false");
@@ -8421,13 +8397,8 @@ const items = result.rows.map((row) => ({
         AND localidad <> ''
         AND estado = 'nuevo'
       `;
-              if (search) {
-          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 if (departamento) {
-        values.push(departamento);
         where += ` AND departamento = $1`;
       }
 
@@ -8548,12 +8519,8 @@ if (departamento) {
       }
 
       const departamento = getQueryParam(event, "departamento");
-              if (search) {
-          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-if (departamento) {
+      if (departamento) {
+
         const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
         if (deptos.length) {
           conditions.push(`departamento = ANY($${i})`);
@@ -8674,10 +8641,6 @@ if (departamento) {
       }
 
       const departamento = getQueryParam(event, "departamento");
-              if (search) {
-          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 if (departamento) {
         const deptos = String(departamento).split(",").map((v) => v.trim()).filter(Boolean);
@@ -8948,19 +8911,14 @@ if (departamento) {
 
       if (body?.nombre) {
         updates.push(`nombre = $${idx}`);
-        values.push(normalizeText(body.nombre));
-        idx += 1;
       }
 
       if (body?.estado) {
         updates.push(`estado = $${idx}`);
-        values.push(normalizeText(body.estado));
-        idx += 1;
       }
 
       if (!updates.length) return json(200, { ok: true });
 
-      values.push(batchId);
       const client = createDbClient();
       await client.connect();
       try {
@@ -9490,16 +9448,11 @@ if (departamento) {
         const values = [];
         let idx = 1;
 
-        if (search) {
           whereParts.push(`file_name ILIKE $${idx}`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 
         if (importType && importType !== "todos") {
           whereParts.push(`import_type = $${idx}`);
-          values.push(importType);
-          idx += 1;
         }
 
         if (statusList.length > 0) {
@@ -9508,8 +9461,6 @@ if (departamento) {
             ...(statusList.includes("processed") ? ["completed"] : [])
           ]));
           whereParts.push(`status = ANY($${idx})`);
-          values.push(expandedStatus);
-          idx += 1;
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -9956,33 +9907,20 @@ if (departamento) {
         const values = [];
         let idx = 1;
 
-        if (search) {
           whereParts.push(`(numero ILIKE $${idx} OR departamento ILIKE $${idx} OR localidad ILIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 
         if (fuente) {
           whereParts.push(`fuente = $${idx}`);
-          values.push(fuente);
-          idx += 1;
         }
 
-                if (search) {
-          conditions.push(`(LOWER(c.nombre) LIKE LOWER($${idx}) OR LOWER(c.apellido) LIKE LOWER($${idx}) OR c.telefono LIKE $${idx})`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 if (departamento) {
           whereParts.push(`departamento ILIKE $${idx}`);
-          values.push(`%${departamento}%`);
-          idx += 1;
         }
 
         if (localidad) {
           whereParts.push(`localidad ILIKE $${idx}`);
-          values.push(`%${localidad}%`);
-          idx += 1;
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -11172,7 +11110,6 @@ if (departamento) {
         const values = [];
         let idx = 1;
 
-        if (search) {
           whereParts.push(`(
             d.nombre ILIKE $${idx}
             OR d.apellido ILIKE $${idx}
@@ -11183,8 +11120,6 @@ if (departamento) {
             OR d.departamento ILIKE $${idx}
             OR d.localidad ILIKE $${idx}
           )`);
-          values.push(`%${search}%`);
-          idx += 1;
         }
 
         const normalizedCelular = buildNormalizedPhoneSql("d.celular");
@@ -12084,6 +12019,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
