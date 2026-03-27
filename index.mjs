@@ -6927,6 +6927,65 @@ const items = result.rows.map((row) => ({
       });
     }
   }
+  if (method === "GET" && path.endsWith("/api/recupero/filtros")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const [productosRes, departamentosRes] = await Promise.all([
+          client.query(
+            `
+            SELECT DISTINCT cp.nombre_producto
+            FROM contact_products cp
+            JOIN contacts c ON c.id = cp.contact_id
+            WHERE cp.estado = 'baja'
+              AND cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'
+            ORDER BY cp.nombre_producto
+            `
+          ),
+          client.query(
+            `
+            SELECT DISTINCT c.departamento
+            FROM contacts c
+            JOIN contact_products cp ON cp.contact_id = c.id
+            WHERE cp.estado = 'baja'
+              AND c.departamento IS NOT NULL
+              AND c.departamento != ''
+            ORDER BY c.departamento
+            `
+          )
+        ]);
+
+        return json(200, {
+          ok: true,
+          productos: productosRes.rows.map((r) => r.nombre_producto),
+          departamentos: departamentosRes.rows.map((r) => r.departamento)
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load recupero filters",
+        error: error.message
+      });
+    }
+  }
   if (method === "GET" && path.endsWith("/leads/assigned")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -11950,6 +12009,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
