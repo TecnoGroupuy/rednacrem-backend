@@ -6768,6 +6768,7 @@ const items = result.rows.map((row) => ({
             c.telefono,
             c.celular,
             c.documento,
+            c.fecha_nacimiento,
             c.departamento,
             cp.nombre_producto,
             cp.precio,
@@ -12009,6 +12010,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
