@@ -6004,7 +6004,8 @@ export const handler = async (event) => {
             c.nombre AS contact_nombre,
             c.apellido AS contact_apellido,
             c.telefono,
-            c.ubicacion,
+            c.departamento,
+            c.localidad,
             c.documento,
             c.email,
             c.direccion
@@ -6031,7 +6032,7 @@ const items = result.rows.map((row) => ({
           contact_nombre: row.contact_nombre || null,
           contact_apellido: row.contact_apellido || null,
           telefono: row.telefono || null,
-          ubicacion: row.ubicacion || null,
+          ubicacion: row.localidad || row.departamento || row.direccion || null,
           documento: row.documento || null,
           email: row.email || null,
           direccion: row.direccion || null
@@ -11721,6 +11722,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
