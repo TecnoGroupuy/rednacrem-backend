@@ -9855,7 +9855,7 @@ export const handler = async (event) => {
         const assignedRes = await client.query(
           `
           SELECT lcs.assigned_to AS user_id,
-                 COUNT(*) FILTER (WHERE lcs.estado_venta != 'dato_erroneo')::int AS asignados
+                 COUNT(DISTINCT lcs.contact_id)::int AS asignados
           FROM lead_contact_status lcs
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = ANY($1::uuid[])
@@ -11717,6 +11717,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
