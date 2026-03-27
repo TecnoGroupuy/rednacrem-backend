@@ -6701,6 +6701,232 @@ const items = result.rows.map((row) => ({
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/recupero/contactos")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const productoRaw = getQueryParam(event, "producto");
+      const departamentoRaw = getQueryParam(event, "departamento");
+      const producto = productoRaw ? productoRaw.trim() : "";
+      const departamento = departamentoRaw ? departamentoRaw.trim() : "";
+
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const offset = (page - 1) * limit;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const conditions = [
+          "cp.estado = 'baja'",
+          "c.telefono IS NOT NULL",
+          "c.telefono != ''",
+          `c.telefono NOT IN (
+            SELECT c2.telefono FROM contacts c2
+            JOIN contact_products cp2 ON cp2.contact_id = c2.id
+            WHERE cp2.estado = 'alta'
+              AND c2.telefono IS NOT NULL AND c2.telefono != ''
+          )`,
+          "cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'"
+        ];
+
+        const values = [];
+        let idx = 1;
+
+        if (producto) {
+          conditions.push(`cp.nombre_producto = $${idx}`);
+          values.push(producto);
+          idx += 1;
+        }
+
+        if (departamento) {
+          conditions.push(`c.departamento = $${idx}`);
+          values.push(departamento);
+          idx += 1;
+        }
+
+        const where = conditions.join(" AND ");
+
+        const itemsRes = await client.query(
+          `
+          SELECT DISTINCT ON (c.telefono)
+            c.id,
+            c.nombre,
+            c.apellido,
+            c.telefono,
+            c.celular,
+            c.documento,
+            c.departamento,
+            cp.nombre_producto,
+            cp.precio,
+            cp.fecha_baja,
+            cp.motivo_baja
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          WHERE ${where}
+          ORDER BY c.telefono, cp.fecha_baja DESC
+          LIMIT $${idx} OFFSET $${idx + 1}
+          `,
+          [...values, limit, offset]
+        );
+
+        const countRes = await client.query(
+          `
+          SELECT COUNT(DISTINCT c.telefono) AS total
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          WHERE ${where}
+          `,
+          values
+        );
+
+        return json(200, {
+          ok: true,
+          total: Number(countRes.rows[0]?.total || 0),
+          page,
+          limit,
+          items: itemsRes.rows
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list recupero contacts",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/api/recupero/lotes")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+
+      const nombre = body?.nombre;
+      const contactIds = Array.isArray(body?.contact_ids) ? body.contact_ids.filter(Boolean) : [];
+      const sellerIds = Array.isArray(body?.seller_ids) ? body.seller_ids.filter(Boolean) : [];
+
+      if (!nombre || !contactIds.length || !sellerIds.length) {
+        return json(400, { ok: false, message: "nombre, contact_ids y seller_ids son requeridos" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const batchRes = await client.query(
+          `
+          INSERT INTO lead_batches (nombre, estado, created_by, seller_id, asignado_a)
+          VALUES ($1, 'asignado', $2, $3, $3)
+          RETURNING id
+          `,
+          [nombre, dbUser?.id || null, sellerIds[0] || null]
+        );
+        const batchId = batchRes.rows[0]?.id;
+
+        for (const sellerId of sellerIds) {
+          await client.query(
+            `
+            INSERT INTO lead_batch_sellers (batch_id, seller_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            `,
+            [batchId, sellerId]
+          );
+        }
+
+        for (let i = 0; i < contactIds.length; i += 1) {
+          const contactId = contactIds[i];
+          const assignedTo = sellerIds[i % sellerIds.length];
+
+          await client.query(
+            `
+            INSERT INTO lead_batch_contacts (batch_id, contact_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            `,
+            [batchId, contactId]
+          );
+
+          const updated = await client.query(
+            `
+            UPDATE lead_contact_status
+            SET batch_id = $2,
+                assigned_to = $3,
+                estado_venta = 'nuevo',
+                intentos = 0,
+                updated_at = now()
+            WHERE contact_id = $1
+            RETURNING contact_id
+            `,
+            [contactId, batchId, assignedTo]
+          );
+
+          if (!updated.rows.length) {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                batch_id,
+                assigned_to
+              )
+              VALUES ($1, 'nuevo', 0, $2, $3)
+              ON CONFLICT (contact_id) DO NOTHING
+              `,
+              [contactId, batchId, assignedTo]
+            );
+          }
+        }
+
+        await client.query("COMMIT");
+        return json(201, { ok: true, batch_id: batchId });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to create recupero batch",
+        error: error.message
+      });
+    }
+  }
   if (method === "GET" && path.endsWith("/leads/assigned")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -11724,6 +11950,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
