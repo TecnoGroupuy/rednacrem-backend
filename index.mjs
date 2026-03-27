@@ -7768,8 +7768,9 @@ const items = result.rows.map((row) => ({
         }
 
         if (currentEstadoVenta) {
-          const estadosVerdaderamenteFinales = ["venta", "rechazo", "dato_erroneo"];
-          if (estadosVerdaderamenteFinales.includes(currentEstadoVenta)) {
+          // Venta y dato_erroneo son siempre finales
+          const estadosFinalesPermanentes = ["venta", "dato_erroneo"];
+          if (estadosFinalesPermanentes.includes(currentEstadoVenta)) {
             await client.query("ROLLBACK");
             return json(409, {
               ok: false,
@@ -7780,6 +7781,37 @@ const items = result.rows.map((row) => ({
                 estado_actual: currentEstadoVenta
               }
             });
+          }
+
+          // Rechazo solo se puede corregir el mismo día
+          if (currentEstadoVenta === "rechazo") {
+            const ultimaGestionRes = await client.query(
+              `
+              SELECT (fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
+              FROM lead_management_history
+              WHERE contact_id = $1
+                AND user_id = $2
+              ORDER BY fecha_gestion DESC
+              LIMIT 1
+              `,
+              [contactId, userId]
+            );
+
+            const fechaUltimaGestion = ultimaGestionRes.rows[0]?.fecha_uy;
+            const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
+
+            if (!fechaUltimaGestion || fechaUltimaGestion.toString() !== hoy) {
+              await client.query("ROLLBACK");
+              return json(409, {
+                ok: false,
+                success: false,
+                data: null,
+                error: {
+                  message: "El rechazo solo puede corregirse el mismo día",
+                  estado_actual: currentEstadoVenta
+                }
+              });
+            }
           }
         }
 
