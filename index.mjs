@@ -1678,6 +1678,41 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       FROM eventos_turno e
       WHERE (e.inicio AT TIME ZONE $2)::date = $1::date
     ),
+    base_ranked AS (
+      SELECT
+        b.*,
+        CASE b.tipo
+          WHEN 'TRABAJO' THEN 1
+          WHEN 'DESCANSO' THEN 2
+          WHEN 'BAÑO' THEN 3
+          WHEN 'BA?O' THEN 3
+          WHEN 'SUPERVISOR' THEN 4
+          WHEN 'LOGOUT' THEN 5
+          WHEN 'LOGIN' THEN 6
+          ELSE 99
+        END AS prioridad_tipo
+      FROM base b
+    ),
+    base_dedup AS (
+      SELECT *
+      FROM (
+        SELECT
+          br.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY br.agente_id, br.inicio
+            ORDER BY br.prioridad_tipo ASC
+          ) AS rn
+        FROM base_ranked br
+      ) x
+      WHERE x.rn = 1
+    ),
+    last_state AS (
+      SELECT DISTINCT ON (agente_id)
+        agente_id,
+        tipo AS estado_actual
+      FROM base_dedup
+      ORDER BY agente_id, inicio DESC, prioridad_tipo ASC
+    ),
     logins AS (
       SELECT agente_id, MIN(inicio) AS login_utc
       FROM base
@@ -1709,6 +1744,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       o.logout_utc,
       (l.login_utc AT TIME ZONE $2) AS login_local,
       (o.logout_utc AT TIME ZONE $2) AS logout_local,
+      ls.estado_actual,
       COALESCE(d.trabajo_seg, 0) AS trabajo_seg,
       COALESCE(d.descanso_seg, 0) AS descanso_seg,
       COALESCE(d.bano_seg, 0) AS bano_seg,
@@ -1721,6 +1757,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     FROM users u
     LEFT JOIN logins l ON l.agente_id = u.id
     LEFT JOIN logouts o ON o.agente_id = u.id
+    LEFT JOIN last_state ls ON ls.agente_id = u.id
     LEFT JOIN durations d ON d.agente_id = u.id
     WHERE u.role_key = 'vendedor'
       AND u.status = 'approved'
@@ -1742,6 +1779,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       id: row.id,
       nombre: row.nombre,
       apellido: row.apellido,
+      estado_actual: row.estado_actual || null,
       login_local: row.login_local || null,
       logout_local: row.logout_local || null,
       login_time: loginUtc ? formatTimeHm(loginUtc, timezone) : null,
