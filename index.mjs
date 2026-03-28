@@ -10453,7 +10453,9 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        await client.query("BEGIN");
         await applyInactividadSiCorresponde(client, dbUser.id, new Date());
+        await client.query("COMMIT");
         const estado = await getEstadoAgenteActual(client, dbUser.id, timezone);
         return json(200, {
           ok: true,
@@ -10464,6 +10466,9 @@ const items = result.rows.map((row) => ({
             requiere_bloqueo: false
           }
         });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
       } finally {
         await client.end();
       }
@@ -10498,6 +10503,7 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        await client.query("BEGIN");
         const config = await getConfigMap(client);
         const now = new Date();
         const fecha = formatDateYmd(now);
@@ -10508,10 +10514,12 @@ const items = result.rows.map((row) => ({
         const current = currentRes.rows[0] || null;
 
         if (current && current.tipo === tipo) {
+          await client.query("COMMIT");
           const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
           return json(200, { ok: true, estado });
         }
         if (current && current.tipo && current.tipo !== "TRABAJO") {
+          await client.query("COMMIT");
           return json(409, { ok: false, message: "Debe volver al trabajo antes de cambiar de estado" });
         }
 
@@ -10541,8 +10549,12 @@ const items = result.rows.map((row) => ({
         );
 
         await upsertEstadoAgenteActual(client, dbUser.id, tipo, now, body.session_id || current?.session_id || null, now);
+        await client.query("COMMIT");
         const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
         return json(201, { ok: true, estado });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
       } finally {
         await client.end();
       }
@@ -10570,6 +10582,7 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        await client.query("BEGIN");
         const config = await getConfigMap(client);
         const now = new Date();
         const fecha = formatDateYmd(now);
@@ -10607,8 +10620,12 @@ const items = result.rows.map((row) => ({
         }
 
         await upsertEstadoAgenteActual(client, dbUser.id, "TRABAJO", now, current?.session_id || null, now);
+        await client.query("COMMIT");
         const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
         return json(200, { ok: true, estado: estado || { tipo: "TRABAJO", inicio: now } });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
       } finally {
         await client.end();
       }
@@ -10641,6 +10658,7 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        await client.query("BEGIN");
         const currentRes = await client.query(
           `SELECT tipo, inicio, session_id, last_seen_at FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
           [dbUser.id]
@@ -10667,21 +10685,27 @@ const items = result.rows.map((row) => ({
             currentAfterInactivity.session_id || null,
             now
           );
-        } else if (currentAfterInactivity) {
+        } else if (currentAfterInactivity && currentAfterInactivity.tipo === "TRABAJO") {
           await upsertEstadoAgenteActual(
             client,
             dbUser.id,
-            currentAfterInactivity.tipo,
+            "TRABAJO",
             currentAfterInactivity.inicio,
             currentAfterInactivity.session_id || null,
             now
           );
-        } else {
+        } else if (currentAfterInactivity && isPausaTipo(currentAfterInactivity.tipo)) {
+          // No alterar pausas por heartbeat
+        } else if (!currentAfterInactivity) {
           await upsertEstadoAgenteActual(client, dbUser.id, "TRABAJO", now, null, now);
         }
 
+        await client.query("COMMIT");
         const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
         return json(200, { ok: true, estado });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
       } finally {
         await client.end();
       }
