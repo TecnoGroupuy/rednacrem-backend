@@ -1851,7 +1851,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       AND u.status = 'approved'
     ORDER BY u.nombre
     `,
-    [fecha, timezone, now]
+    [fecha, timezone]
   );
 
   return result.rows.map((row) => {
