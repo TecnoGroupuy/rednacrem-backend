@@ -1783,6 +1783,14 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       ) x
       WHERE x.rn = 1
     ),
+    intervalos AS (
+      SELECT
+        agente_id,
+        tipo,
+        inicio,
+        LEAD(inicio) OVER (PARTITION BY agente_id ORDER BY inicio) AS siguiente_inicio
+      FROM base_dedup
+    ),
     last_state AS (
       SELECT DISTINCT ON (agente_id)
         agente_id,
@@ -1805,12 +1813,15 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     durations AS (
       SELECT
         agente_id,
-        SUM(CASE WHEN tipo = 'TRABAJO' THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
-        SUM(CASE WHEN tipo = 'DESCANSO' THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS descanso_seg,
-        SUM(CASE WHEN tipo IN ('BAÑO', 'BA?O') THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS bano_seg,
-        SUM(CASE WHEN tipo = 'SUPERVISOR' THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS supervisor_seg
-      FROM base
-      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BAÑO', 'BA?O')
+        SUM(CASE WHEN tipo = 'TRABAJO' AND siguiente_inicio IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
+        SUM(CASE WHEN tipo = 'DESCANSO' AND siguiente_inicio IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS descanso_seg,
+        SUM(CASE WHEN tipo IN ('BAÑO', 'BA?O') AND siguiente_inicio IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS bano_seg,
+        SUM(CASE WHEN tipo = 'SUPERVISOR' AND siguiente_inicio IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS supervisor_seg
+      FROM intervalos
       GROUP BY agente_id
     )
     SELECT
