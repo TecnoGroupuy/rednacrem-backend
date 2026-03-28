@@ -1403,6 +1403,14 @@ function formatTimeHm(date, tz = LOCAL_TZ) {
   }).format(date);
 }
 
+function formatDurationLabel(seconds) {
+  if (seconds === null || seconds === undefined) return null;
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+}
+
 function parseFechaParam(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "hoy") {
@@ -1656,6 +1664,101 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     summary,
     agents
   };
+}
+
+async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new Date()) {
+  const result = await client.query(
+    `
+    WITH base AS (
+      SELECT
+        e.agente_id,
+        e.tipo,
+        e.inicio,
+        e.fin
+      FROM eventos_turno e
+      WHERE (e.inicio AT TIME ZONE $2)::date = $1::date
+    ),
+    logins AS (
+      SELECT agente_id, MIN(inicio) AS login_utc
+      FROM base
+      WHERE tipo = 'LOGIN'
+      GROUP BY agente_id
+    ),
+    logouts AS (
+      SELECT agente_id, MAX(COALESCE(fin, inicio)) AS logout_utc
+      FROM base
+      WHERE tipo = 'LOGOUT'
+      GROUP BY agente_id
+    ),
+    durations AS (
+      SELECT
+        agente_id,
+        SUM(CASE WHEN tipo = 'TRABAJO' THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
+        SUM(CASE WHEN tipo = 'DESCANSO' THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS descanso_seg,
+        SUM(CASE WHEN tipo IN ('BAÑO', 'BA?O') THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS bano_seg,
+        SUM(CASE WHEN tipo = 'SUPERVISOR' THEN EXTRACT(EPOCH FROM (COALESCE(fin, $3) - inicio)) ELSE 0 END)::bigint AS supervisor_seg
+      FROM base
+      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BAÑO', 'BA?O')
+      GROUP BY agente_id
+    )
+    SELECT
+      u.id,
+      u.nombre,
+      u.apellido,
+      l.login_utc,
+      o.logout_utc,
+      (l.login_utc AT TIME ZONE $2) AS login_local,
+      (o.logout_utc AT TIME ZONE $2) AS logout_local,
+      COALESCE(d.trabajo_seg, 0) AS trabajo_seg,
+      COALESCE(d.descanso_seg, 0) AS descanso_seg,
+      COALESCE(d.bano_seg, 0) AS bano_seg,
+      COALESCE(d.supervisor_seg, 0) AS supervisor_seg,
+      CASE
+        WHEN l.login_utc IS NOT NULL AND o.logout_utc IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (o.logout_utc - l.login_utc))::bigint
+        ELSE NULL
+      END AS total_jornada_seg
+    FROM users u
+    LEFT JOIN logins l ON l.agente_id = u.id
+    LEFT JOIN logouts o ON o.agente_id = u.id
+    LEFT JOIN durations d ON d.agente_id = u.id
+    WHERE u.role_key = 'vendedor'
+      AND u.status = 'approved'
+    ORDER BY u.nombre
+    `,
+    [fecha, timezone, now]
+  );
+
+  return result.rows.map((row) => {
+    const loginUtc = row.login_utc ? new Date(row.login_utc) : null;
+    const logoutUtc = row.logout_utc ? new Date(row.logout_utc) : null;
+    const trabajoSeg = Number(row.trabajo_seg || 0);
+    const descansoSeg = Number(row.descanso_seg || 0);
+    const banoSeg = Number(row.bano_seg || 0);
+    const supervisorSeg = Number(row.supervisor_seg || 0);
+    const totalJornadaSeg = row.total_jornada_seg !== null ? Number(row.total_jornada_seg) : null;
+
+    return {
+      id: row.id,
+      nombre: row.nombre,
+      apellido: row.apellido,
+      login_local: row.login_local || null,
+      logout_local: row.logout_local || null,
+      login_time: loginUtc ? formatTimeHm(loginUtc, timezone) : null,
+      logout_time: logoutUtc ? formatTimeHm(logoutUtc, timezone) : null,
+      tiempoProductivoSeg: trabajoSeg,
+      descansosSeg: descansoSeg,
+      banosSeg: banoSeg,
+      supervisorSeg: supervisorSeg,
+      disponibleSeg: trabajoSeg,
+      totalJornadaSeg,
+      tiempoProductivoLabel: formatDurationLabel(trabajoSeg),
+      descansosLabel: formatDurationLabel(descansoSeg),
+      banosLabel: formatDurationLabel(banoSeg),
+      supervisorLabel: formatDurationLabel(supervisorSeg),
+      totalJornadaLabel: totalJornadaSeg !== null ? formatDurationLabel(totalJornadaSeg) : null
+    };
+  });
 }
 
 async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
@@ -10152,6 +10255,37 @@ const items = result.rows.map((row) => ({
       return json(500, {
         ok: false,
         message: "Failed to load team summary",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/api/reportes/jornada-diaria")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const timezone = getQueryParam(event, "timezone") || LOCAL_TZ;
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const items = await getDailyWorkReport(client, fecha, timezone, new Date());
+        return json(200, { ok: true, fecha, timezone, items });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load jornada diaria",
         error: error.message
       });
     }
