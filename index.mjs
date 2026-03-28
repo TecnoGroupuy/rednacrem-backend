@@ -140,6 +140,8 @@ const INTERNAL_CONTACT_ACCESS_ROLES = [
   "vendedor"
 ];
 
+const INACTIVITY_MINUTES = 15;
+
 const LEAD_ACCESS_ROLES = [
   ...INTERNAL_CONTACT_ACCESS_ROLES,
   "vendedor"
@@ -1422,6 +1424,12 @@ function isPausaTipo(tipo) {
   return tipo === "DESCANSO" || tipo === "SUPERVISOR" || tipo === "BAÑO" || tipo === "BA?O";
 }
 
+function addMinutes(date, minutes) {
+  const d = new Date(date);
+  d.setMinutes(d.getMinutes() + minutes);
+  return d;
+}
+
 function parseFechaParam(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "hoy") {
@@ -1476,7 +1484,7 @@ async function getConfigMap(client) {
 async function getEstadoAgenteActual(client, agenteId, timezone = LOCAL_TZ) {
   const result = await client.query(
     `
-    SELECT tipo, inicio, session_id, updated_at
+    SELECT tipo, inicio, session_id, updated_at, last_seen_at
     FROM estado_agente_actual
     WHERE agente_id = $1
     LIMIT 1
@@ -1492,23 +1500,25 @@ async function getEstadoAgenteActual(client, agenteId, timezone = LOCAL_TZ) {
     inicio_local: inicioUtc ? formatDateYmd(inicioUtc, timezone) + " " + formatTimeHm(inicioUtc, timezone) : null,
     session_id: row.session_id || null,
     updated_at: row.updated_at || null,
+    last_seen_at: row.last_seen_at || null,
     requiere_bloqueo: isPausaTipo(row.tipo)
   };
 }
 
-async function upsertEstadoAgenteActual(client, agenteId, tipo, inicio, sessionId = null) {
+async function upsertEstadoAgenteActual(client, agenteId, tipo, inicio, sessionId = null, lastSeenAt = null) {
   await client.query(
     `
-    INSERT INTO estado_agente_actual (agente_id, tipo, inicio, session_id, updated_at)
-    VALUES ($1, $2, $3, $4, now())
+    INSERT INTO estado_agente_actual (agente_id, tipo, inicio, session_id, last_seen_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5, now())
     ON CONFLICT (agente_id)
     DO UPDATE SET
       tipo = EXCLUDED.tipo,
       inicio = EXCLUDED.inicio,
       session_id = EXCLUDED.session_id,
+      last_seen_at = COALESCE(EXCLUDED.last_seen_at, estado_agente_actual.last_seen_at),
       updated_at = now()
     `,
-    [agenteId, tipo, inicio, sessionId]
+    [agenteId, tipo, inicio, sessionId, lastSeenAt]
   );
 }
 
@@ -1537,6 +1547,46 @@ async function closeActiveTurnEvent(client, eventRow, now, config) {
     [fin, excedido, exceso, eventRow.id]
   );
   return result.rows[0] || null;
+}
+
+async function applyInactividadSiCorresponde(client, agenteId, now) {
+  const stateRes = await client.query(
+    `
+    SELECT tipo, inicio, session_id, last_seen_at
+    FROM estado_agente_actual
+    WHERE agente_id = $1
+    LIMIT 1
+    `,
+    [agenteId]
+  );
+  const state = stateRes.rows[0] || null;
+  if (!state) return { changed: false, state: null };
+  if (state.tipo !== "TRABAJO") return { changed: false, state };
+  if (!state.last_seen_at) return { changed: false, state };
+
+  const lastSeen = new Date(state.last_seen_at);
+  const inactiveAt = addMinutes(lastSeen, INACTIVITY_MINUTES);
+  if (now <= inactiveAt) return { changed: false, state };
+
+  await client.query(
+    `
+    INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+    VALUES ($1, 'INACTIVO', $2, NULL, $3)
+    `,
+    [agenteId, inactiveAt, formatDateYmd(inactiveAt)]
+  );
+
+  await upsertEstadoAgenteActual(client, agenteId, "INACTIVO", inactiveAt, state.session_id || null, state.last_seen_at);
+  return {
+    changed: true,
+    state: {
+      ...state,
+      tipo: "INACTIVO",
+      inicio: inactiveAt,
+      last_seen_at: state.last_seen_at
+    },
+    inactiveAt
+  };
 }
 
 async function getTeamSummary(client, fecha, now = new Date()) {
@@ -1760,12 +1810,13 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
         b.*,
         CASE b.tipo
           WHEN 'TRABAJO' THEN 1
-          WHEN 'DESCANSO' THEN 2
-          WHEN 'BAÑO' THEN 3
-          WHEN 'BA?O' THEN 3
-          WHEN 'SUPERVISOR' THEN 4
-          WHEN 'LOGOUT' THEN 5
-          WHEN 'LOGIN' THEN 6
+          WHEN 'INACTIVO' THEN 2
+          WHEN 'DESCANSO' THEN 3
+          WHEN 'BAÑO' THEN 4
+          WHEN 'BA?O' THEN 4
+          WHEN 'SUPERVISOR' THEN 5
+          WHEN 'LOGOUT' THEN 6
+          WHEN 'LOGIN' THEN 7
           ELSE 99
         END AS prioridad_tipo
       FROM base b
@@ -10402,6 +10453,7 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        await applyInactividadSiCorresponde(client, dbUser.id, new Date());
         const estado = await getEstadoAgenteActual(client, dbUser.id, timezone);
         return json(200, {
           ok: true,
@@ -10450,7 +10502,7 @@ const items = result.rows.map((row) => ({
         const now = new Date();
         const fecha = formatDateYmd(now);
         const currentRes = await client.query(
-          `SELECT tipo, inicio FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
+          `SELECT tipo, inicio, session_id FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
           [dbUser.id]
         );
         const current = currentRes.rows[0] || null;
@@ -10488,7 +10540,7 @@ const items = result.rows.map((row) => ({
           [dbUser.id, tipo, now, fecha]
         );
 
-        await upsertEstadoAgenteActual(client, dbUser.id, tipo, now, body.session_id || null);
+        await upsertEstadoAgenteActual(client, dbUser.id, tipo, now, body.session_id || current?.session_id || null, now);
         const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
         return json(201, { ok: true, estado });
       } finally {
@@ -10522,7 +10574,7 @@ const items = result.rows.map((row) => ({
         const now = new Date();
         const fecha = formatDateYmd(now);
         const currentRes = await client.query(
-          `SELECT tipo FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
+          `SELECT tipo, session_id, last_seen_at FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
           [dbUser.id]
         );
         const current = currentRes.rows[0] || null;
@@ -10554,7 +10606,7 @@ const items = result.rows.map((row) => ({
           );
         }
 
-        await upsertEstadoAgenteActual(client, dbUser.id, "TRABAJO", now, null);
+        await upsertEstadoAgenteActual(client, dbUser.id, "TRABAJO", now, current?.session_id || null, now);
         const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
         return json(200, { ok: true, estado: estado || { tipo: "TRABAJO", inicio: now } });
       } finally {
@@ -10564,6 +10616,79 @@ const items = result.rows.map((row) => ({
       return json(500, {
         ok: false,
         message: "Failed to return to work",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/api/agente/heartbeat")) {
+    const body = safeParseBody(event) || {};
+    if (body.timestamp !== undefined && !Number.isFinite(Number(body.timestamp))) {
+      return json(400, { ok: false, message: "timestamp invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const now = new Date();
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const currentRes = await client.query(
+          `SELECT tipo, inicio, session_id, last_seen_at FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
+          [dbUser.id]
+        );
+        const current = currentRes.rows[0] || null;
+
+        const inactivityResult = await applyInactividadSiCorresponde(client, dbUser.id, now);
+        const currentAfterInactivity = inactivityResult.state || current;
+
+        if (currentAfterInactivity && currentAfterInactivity.tipo === "INACTIVO") {
+          const fecha = formatDateYmd(now);
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, 'TRABAJO', $2, NULL, $3)
+            `,
+            [dbUser.id, now, fecha]
+          );
+          await upsertEstadoAgenteActual(
+            client,
+            dbUser.id,
+            "TRABAJO",
+            now,
+            currentAfterInactivity.session_id || null,
+            now
+          );
+        } else if (currentAfterInactivity) {
+          await upsertEstadoAgenteActual(
+            client,
+            dbUser.id,
+            currentAfterInactivity.tipo,
+            currentAfterInactivity.inicio,
+            currentAfterInactivity.session_id || null,
+            now
+          );
+        } else {
+          await upsertEstadoAgenteActual(client, dbUser.id, "TRABAJO", now, null, now);
+        }
+
+        const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
+        return json(200, { ok: true, estado });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to register heartbeat",
         error: error.message
       });
     }
