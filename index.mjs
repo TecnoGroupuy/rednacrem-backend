@@ -1411,6 +1411,17 @@ function formatDurationLabel(seconds) {
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
 
+function normalizeEstadoTipo(rawTipo) {
+  const text = String(rawTipo || "").trim().toUpperCase();
+  if (!text) return "";
+  if (text === "BANO" || text === "BANIO" || text === "BA?O") return "BAÑO";
+  return text;
+}
+
+function isPausaTipo(tipo) {
+  return tipo === "DESCANSO" || tipo === "SUPERVISOR" || tipo === "BAÑO" || tipo === "BA?O";
+}
+
 function parseFechaParam(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "hoy") {
@@ -1460,6 +1471,72 @@ async function getConfigMap(client) {
     meta_ventas_dia: Number(map.meta_ventas_dia ?? 6),
     realtimeUrl: map.realtimeUrl || map.realtime_url || null
   };
+}
+
+async function getEstadoAgenteActual(client, agenteId, timezone = LOCAL_TZ) {
+  const result = await client.query(
+    `
+    SELECT tipo, inicio, session_id, updated_at
+    FROM estado_agente_actual
+    WHERE agente_id = $1
+    LIMIT 1
+    `,
+    [agenteId]
+  );
+  const row = result.rows[0] || null;
+  if (!row) return null;
+  const inicioUtc = row.inicio ? new Date(row.inicio) : null;
+  return {
+    tipo: row.tipo,
+    inicio: row.inicio,
+    inicio_local: inicioUtc ? formatDateYmd(inicioUtc, timezone) + " " + formatTimeHm(inicioUtc, timezone) : null,
+    session_id: row.session_id || null,
+    updated_at: row.updated_at || null,
+    requiere_bloqueo: isPausaTipo(row.tipo)
+  };
+}
+
+async function upsertEstadoAgenteActual(client, agenteId, tipo, inicio, sessionId = null) {
+  await client.query(
+    `
+    INSERT INTO estado_agente_actual (agente_id, tipo, inicio, session_id, updated_at)
+    VALUES ($1, $2, $3, $4, now())
+    ON CONFLICT (agente_id)
+    DO UPDATE SET
+      tipo = EXCLUDED.tipo,
+      inicio = EXCLUDED.inicio,
+      session_id = EXCLUDED.session_id,
+      updated_at = now()
+    `,
+    [agenteId, tipo, inicio, sessionId]
+  );
+}
+
+async function closeActiveTurnEvent(client, eventRow, now, config) {
+  if (!eventRow) return null;
+  const fin = now;
+  let excedido = false;
+  let exceso = 0;
+  if (isPausaTipo(eventRow.tipo)) {
+    const limite = eventRow.tipo === "BAÑO" || eventRow.tipo === "BA?O"
+      ? config.limite_bano_minutos
+      : config.limite_descanso_minutos;
+    const dur = minutesBetween(new Date(eventRow.inicio), fin);
+    excedido = dur > limite;
+    exceso = Math.max(0, dur - limite);
+  }
+  const result = await client.query(
+    `
+    UPDATE eventos_turno
+    SET fin = $1,
+        excedido = $2,
+        exceso_minutos = $3
+    WHERE id = $4
+    RETURNING *
+    `,
+    [fin, excedido, exceso, eventRow.id]
+  );
+  return result.rows[0] || null;
 }
 
 async function getTeamSummary(client, fecha, now = new Date()) {
@@ -10293,6 +10370,189 @@ const items = result.rows.map((row) => ({
       return json(500, {
         ok: false,
         message: "Failed to load team summary",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/api/agente/estado-actual")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const timezone = getQueryParam(event, "timezone") || LOCAL_TZ;
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const estado = await getEstadoAgenteActual(client, dbUser.id, timezone);
+        return json(200, {
+          ok: true,
+          estado: estado || {
+            tipo: "TRABAJO",
+            inicio: null,
+            inicio_local: null,
+            requiere_bloqueo: false
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load estado actual",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/api/agente/estado")) {
+    const body = safeParseBody(event) || {};
+    const tipoRaw = normalizeEstadoTipo(body.tipo);
+    const tipo = tipoRaw === "BANO" ? "BAÑO" : tipoRaw;
+    if (!["BAÑO", "DESCANSO", "SUPERVISOR"].includes(tipo)) {
+      return json(400, { ok: false, message: "Tipo de estado no válido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const config = await getConfigMap(client);
+        const now = new Date();
+        const fecha = formatDateYmd(now);
+        const currentRes = await client.query(
+          `SELECT tipo, inicio FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
+          [dbUser.id]
+        );
+        const current = currentRes.rows[0] || null;
+
+        if (current && current.tipo === tipo) {
+          const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
+          return json(200, { ok: true, estado });
+        }
+        if (current && current.tipo && current.tipo !== "TRABAJO") {
+          return json(409, { ok: false, message: "Debe volver al trabajo antes de cambiar de estado" });
+        }
+
+        const activeRes = await client.query(
+          `
+          SELECT *
+          FROM eventos_turno
+          WHERE agente_id = $1
+            AND fecha = $2
+            AND fin IS NULL
+          ORDER BY inicio DESC
+          LIMIT 1
+          `,
+          [dbUser.id, fecha]
+        );
+        const activeEvent = activeRes.rows[0] || null;
+        if (activeEvent) {
+          await closeActiveTurnEvent(client, activeEvent, now, config);
+        }
+
+        await client.query(
+          `
+          INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+          VALUES ($1, $2, $3, NULL, $4)
+          `,
+          [dbUser.id, tipo, now, fecha]
+        );
+
+        await upsertEstadoAgenteActual(client, dbUser.id, tipo, now, body.session_id || null);
+        const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
+        return json(201, { ok: true, estado });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to update estado",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/api/agente/volver-al-trabajo")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const config = await getConfigMap(client);
+        const now = new Date();
+        const fecha = formatDateYmd(now);
+        const currentRes = await client.query(
+          `SELECT tipo FROM estado_agente_actual WHERE agente_id = $1 LIMIT 1`,
+          [dbUser.id]
+        );
+        const current = currentRes.rows[0] || null;
+
+        const activeRes = await client.query(
+          `
+          SELECT *
+          FROM eventos_turno
+          WHERE agente_id = $1
+            AND fecha = $2
+            AND fin IS NULL
+          ORDER BY inicio DESC
+          LIMIT 1
+          `,
+          [dbUser.id, fecha]
+        );
+        const activeEvent = activeRes.rows[0] || null;
+        if (activeEvent && activeEvent.tipo !== "TRABAJO") {
+          await closeActiveTurnEvent(client, activeEvent, now, config);
+        }
+
+        if (!activeEvent || activeEvent.tipo !== "TRABAJO") {
+          await client.query(
+            `
+            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+            VALUES ($1, 'TRABAJO', $2, NULL, $3)
+            `,
+            [dbUser.id, now, fecha]
+          );
+        }
+
+        await upsertEstadoAgenteActual(client, dbUser.id, "TRABAJO", now, null);
+        const estado = await getEstadoAgenteActual(client, dbUser.id, LOCAL_TZ);
+        return json(200, { ok: true, estado: estado || { tipo: "TRABAJO", inicio: now } });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to return to work",
         error: error.message
       });
     }
