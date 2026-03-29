@@ -1867,6 +1867,14 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
         AND COALESCE(b.fin, b.inicio) >= l.login_utc
       ORDER BY b.agente_id, COALESCE(b.fin, b.inicio) ASC
     ),
+    session_count AS (
+      SELECT
+        agente_id,
+        COUNT(*)::int AS session_count
+      FROM base
+      WHERE tipo = 'LOGIN'
+      GROUP BY agente_id
+    ),
     durations AS (
       SELECT
         agente_id,
@@ -1890,6 +1898,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       (l.login_utc AT TIME ZONE $2) AS login_local,
       (o.logout_utc AT TIME ZONE $2) AS logout_local,
       ls.estado_actual,
+      COALESCE(sc.session_count, 0) AS session_count,
       COALESCE(d.trabajo_seg, 0) AS trabajo_seg,
       COALESCE(d.descanso_seg, 0) AS descanso_seg,
       COALESCE(d.bano_seg, 0) AS bano_seg,
@@ -1904,6 +1913,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     LEFT JOIN last_logout o ON o.agente_id = u.id
     LEFT JOIN last_state ls ON ls.agente_id = u.id
     LEFT JOIN durations d ON d.agente_id = u.id
+    LEFT JOIN session_count sc ON sc.agente_id = u.id
     WHERE u.role_key = 'vendedor'
       AND u.status = 'approved'
     ORDER BY u.nombre
@@ -1925,6 +1935,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       nombre: row.nombre,
       apellido: row.apellido,
       estado_actual: row.estado_actual || null,
+      sessionCount: Number(row.session_count || 0),
       login_local: row.login_local || null,
       logout_local: row.logout_local || null,
       login_time: loginUtc ? formatTimeHm(loginUtc, timezone) : null,
