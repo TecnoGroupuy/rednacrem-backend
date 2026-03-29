@@ -1849,17 +1849,23 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       FROM base_dedup
       ORDER BY agente_id, inicio DESC, prioridad_tipo ASC
     ),
-    logins AS (
-      SELECT agente_id, MIN(inicio) AS login_utc
+    last_login AS (
+      SELECT DISTINCT ON (agente_id)
+        agente_id,
+        inicio AS login_utc
       FROM base
       WHERE tipo = 'LOGIN'
-      GROUP BY agente_id
+      ORDER BY agente_id, inicio DESC
     ),
-    logouts AS (
-      SELECT agente_id, MAX(COALESCE(fin, inicio)) AS logout_utc
-      FROM base
-      WHERE tipo = 'LOGOUT'
-      GROUP BY agente_id
+    last_logout AS (
+      SELECT DISTINCT ON (b.agente_id)
+        b.agente_id,
+        COALESCE(b.fin, b.inicio) AS logout_utc
+      FROM base b
+      JOIN last_login l ON l.agente_id = b.agente_id
+      WHERE b.tipo = 'LOGOUT'
+        AND COALESCE(b.fin, b.inicio) >= l.login_utc
+      ORDER BY b.agente_id, COALESCE(b.fin, b.inicio) ASC
     ),
     durations AS (
       SELECT
@@ -1894,8 +1900,8 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
         ELSE NULL
       END AS total_jornada_seg
     FROM users u
-    LEFT JOIN logins l ON l.agente_id = u.id
-    LEFT JOIN logouts o ON o.agente_id = u.id
+    LEFT JOIN last_login l ON l.agente_id = u.id
+    LEFT JOIN last_logout o ON o.agente_id = u.id
     LEFT JOIN last_state ls ON ls.agente_id = u.id
     LEFT JOIN durations d ON d.agente_id = u.id
     WHERE u.role_key = 'vendedor'
