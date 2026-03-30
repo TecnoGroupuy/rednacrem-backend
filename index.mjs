@@ -7290,6 +7290,8 @@ const items = result.rows.map((row) => ({
           idx += 1;
         }
 
+        const baseConditions = [...conditions];
+
         if (tab) {
           if (tab === "disponibles") {
             conditions.push(`
@@ -7345,6 +7347,7 @@ const items = result.rows.map((row) => ({
         }
 
         const where = conditions.join(" AND ");
+        const baseWhere = baseConditions.join(" AND ");
         const orderBy = sort && sortableColumns[sort]
           ? `${sortableColumns[sort]} ${dir}`
           : "cp.fecha_baja DESC";
@@ -7419,12 +7422,97 @@ const items = result.rows.map((row) => ({
           values
         );
 
+        const metricsRes = await client.query(
+          `
+          SELECT
+            COUNT(DISTINCT c.telefono) FILTER (WHERE NOT EXISTS (
+              SELECT 1
+              FROM lead_batch_contacts lbc
+              JOIN lead_batches lb ON lb.id = lbc.batch_id
+              WHERE lbc.client_contact_id = c.id
+                AND lb.tipo = 'recupero'
+                AND lb.estado IN ('activo', 'asignado')
+            )) AS disponibles,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
+              SELECT 1
+              FROM lead_batch_contacts lbc
+              JOIN lead_batches lb ON lb.id = lbc.batch_id
+              WHERE lbc.client_contact_id = c.id
+                AND lb.tipo = 'recupero'
+            )) AS en_lote,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
+              SELECT 1
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lcs.contact_id = c.id
+                AND lb.tipo = 'recupero'
+                AND lcs.assigned_to IS NOT NULL
+            )) AS asignados,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE (
+              EXISTS (
+                SELECT 1
+                FROM lead_contact_status lcs
+                JOIN lead_batches lb ON lb.id = lcs.batch_id
+                WHERE lcs.contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                  AND lcs.intentos > 0
+              )
+              OR gestion.ultimo_estado_gestion IS NOT NULL
+            )) AS gestionados,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE gestion.ultimo_estado_gestion IN ('venta', 'alta')) AS recuperados,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE gestion.ultimo_estado_gestion = 'rechazo') AS rechazados
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN LATERAL (
+            SELECT
+              lbc.batch_id,
+              lb.nombre AS nombre_lote,
+              lcs.assigned_to AS vendedor_asignado_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+            FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
+            LEFT JOIN lead_contact_status lcs
+              ON lcs.contact_id = lbc.client_contact_id
+             AND lcs.batch_id = lbc.batch_id
+            LEFT JOIN users u ON u.id = lcs.assigned_to
+            WHERE lbc.client_contact_id = c.id
+              AND lb.tipo = 'recupero'
+              AND lb.estado IN ('activo', 'asignado')
+            ORDER BY lb.created_at DESC
+            LIMIT 1
+          ) lote ON true
+          LEFT JOIN LATERAL (
+            SELECT
+              lmh.resultado AS ultimo_estado_gestion,
+              (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.contact_id = c.id
+              AND lb.tipo = 'recupero'
+            ORDER BY lmh.fecha_gestion DESC
+            LIMIT 1
+          ) gestion ON true
+          WHERE ${baseWhere}
+          `,
+          values
+        );
+        const metricsRow = metricsRes.rows[0] || {};
+
         return json(200, {
           ok: true,
           total: Number(countRes.rows[0]?.total || 0),
           page,
           limit,
-          items: itemsRes.rows
+          items: itemsRes.rows,
+          metrics: {
+            total: Number(countRes.rows[0]?.total || 0),
+            disponibles: Number(metricsRow.disponibles || 0),
+            enLote: Number(metricsRow.en_lote || 0),
+            asignados: Number(metricsRow.asignados || 0),
+            gestionados: Number(metricsRow.gestionados || 0),
+            recuperados: Number(metricsRow.recuperados || 0),
+            rechazados: Number(metricsRow.rechazados || 0)
+          }
         });
       } finally {
         await client.end();
