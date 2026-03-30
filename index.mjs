@@ -1154,7 +1154,9 @@ function mapClientRowToApi(row) {
     productoEstado: row.producto_estado,
     cuotasPagas: Number(row.cuotas_pagas || 0),
     carenciaCuotas: Number(row.carencia_cuotas || 0),
-    createdAt: row.created_at || null,
+    fecha_alta: row.fecha_alta || null,
+    fechaAlta: row.fecha_alta || null,
+    createdAt: row.fecha_alta || row.created_at || null,
     updatedAt: row.updated_at || null
   };
 }
