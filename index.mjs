@@ -7971,30 +7971,9 @@ const items = result.rows.map((row) => ({
           `,
           [sellerId, fecha, tipo]
         );
-        const manualSalesRes = await client.query(
-          `
-          SELECT COUNT(*)::int AS manual_sales
-          FROM sales s
-          WHERE s.seller_user_id = $1
-            AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-            AND NOT EXISTS (
-              SELECT 1
-              FROM datos_para_trabajar d
-              JOIN lead_management_history lmh ON lmh.contact_id = d.id
-              WHERE d.contact_id = s.contact_id
-                AND lmh.user_id = s.seller_user_id
-                AND lmh.resultado = 'venta'
-                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-            )
-          `,
-          [sellerId, fecha]
-        );
-
         const s = statsResult.rows[0] || {};
         const l = lotesResult.rows[0] || {};
-        const ventasLead = parseInt(s.ventas || "0", 10);
-        const manualSales = parseInt(manualSalesRes.rows[0]?.manual_sales || "0", 10);
-        const ventasTotal = ventasLead + manualSales;
+        const ventasTotal = parseInt(s.ventas || "0", 10);
         const rechazosTotal = parseInt(s.rechazos || "0", 10);
         const seguimientoTotal = parseInt(s.seguimiento || "0", 10);
         const noContestaTotal = parseInt(s.no_contesta || "0", 10);
@@ -11678,32 +11657,9 @@ const items = result.rows.map((row) => ({
         );
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
-        const manualSalesRes = await client.query(
-          `
-          SELECT s.seller_user_id AS user_id,
-                 COUNT(*)::int AS manual_ventas
-          FROM sales s
-          WHERE s.seller_user_id = ANY($1::uuid[])
-            AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-            AND NOT EXISTS (
-              SELECT 1
-              FROM datos_para_trabajar d
-              JOIN lead_management_history lmh ON lmh.contact_id = d.id
-              WHERE d.contact_id = s.contact_id
-                AND lmh.user_id = s.seller_user_id
-                AND lmh.resultado = 'venta'
-                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-            )
-          GROUP BY s.seller_user_id
-          `,
-          [sellerIds, fecha]
-        );
-        const manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
-
         const items = sellers.map((seller) => {
           const daily = dailyMap.get(seller.id) || {};
-          const manualVentas = manualSalesMap.get(seller.id) || 0;
-          const ventas = Number(daily.ventas || 0) + manualVentas;
+          const ventas = Number(daily.ventas || 0);
           const seguimientos = Number(daily.seguimientos || 0);
           const rellamadas = Number(daily.rellamadas || 0);
           const noContesta = Number(daily.no_contesta || 0);
