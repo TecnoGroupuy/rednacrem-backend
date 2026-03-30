@@ -422,6 +422,33 @@ async function ensureUserProfileColumns(client) {
   userProfileColumnsReady = true;
 }
 
+let leadContactColumnsCache = null;
+async function getLeadContactColumns(client) {
+  if (leadContactColumnsCache) return leadContactColumnsCache;
+  const res = await client.query(
+    `
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name IN ('datos_para_trabajar', 'contacts')
+    `
+  );
+  const map = {
+    datos_para_trabajar: new Set(),
+    contacts: new Set()
+  };
+  for (const row of res.rows) {
+    if (map[row.table_name]) {
+      map[row.table_name].add(row.column_name);
+    }
+  }
+  leadContactColumnsCache = {
+    d: map.datos_para_trabajar,
+    c: map.contacts
+  };
+  return leadContactColumnsCache;
+}
+
 function normalizePhoneDigits(value) {
   const digits = String(value || "").replace(/\D/g, "");
   return digits || "";
@@ -7637,6 +7664,17 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        const leadCols = await getLeadContactColumns(client);
+        const dEmail = leadCols.d.has("email") ? "d.email" : "NULL::text";
+        const dDireccion = leadCols.d.has("direccion") ? "d.direccion" : "NULL::text";
+        const dLocalidad = leadCols.d.has("localidad") ? "d.localidad" : "NULL::text";
+        const dContactId = leadCols.d.has("contact_id") ? "d.contact_id" : "NULL::uuid";
+        const cEmail = leadCols.c.has("email") ? "c.email" : "NULL::text";
+        const cDireccion = leadCols.c.has("direccion") ? "c.direccion" : "NULL::text";
+        const cDepartamento = leadCols.c.has("departamento") ? "c.departamento" : "NULL::text";
+        const contactJoin = leadCols.d.has("contact_id")
+          ? "LEFT JOIN contacts c ON c.id = d.contact_id"
+          : "LEFT JOIN contacts c ON c.id = lcs.contact_id";
         const countResult = await client.query(
           `
           SELECT COUNT(*) AS count
@@ -7679,10 +7717,10 @@ const items = result.rows.map((row) => ({
             ))::int                                 AS edad,
             COALESCE(d.telefono, c.telefono)        AS telefono,
             COALESCE(d.celular, c.celular)          AS celular,
-            COALESCE(d.email, c.email)              AS correo_electronico,
-            COALESCE(d.direccion, c.direccion)      AS direccion,
-            COALESCE(d.departamento, c.departamento) AS departamento,
-            d.localidad                             AS localidad,
+            COALESCE(${dEmail}, ${cEmail})          AS correo_electronico,
+            COALESCE(${dDireccion}, ${cDireccion})  AS direccion,
+            COALESCE(d.departamento, ${cDepartamento}) AS departamento,
+            ${dLocalidad}                           AS localidad,
             COALESCE(d.origen_dato, 'recupero')     AS origen_dato,
             lb.tipo                                 AS lote_tipo,
             lcs.estado_venta,
@@ -7695,7 +7733,7 @@ const items = result.rows.map((row) => ({
             ) AS ultima_gestion_real
           FROM lead_contact_status lcs
           LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
-          LEFT JOIN contacts c ON c.id = d.contact_id
+          ${contactJoin}
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
