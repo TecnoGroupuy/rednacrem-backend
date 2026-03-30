@@ -12050,6 +12050,7 @@ const items = result.rows.map((row) => ({
             `,
             [agenteId, now, fecha]
           );
+          await upsertEstadoAgenteActual(client, agenteId, "TRABAJO", now, null, now);
         } else if (tipoNormalized === "LOGOUT") {
           if (activeEvent) {
             await closeEvent(activeEvent);
@@ -12073,6 +12074,7 @@ const items = result.rows.map((row) => ({
             `,
             [agenteId, tipoNormalized, now, fecha]
           );
+          await upsertEstadoAgenteActual(client, agenteId, tipoNormalized, now, null, now);
         } else if (tipoNormalized === "TRABAJO") {
           if (activeEvent && isPauseType(activeEvent.tipo)) {
             const closed = await closeEvent(activeEvent);
@@ -12111,6 +12113,7 @@ const items = result.rows.map((row) => ({
             `,
             [agenteId, now, fecha]
           );
+          await upsertEstadoAgenteActual(client, agenteId, "TRABAJO", now, null, now);
         } else {
           return json(400, { ok: false, message: "Tipo de evento no valido" });
         }
