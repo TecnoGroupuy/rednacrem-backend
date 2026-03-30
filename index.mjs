@@ -11063,6 +11063,7 @@ const items = result.rows.map((row) => ({
             `,
             [agenteId, now, fecha]
           );
+          await upsertEstadoAgenteActual(client, agenteId, "LOGOUT", now, null, now);
         } else if (isPauseType(tipoNormalized)) {
           if (activeEvent && activeEvent.tipo === "TRABAJO") {
             await closeEvent(activeEvent);
