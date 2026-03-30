@@ -8494,19 +8494,46 @@ const items = result.rows.map((row) => ({
         }
 
         if ((effectiveResultado === "seguimiento" || effectiveResultado === "rellamar") && fechaAgenda) {
-          await client.query(
+          const agendaRes = await client.query(
             `
-            INSERT INTO lead_agenda (
-              contact_id,
-              seller_id,
-              batch_id,
-              fecha_agenda,
-              nota
-            )
-            VALUES ($1, $2, $3, $4, $5)
+            SELECT id
+            FROM lead_agenda
+            WHERE contact_id = $1
+              AND batch_id = $2
+              AND cumplida = false
+            ORDER BY created_at DESC
+            LIMIT 1
             `,
-            [leadId, assignedTo, batchId, fechaAgenda, nota || null]
+            [leadId, batchId]
           );
+
+          if (agendaRes.rows.length) {
+            const agendaId = agendaRes.rows[0].id;
+            await client.query(
+              `
+              UPDATE lead_agenda
+              SET fecha_agenda = $2,
+                  nota = $3,
+                  seller_id = $4
+              WHERE id = $1
+              `,
+              [agendaId, fechaAgenda, nota || null, assignedTo]
+            );
+          } else {
+            await client.query(
+              `
+              INSERT INTO lead_agenda (
+                contact_id,
+                seller_id,
+                batch_id,
+                fecha_agenda,
+                nota
+              )
+              VALUES ($1, $2, $3, $4, $5)
+              `,
+              [leadId, assignedTo, batchId, fechaAgenda, nota || null]
+            );
+          }
         }
 
         await client.query(
