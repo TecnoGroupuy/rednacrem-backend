@@ -7223,6 +7223,33 @@ const items = result.rows.map((row) => ({
           );
         }
 
+        const assignedSellerId = sellerIds[0] || null;
+        if (assignedSellerId) {
+          await client.query(
+            `
+            INSERT INTO lead_contact_status (
+              contact_id,
+              batch_id,
+              assigned_to,
+              estado_venta,
+              intentos,
+              ultimo_intento_at
+            )
+            SELECT
+              lbc.client_contact_id,
+              $1,
+              $2,
+              'nuevo',
+              0,
+              NULL
+            FROM lead_batch_contacts lbc
+            WHERE lbc.batch_id = $1
+            ON CONFLICT (contact_id, batch_id) DO NOTHING
+            `,
+            [batchId, assignedSellerId]
+          );
+        }
+
         await client.query("COMMIT");
         return json(201, { ok: true, batch_id: batchId });
       } catch (err) {
@@ -7318,14 +7345,26 @@ const items = result.rows.map((row) => ({
       const limit = parseInt(getQueryParam(event, "limit") || "50", 10);
       const offset = (page - 1) * limit;
       const tab = getQueryParam(event, "tab") || "todos";
-      const tabFiltros = {
-        nuevo: "AND lcs.estado_venta = 'nuevo'",
-        no_contesta: "AND lcs.estado_venta IN ('no_contesta', 'rellamar')",
-        seguimiento: "AND lcs.estado_venta = 'seguimiento'",
-        rechazo: "AND lcs.estado_venta = 'rechazo'",
-        todos: "AND lcs.estado_venta != 'dato_erroneo'"
-      };
-      const tabWhere = tabFiltros[tab] || tabFiltros.todos;
+      const tipo = getQueryParam(event, "tipo") || null;
+      let tabNormalized = tab;
+      if (tabNormalized === "nuevos") tabNormalized = "nuevo";
+
+      let tabWhere = "";
+      if (tabNormalized === "nuevo") {
+        tabWhere = "AND (lcs.intentos = 0 OR lcs.ultimo_intento_at IS NULL)";
+      } else if (tabNormalized === "seguimiento") {
+        tabWhere = "AND lcs.estado_venta IN ('seguimiento', 'interesado')";
+      } else if (tabNormalized === "no_contesta") {
+        tabWhere = "AND lcs.estado_venta IN ('no_contesta', 'rellamar', 'volver_a_llamar')";
+      } else if (tabNormalized === "no_contacto") {
+        tabWhere = "AND lcs.estado_venta IN ('no_contesta')";
+      } else if (tabNormalized === "rechazo") {
+        tabWhere = "AND lcs.estado_venta = 'rechazo'";
+      } else if (tabNormalized === "recuperado") {
+        tabWhere = "AND lcs.estado_venta IN ('venta')";
+      } else {
+        tabWhere = "AND lcs.estado_venta != 'dato_erroneo'";
+      }
       const tabWhereCount = tabWhere.replace(/^AND\s+/, "");
       const countExtra =
         tabWhereCount && tabWhereCount !== "lcs.estado_venta != 'dato_erroneo'"
@@ -7348,9 +7387,10 @@ const items = result.rows.map((row) => ({
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND lcs.estado_venta != 'dato_erroneo'
+            AND ($2::text IS NULL OR lb.tipo = $2)
             ${countExtra}
           `,
-          [sellerId]
+          [sellerId, tipo]
         );
         const result = await client.query(
           `
@@ -7382,11 +7422,12 @@ const items = result.rows.map((row) => ({
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
+            AND ($2::text IS NULL OR lb.tipo = $2)
             ${tabWhere}
           ORDER BY lcs.intentos ASC, lcs.contact_id ASC
-          LIMIT $2 OFFSET $3
+          LIMIT $3 OFFSET $4
           `,
-          [sellerId, limit, offset]
+          [sellerId, tipo, limit, offset]
         );
         const total = parseInt(countResult.rows[0]?.count || "0", 10);
 
@@ -7432,6 +7473,8 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
+        const tipo = (getQueryParam(event, "tipo") || "").trim() || null;
+        const isRecupero = tipo === "recupero";
         const batchRes = await client.query(
           `
           SELECT
@@ -7446,10 +7489,11 @@ const items = result.rows.map((row) => ({
           JOIN lead_batch_sellers lbs ON lbs.batch_id = lb.id
           WHERE lbs.seller_id = $1
             AND lb.estado IN ('activo', 'asignado')
+            AND ($2::text IS NULL OR lb.tipo = $2)
           ORDER BY lb.created_at DESC
           LIMIT 1
           `,
-          [dbUser.id]
+          [dbUser.id, tipo]
         );
 
         if (!batchRes.rows.length) {
@@ -7474,11 +7518,37 @@ const items = result.rows.map((row) => ({
         const enOla2 = horaActual >= ola2Inicio && horaActual <= ola2Fin;
 
         let estadosPrioridad = [];
-        if (enOla1 || (!enOla1 && !enOla2)) {
+        if (isRecupero) {
+          estadosPrioridad = [
+            "seguimiento",
+            "interesado",
+            "rellamar",
+            "volver_a_llamar",
+            "no_contesta",
+            "nuevo"
+          ];
+        } else if (enOla1 || (!enOla1 && !enOla2)) {
           estadosPrioridad = ["rellamar", "nuevo", "no_contesta"];
         } else {
           estadosPrioridad = ["rellamar", "no_contesta", "nuevo"];
         }
+
+        const orderBy = isRecupero
+          ? `
+            CASE
+              WHEN lcs.estado_venta IN ('seguimiento', 'interesado') THEN 1
+              WHEN lcs.estado_venta = 'no_contesta' THEN 2
+              WHEN lcs.intentos = 0 THEN 3
+              ELSE 4
+            END,
+            lcs.intentos ASC,
+            lcs.contact_id ASC
+          `
+          : `
+            prioridad ASC,
+            lcs.intentos ASC,
+            lcs.contact_id ASC
+          `;
 
         const minimoEntreIntentos = Number(batch.dias_entre_olas || 0) * 24 * 60 * 60;
 
@@ -7514,7 +7584,7 @@ const items = result.rows.map((row) => ({
               lcs.ultimo_intento_at IS NULL
               OR EXTRACT(EPOCH FROM (NOW() - lcs.ultimo_intento_at)) > $5
             )
-          ORDER BY prioridad ASC, lcs.intentos ASC, lcs.contact_id ASC
+          ORDER BY ${orderBy}
           LIMIT 1
           `,
           [
@@ -7536,7 +7606,7 @@ const items = result.rows.map((row) => ({
               AND estado_venta = ANY($3)
               AND intentos < $4
             `,
-            [batch.batch_id, dbUser.id, ["nuevo", "no_contesta", "rellamar"], batch.max_intentos]
+            [batch.batch_id, dbUser.id, estadosPrioridad, batch.max_intentos]
           );
           const pendientes = pendingRes.rows[0]?.total || 0;
           if (pendientes > 0) {
@@ -7596,6 +7666,7 @@ const items = result.rows.map((row) => ({
 
       const sellerId = dbUser?.id || null;
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const tipo = (getQueryParam(event, "tipo") || "").trim() || null;
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
       const client = createDbClient();
@@ -7612,30 +7683,33 @@ const items = result.rows.map((row) => ({
           WHERE lbs.seller_id = $1
             AND lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
+            AND ($2::text IS NULL OR lb.tipo = $2)
           `,
-          [sellerId]
+          [sellerId, tipo]
         );
 
         const statsResult = await client.query(
           `
           SELECT
-            COUNT(DISTINCT contact_id) AS tocados,
-            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'no_contesta') AS no_contesta,
-            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'rellamar') AS rellamar,
-            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'seguimiento') AS seguimiento,
-            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'rechazo') AS rechazos,
-            COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'venta') AS ventas,
+            COUNT(DISTINCT lmh.contact_id) AS tocados,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'no_contesta') AS no_contesta,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'rellamar') AS rellamar,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'seguimiento') AS seguimiento,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'rechazo') AS rechazos,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta') AS ventas,
             ROUND(
               100.0
-              * COUNT(DISTINCT contact_id) FILTER (WHERE resultado = 'venta')
-              / NULLIF(COUNT(DISTINCT contact_id), 0),
+              * COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta')
+              / NULLIF(COUNT(DISTINCT lmh.contact_id), 0),
               1
             ) AS efectividad_pct
-          FROM lead_management_history
-          WHERE user_id = $1
-            AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+          FROM lead_management_history lmh
+          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+          WHERE lmh.user_id = $1
+            AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+            AND ($3::text IS NULL OR lb.tipo = $3)
           `,
-          [sellerId, fecha]
+          [sellerId, fecha, tipo]
         );
 
         const s = statsResult.rows[0] || {};
@@ -8115,40 +8189,40 @@ const items = result.rows.map((row) => ({
           [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
 
-          const updateLeadStatus = await client.query(
+        const updateLeadStatus = await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = $2,
+              intentos = $3,
+              proxima_accion = $4,
+              assigned_to = $6,
+              ola_actual = $7,
+              ultimo_intento_at = now(),
+              updated_at = now()
+          WHERE contact_id = $1
+            AND batch_id = $5
+          RETURNING contact_id
+          `,
+          [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+        );
+        if (!updateLeadStatus.rows.length) {
+          await client.query(
             `
-            UPDATE lead_contact_status
-            SET estado_venta = $2,
-                intentos = $3,
-                proxima_accion = $4,
-                batch_id = COALESCE(lead_contact_status.batch_id, $5),
-                assigned_to = COALESCE(lead_contact_status.assigned_to, $6),
-                ola_actual = $7,
-                ultimo_intento_at = now(),
-                updated_at = now()
-            WHERE contact_id = $1
-            RETURNING contact_id
+            INSERT INTO lead_contact_status (
+              contact_id,
+              estado_venta,
+              intentos,
+              proxima_accion,
+              batch_id,
+              assigned_to,
+              ola_actual,
+              ultimo_intento_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
             `,
             [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
           );
-          if (!updateLeadStatus.rows.length) {
-            await client.query(
-              `
-              INSERT INTO lead_contact_status (
-                contact_id,
-                estado_venta,
-                intentos,
-                proxima_accion,
-                batch_id,
-                assigned_to,
-                ola_actual,
-                ultimo_intento_at
-              )
-              VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-              `,
-              [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
-            );
-          }
+        }
 
         if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
           await client.query(
