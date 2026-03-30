@@ -4005,10 +4005,18 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
   }
 }
 
+function normalizePhoneSearchValue(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^\d]/g, "");
+}
+
 function buildPhoneSearchClause(fieldPrefix, idx) {
-  return `(COALESCE(NULLIF(${fieldPrefix}.telefono, ''), NULLIF(${fieldPrefix}.celular, '')) ILIKE $${idx}
-    OR ${fieldPrefix}.telefono ILIKE $${idx}
-    OR ${fieldPrefix}.celular ILIKE $${idx})`;
+  // TODO: add telefono_norm/celular_norm columns with indexes and compare directly
+  return `(
+    REPLACE(REPLACE(REPLACE(${fieldPrefix}.telefono, ' ', ''), '-', ''), '+', '') ILIKE $${idx}
+    OR REPLACE(REPLACE(REPLACE(${fieldPrefix}.celular, ' ', ''), '-', ''), '+', '') ILIKE $${idx}
+  )`;
 }
 
 async function fetchCodificaciones({
@@ -4041,8 +4049,9 @@ async function fetchCodificaciones({
       values.push(to);
       whereParts.push(`lmh.fecha_gestion <= $${values.length}::timestamptz`);
     }
-    if (searchPhone) {
-      values.push(`%${searchPhone}%`);
+    const normalizedSearchPhone = normalizePhoneSearchValue(searchPhone);
+    if (normalizedSearchPhone) {
+      values.push(`%${normalizedSearchPhone}%`);
       whereParts.push(buildPhoneSearchClause("d", values.length));
     }
     if (resultado) {
