@@ -127,23 +127,6 @@ async function enqueueRecuperoImportJob(jobId) {
     })
   );
 }
-function getRecuperoImportQueueUrl() {
-  return process.env.RECUPERO_IMPORT_QUEUE_URL || process.env.CONTACT_IMPORT_QUEUE_URL || ;
-}
-
-async function enqueueRecuperoImportJob(jobId) {
- const queueUrl = getRecuperoImportQueueUrl();
- if (!queueUrl) {
- throw new Error( RECUPERO_IMPORT_QUEUE_URL not set);
- }
- const payload = { type: recupero_import, jobId };
- await sqs.send(
- new SendMessageCommand({
- QueueUrl: queueUrl,
- MessageBody: JSON.stringify(payload),
- })
- );
-}
 
 const VALID_USER_STATUSES = [
   "pending",
