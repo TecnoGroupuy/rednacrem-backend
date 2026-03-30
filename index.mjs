@@ -7950,7 +7950,7 @@ const items = result.rows.map((row) => ({
         const statsResult = await client.query(
           `
           SELECT
-            COUNT(DISTINCT lmh.contact_id) AS tocados,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado <> 'dato_erroneo') AS tocados,
             COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'no_contesta') AS no_contesta,
             COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'rellamar') AS rellamar,
             COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'seguimiento') AS seguimiento,
@@ -7959,7 +7959,7 @@ const items = result.rows.map((row) => ({
             ROUND(
               100.0
               * COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta')
-              / NULLIF(COUNT(DISTINCT lmh.contact_id), 0),
+              / NULLIF(COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado <> 'dato_erroneo'), 0),
               1
             ) AS efectividad_pct
           FROM lead_management_history lmh
