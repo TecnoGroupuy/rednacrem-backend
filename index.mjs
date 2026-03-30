@@ -6128,6 +6128,16 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
 }
 
 export const handler = async (event) => {
+  const preflightMethod =
+    event?.requestContext?.http?.method || event?.httpMethod || "";
+  const hasPreflightHeader =
+    Boolean(
+      event?.headers?.["access-control-request-method"] ||
+        event?.headers?.["Access-Control-Request-Method"]
+    );
+  if (preflightMethod === "OPTIONS" || hasPreflightHeader) {
+    return handleOptions(event);
+  }
   if (Array.isArray(event?.Records) && event.Records[0]?.eventSource === "aws:sqs") {
     for (const record of event.Records) {
       let payload = null;
