@@ -4,6 +4,9 @@
   "description": "",
   "main": "index.mjs",
   "scripts": {
+    "check:syntax": "node --check index.mjs",
+    "prestart": "node --check index.mjs",
+    "predev": "node --check index.mjs",
     "start": "node index.mjs",
     "start:local": "node local-server.mjs",
     "start:realtime": "node realtime-server.mjs",
