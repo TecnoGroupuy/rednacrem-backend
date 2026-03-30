@@ -7672,6 +7672,7 @@ const items = result.rows.map((row) => ({
         const cEmail = leadCols.c.has("email") ? "c.email" : "NULL::text";
         const cDireccion = leadCols.c.has("direccion") ? "c.direccion" : "NULL::text";
         const cDepartamento = leadCols.c.has("departamento") ? "c.departamento" : "NULL::text";
+        const cLocalidad = leadCols.c.has("localidad") ? "c.localidad" : "NULL::text";
         const contactJoin = leadCols.d.has("contact_id")
           ? "LEFT JOIN contacts c ON c.id = d.contact_id"
           : "LEFT JOIN contacts c ON c.id = lcs.contact_id";
@@ -7695,7 +7696,7 @@ const items = result.rows.map((row) => ({
                 OR COALESCE(d.celular, c.celular, '') ILIKE $3
                 OR COALESCE(d.email, c.email, '') ILIKE $3
                 OR COALESCE(d.departamento, c.departamento, '') ILIKE $3
-                OR COALESCE(d.localidad, c.localidad, '') ILIKE $3
+                OR COALESCE(${dLocalidad}, ${cLocalidad}, '') ILIKE $3
                 OR COALESCE(d.direccion, c.direccion, '') ILIKE $3
                 OR (COALESCE(d.nombre, c.nombre, '') || ' ' || COALESCE(d.apellido, c.apellido, '')) ILIKE $3
               )
@@ -7747,7 +7748,7 @@ const items = result.rows.map((row) => ({
                 OR COALESCE(d.celular, c.celular, '') ILIKE $3
                 OR COALESCE(d.email, c.email, '') ILIKE $3
                 OR COALESCE(d.departamento, c.departamento, '') ILIKE $3
-                OR COALESCE(d.localidad, c.localidad, '') ILIKE $3
+                OR COALESCE(${dLocalidad}, ${cLocalidad}, '') ILIKE $3
                 OR COALESCE(d.direccion, c.direccion, '') ILIKE $3
                 OR (COALESCE(d.nombre, c.nombre, '') || ' ' || COALESCE(d.apellido, c.apellido, '')) ILIKE $3
               )
