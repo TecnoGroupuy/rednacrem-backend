@@ -4004,6 +4004,132 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
     await client.end();
   }
 }
+
+function buildPhoneSearchClause(fieldPrefix, idx) {
+  return `(COALESCE(NULLIF(${fieldPrefix}.telefono, ''), NULLIF(${fieldPrefix}.celular, '')) ILIKE $${idx}
+    OR ${fieldPrefix}.telefono ILIKE $${idx}
+    OR ${fieldPrefix}.celular ILIKE $${idx})`;
+}
+
+async function fetchCodificaciones({
+  limit = 10,
+  offset = 0,
+  searchPhone = "",
+  sellerId = "",
+  from = "",
+  to = "",
+  resultado = "",
+  resultadoCorregido = "",
+  estado = ""
+} = {}) {
+  const client = createDbClient();
+  try {
+    await client.connect();
+
+    const whereParts = [];
+    const values = [];
+
+    if (sellerId) {
+      values.push(sellerId);
+      whereParts.push(`lmh.user_id = $${values.length}`);
+    }
+    if (from) {
+      values.push(from);
+      whereParts.push(`lmh.fecha_gestion >= $${values.length}::timestamptz`);
+    }
+    if (to) {
+      values.push(to);
+      whereParts.push(`lmh.fecha_gestion <= $${values.length}::timestamptz`);
+    }
+    if (searchPhone) {
+      values.push(`%${searchPhone}%`);
+      whereParts.push(buildPhoneSearchClause("d", values.length));
+    }
+    if (resultado) {
+      values.push(resultado);
+      whereParts.push(`lmh.resultado = $${values.length}`);
+    }
+    if (resultadoCorregido) {
+      values.push(resultadoCorregido);
+      whereParts.push(`la.resultado_corregido = $${values.length}`);
+    }
+    if (estado) {
+      if (estado === "corregida") {
+        whereParts.push(`la.id IS NOT NULL`);
+      } else if (estado === "pendiente") {
+        whereParts.push(`la.id IS NULL`);
+      }
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    const countResult = await client.query(
+      `
+      WITH latest_audit AS (
+        SELECT
+          a.*,
+          ROW_NUMBER() OVER (PARTITION BY a.management_id ORDER BY a.corrected_at DESC) AS rn
+        FROM lead_coding_audit a
+      )
+      SELECT COUNT(*)::int AS total
+      FROM lead_management_history lmh
+      LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+      LEFT JOIN latest_audit la ON la.management_id = lmh.id AND la.rn = 1
+      ${whereClause}
+      `,
+      values
+    );
+
+    const total = Number(countResult.rows[0]?.total || 0);
+
+    values.push(limit);
+    const limitIdx = values.length;
+    values.push(offset);
+    const offsetIdx = values.length;
+
+    const result = await client.query(
+      `
+      WITH latest_audit AS (
+        SELECT
+          a.*,
+          ROW_NUMBER() OVER (PARTITION BY a.management_id ORDER BY a.corrected_at DESC) AS rn
+        FROM lead_coding_audit a
+      )
+      SELECT
+        lmh.id AS management_id,
+        lmh.contact_id,
+        lmh.batch_id,
+        lmh.fecha_gestion,
+        lmh.resultado AS resultado_original,
+        lmh.nota,
+        d.telefono,
+        d.celular,
+        COALESCE(NULLIF(d.telefono, ''), NULLIF(d.celular, '')) AS telefono_display,
+        u.nombre AS vendedor_nombre,
+        u.apellido AS vendedor_apellido,
+        TRIM(CONCAT(u.nombre, ' ', u.apellido)) AS vendedor_nombre_completo,
+        la.resultado_corregido,
+        la.corrected_at,
+        la.corrected_by,
+        TRIM(CONCAT(sup.nombre, ' ', sup.apellido)) AS supervisor_nombre_completo,
+        CASE WHEN la.id IS NULL THEN 'pendiente' ELSE 'corregida' END AS estado_auditoria
+      FROM lead_management_history lmh
+      LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+      LEFT JOIN users u ON u.id = lmh.user_id
+      LEFT JOIN latest_audit la ON la.management_id = lmh.id AND la.rn = 1
+      LEFT JOIN users sup ON sup.id = la.corrected_by
+      ${whereClause}
+      ORDER BY lmh.fecha_gestion DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `,
+      values
+    );
+
+    return { items: result.rows, total };
+  } finally {
+    await client.end();
+  }
+}
 async function getClientMetrics() {
   const client = createDbClient();
 
@@ -10683,6 +10809,398 @@ const items = result.rows.map((row) => ({
       return json(500, {
         ok: false,
         message: "Failed to load estado actual",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/api/codificaciones/ultimos")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 10)));
+      const searchPhone = normalizeText(getQueryParam(event, "search_phone"));
+      const sellerId = normalizeText(getQueryParam(event, "seller_id"));
+      const from = normalizeText(getQueryParam(event, "from"));
+      const to = normalizeText(getQueryParam(event, "to"));
+
+      const { items, total } = await fetchCodificaciones({
+        limit,
+        offset: 0,
+        searchPhone,
+        sellerId,
+        from,
+        to
+      });
+
+      return json(200, {
+        ok: true,
+        success: true,
+        items,
+        limit,
+        total
+      });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list codificaciones",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/api/codificaciones")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 10)));
+      const offset = (page - 1) * limit;
+
+      const searchPhone = normalizeText(getQueryParam(event, "search_phone"));
+      const sellerId = normalizeText(getQueryParam(event, "seller_id"));
+      const from = normalizeText(getQueryParam(event, "from"));
+      const to = normalizeText(getQueryParam(event, "to"));
+      const resultado = normalizeText(getQueryParam(event, "resultado"));
+      const resultadoCorregido = normalizeText(getQueryParam(event, "resultado_corregido"));
+      const estado = normalizeText(getQueryParam(event, "estado")).toLowerCase();
+
+      const { items, total } = await fetchCodificaciones({
+        limit,
+        offset,
+        searchPhone,
+        sellerId,
+        from,
+        to,
+        resultado,
+        resultadoCorregido,
+        estado
+      });
+
+      return json(200, {
+        ok: true,
+        success: true,
+        items,
+        page,
+        limit,
+        total
+      });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list codificaciones",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.match(/\/api\/codificaciones\/([^/]+)\/historial$/)) {
+    const match = path.match(/\/api\/codificaciones\/([^/]+)\/historial$/);
+    const managementId = match?.[1];
+    if (!managementId) {
+      return json(400, { ok: false, message: "Management id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const managementRes = await client.query(
+          `
+          SELECT
+            lmh.id AS management_id,
+            lmh.contact_id,
+            lmh.batch_id,
+            lmh.fecha_gestion,
+            lmh.resultado AS resultado_original,
+            lmh.nota,
+            d.telefono,
+            d.celular,
+            COALESCE(NULLIF(d.telefono, ''), NULLIF(d.celular, '')) AS telefono_display,
+            u.nombre AS vendedor_nombre,
+            u.apellido AS vendedor_apellido,
+            TRIM(CONCAT(u.nombre, ' ', u.apellido)) AS vendedor_nombre_completo
+          FROM lead_management_history lmh
+          LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+          LEFT JOIN users u ON u.id = lmh.user_id
+          WHERE lmh.id = $1
+          LIMIT 1
+          `,
+          [managementId]
+        );
+
+        const management = managementRes.rows[0];
+        if (!management) {
+          return json(404, { ok: false, message: "Gestión no encontrada" });
+        }
+
+        const auditsRes = await client.query(
+          `
+          SELECT
+            a.id,
+            a.management_id,
+            a.contact_id,
+            a.batch_id,
+            a.resultado_original,
+            a.resultado_corregido,
+            a.motivo,
+            a.corrected_by,
+            a.corrected_at,
+            TRIM(CONCAT(u.nombre, ' ', u.apellido)) AS supervisor_nombre_completo
+          FROM lead_coding_audit a
+          LEFT JOIN users u ON u.id = a.corrected_by
+          WHERE a.management_id = $1
+          ORDER BY a.corrected_at DESC
+          `,
+          [managementId]
+        );
+
+        return json(200, {
+          ok: true,
+          success: true,
+          management,
+          audits: auditsRes.rows
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load codificacion history",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.match(/\/api\/codificaciones\/([^/]+)$/)) {
+    const match = path.match(/\/api\/codificaciones\/([^/]+)$/);
+    const managementId = match?.[1];
+    if (!managementId) {
+      return json(400, { ok: false, message: "Management id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const detailRes = await client.query(
+          `
+          WITH latest_audit AS (
+            SELECT
+              a.*,
+              ROW_NUMBER() OVER (PARTITION BY a.management_id ORDER BY a.corrected_at DESC) AS rn
+            FROM lead_coding_audit a
+          )
+          SELECT
+            lmh.id AS management_id,
+            lmh.contact_id,
+            lmh.batch_id,
+            lmh.fecha_gestion,
+            lmh.resultado AS resultado_original,
+            lmh.nota,
+            d.telefono,
+            d.celular,
+            COALESCE(NULLIF(d.telefono, ''), NULLIF(d.celular, '')) AS telefono_display,
+            u.nombre AS vendedor_nombre,
+            u.apellido AS vendedor_apellido,
+            TRIM(CONCAT(u.nombre, ' ', u.apellido)) AS vendedor_nombre_completo,
+            la.resultado_corregido,
+            la.corrected_at,
+            la.corrected_by,
+            TRIM(CONCAT(sup.nombre, ' ', sup.apellido)) AS supervisor_nombre_completo,
+            CASE WHEN la.id IS NULL THEN 'pendiente' ELSE 'corregida' END AS estado_auditoria
+          FROM lead_management_history lmh
+          LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+          LEFT JOIN users u ON u.id = lmh.user_id
+          LEFT JOIN latest_audit la ON la.management_id = lmh.id AND la.rn = 1
+          LEFT JOIN users sup ON sup.id = la.corrected_by
+          WHERE lmh.id = $1
+          LIMIT 1
+          `,
+          [managementId]
+        );
+
+        const detail = detailRes.rows[0];
+        if (!detail) {
+          return json(404, { ok: false, message: "Gestión no encontrada" });
+        }
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: detail
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load codificacion detail",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.match(/\/api\/codificaciones\/([^/]+)\/correccion$/)) {
+    const match = path.match(/\/api\/codificaciones\/([^/]+)\/correccion$/);
+    const managementId = match?.[1];
+    const body = safeParseBody(event);
+    if (!managementId) {
+      return json(400, { ok: false, message: "Management id requerido" });
+    }
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const resultadoInput = normalizeLeadResultado(body?.resultado_corregido);
+      const motivoRaw = normalizeText(body?.motivo || "");
+      const motivo = motivoRaw ? motivoRaw : null;
+
+      if (!resultadoInput || resultadoInput === "nuevo") {
+        return json(400, { ok: false, message: "resultado_corregido requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const managementRes = await client.query(
+          `
+          SELECT id, contact_id, batch_id, resultado
+          FROM lead_management_history
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [managementId]
+        );
+
+        const management = managementRes.rows[0];
+        if (!management) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Gestión no encontrada" });
+        }
+
+        const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
+        if (!desiredCatalog) {
+          await client.query("ROLLBACK");
+          return json(400, { ok: false, message: "resultado_corregido no existe en catálogo" });
+        }
+
+        const insertRes = await client.query(
+          `
+          INSERT INTO lead_coding_audit (
+            management_id,
+            contact_id,
+            batch_id,
+            resultado_original,
+            resultado_corregido,
+            motivo,
+            corrected_by
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          RETURNING id, management_id, contact_id, batch_id, resultado_original, resultado_corregido, motivo, corrected_by, corrected_at
+          `,
+          [
+            management.id,
+            management.contact_id,
+            management.batch_id,
+            management.resultado,
+            resultadoInput,
+            motivo,
+            dbUser.id
+          ]
+        );
+
+        await client.query("COMMIT");
+
+        const audit = insertRes.rows[0];
+
+        return json(201, {
+          ok: true,
+          success: true,
+          audit: {
+            ...audit,
+            supervisor_nombre_completo: [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim()
+          },
+          resultado_vigente: audit?.resultado_corregido || management.resultado
+        });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to create codificacion correction",
         error: error.message
       });
     }
