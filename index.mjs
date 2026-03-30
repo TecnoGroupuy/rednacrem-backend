@@ -11153,10 +11153,18 @@ const items = result.rows.map((row) => ({
 
   if (method === "POST" && path.match(/\/api\/codificaciones\/([^/]+)\/correccion$/)) {
     const match = path.match(/\/api\/codificaciones\/([^/]+)\/correccion$/);
-    const managementId = match?.[1];
+    const managementIdFromPath = match?.[1];
     const body = safeParseBody(event);
-    if (!managementId || !isValidUuid(managementId)) {
-      return json(400, { ok: false, message: "Management id requerido" });
+    const managementIdFromBody = body?.management_id;
+    const managementId = managementIdFromPath || managementIdFromBody;
+    console.log("managementId:", managementId);
+    console.log("path:", path);
+    console.log("body:", body);
+    if (!managementId) {
+      return json(400, { ok: false, message: "management_id requerido" });
+    }
+    if (!isValidUuid(managementId)) {
+      return json(400, { ok: false, message: "management_id inválido" });
     }
     if (body === null) {
       return json(400, { ok: false, message: "Invalid JSON body" });
