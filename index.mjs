@@ -10870,6 +10870,50 @@ const items = result.rows.map((row) => ({
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/codificaciones/catalogo")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const res = await client.query(
+          `
+          SELECT nombre, es_final, libera_al_cerrar
+          FROM lead_status_catalog
+          ORDER BY nombre
+          `
+        );
+
+        return json(200, {
+          ok: true,
+          success: true,
+          items: res.rows
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load codificaciones catalog",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/api/codificaciones")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
