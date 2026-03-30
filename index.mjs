@@ -7661,7 +7661,10 @@ const items = result.rows.map((row) => ({
             ))::int                                 AS edad,
             COALESCE(d.telefono, c.telefono)        AS telefono,
             COALESCE(d.celular, c.celular)          AS celular,
+            COALESCE(d.email, c.email)              AS correo_electronico,
+            COALESCE(d.direccion, c.direccion)      AS direccion,
             COALESCE(d.departamento, c.departamento) AS departamento,
+            d.localidad                             AS localidad,
             COALESCE(d.origen_dato, 'recupero')     AS origen_dato,
             lb.tipo                                 AS lote_tipo,
             lcs.estado_venta,
@@ -7674,7 +7677,7 @@ const items = result.rows.map((row) => ({
             ) AS ultima_gestion_real
           FROM lead_contact_status lcs
           LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
-          LEFT JOIN contacts c ON c.id = lcs.contact_id
+          LEFT JOIN contacts c ON c.id = d.contact_id
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
