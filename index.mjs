@@ -3909,6 +3909,7 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
     const values = [];
 
     if (searchText) {
+      values.push(`%${searchText}%`);
       const idx = values.length;
       whereParts.push(
         `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.telefono, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx})`
@@ -3946,7 +3947,9 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
 
     const total = Number(countResult.rows[0]?.total || 0);
 
-    const limitIdx = values.length - 1;
+    values.push(safeLimit);
+    const limitIdx = values.length;
+    values.push(offset);
     const offsetIdx = values.length;
 
     const result = await client.query(
