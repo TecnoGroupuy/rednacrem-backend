@@ -7026,11 +7026,15 @@ const items = result.rows.map((row) => ({
       const sortRaw = getQueryParam(event, "sort");
       const dirRaw = getQueryParam(event, "dir");
       const departamentoRaw = getQueryParam(event, "departamento");
+      const motivoBajaRaw = getQueryParam(event, "motivo_baja");
+      const tabRaw = getQueryParam(event, "tab");
       const producto = productoRaw ? productoRaw.trim() : "";
       const departamento = departamentoRaw ? departamentoRaw.trim() : "";
       const search = searchRaw ? searchRaw.trim() : "";
       const sort = sortRaw ? sortRaw.trim() : "";
       const dir = dirRaw === "desc" ? "DESC" : "ASC";
+      const motivoBaja = motivoBajaRaw ? motivoBajaRaw.trim() : "";
+      const tab = tabRaw ? tabRaw.trim().toLowerCase() : "";
 
       const sortableColumns = {
         edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
@@ -7074,6 +7078,70 @@ const items = result.rows.map((row) => ({
           values.push(departamento);
           idx += 1;
         }
+        if (motivoBaja) {
+          const normalizedMotivo = motivoBaja.toLowerCase();
+          if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
+            conditions.push(`(cp.motivo_baja IS NULL OR cp.motivo_baja = '')`);
+          } else {
+            conditions.push(`cp.motivo_baja = $${idx}`);
+            values.push(motivoBaja);
+            idx += 1;
+          }
+        }
+
+        if (tab) {
+          if (tab === "disponibles") {
+            conditions.push(`
+              NOT EXISTS (
+                SELECT 1
+                FROM lead_batch_contacts lbc
+                JOIN lead_batches lb ON lb.id = lbc.batch_id
+                WHERE lbc.client_contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                  AND lb.estado IN ('activo', 'asignado')
+              )
+            `);
+          } else if (tab === "en_lote") {
+            conditions.push(`
+              EXISTS (
+                SELECT 1
+                FROM lead_batch_contacts lbc
+                JOIN lead_batches lb ON lb.id = lbc.batch_id
+                WHERE lbc.client_contact_id = c.id
+                  AND lb.tipo = 'recupero'
+              )
+            `);
+          } else if (tab === "asignados") {
+            conditions.push(`
+              EXISTS (
+                SELECT 1
+                FROM lead_contact_status lcs
+                JOIN lead_batches lb ON lb.id = lcs.batch_id
+                WHERE lcs.contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                  AND lcs.assigned_to IS NOT NULL
+              )
+            `);
+          } else if (tab === "gestionados") {
+            conditions.push(`
+              (
+                EXISTS (
+                  SELECT 1
+                  FROM lead_contact_status lcs
+                  JOIN lead_batches lb ON lb.id = lcs.batch_id
+                  WHERE lcs.contact_id = c.id
+                    AND lb.tipo = 'recupero'
+                    AND lcs.intentos > 0
+                )
+                OR gestion.ultimo_estado_gestion IS NOT NULL
+              )
+            `);
+          } else if (tab === "recuperados") {
+            conditions.push(`gestion.ultimo_estado_gestion IN ('venta', 'alta')`);
+          } else if (tab === "rechazados") {
+            conditions.push(`gestion.ultimo_estado_gestion = 'rechazo'`);
+          }
+        }
 
         const where = conditions.join(" AND ");
         const orderBy = sort && sortableColumns[sort]
@@ -7095,30 +7163,44 @@ const items = result.rows.map((row) => ({
             cp.nombre_producto,
             cp.precio,
             cp.fecha_baja,
-            cp.motivo_baja,
-            (
-              SELECT lmh.resultado
-              FROM lead_management_history lmh
-              JOIN lead_batch_contacts lbc ON lbc.client_contact_id = lmh.contact_id
-              JOIN lead_batches lb ON lb.id = lbc.batch_id
-              WHERE lmh.contact_id = c.id
-                AND lb.tipo = 'recupero'
-              ORDER BY lmh.fecha_gestion DESC
-              LIMIT 1
-            ) AS ultima_gestion_resultado,
-
-            (
-              SELECT (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date
-              FROM lead_management_history lmh
-              JOIN lead_batch_contacts lbc ON lbc.client_contact_id = lmh.contact_id
-              JOIN lead_batches lb ON lb.id = lbc.batch_id
-              WHERE lmh.contact_id = c.id
-                AND lb.tipo = 'recupero'
-              ORDER BY lmh.fecha_gestion DESC
-              LIMIT 1
-            ) AS ultima_gestion_fecha
+            NULLIF(cp.motivo_baja, '') AS motivo_baja,
+            lote.batch_id,
+            lote.nombre_lote,
+            lote.vendedor_asignado_id,
+            lote.vendedor_asignado_nombre,
+            gestion.ultimo_estado_gestion,
+            gestion.fecha_ultima_gestion
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN LATERAL (
+            SELECT
+              lbc.batch_id,
+              lb.nombre AS nombre_lote,
+              lcs.assigned_to AS vendedor_asignado_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+            FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
+            LEFT JOIN lead_contact_status lcs
+              ON lcs.contact_id = lbc.client_contact_id
+             AND lcs.batch_id = lbc.batch_id
+            LEFT JOIN users u ON u.id = lcs.assigned_to
+            WHERE lbc.client_contact_id = c.id
+              AND lb.tipo = 'recupero'
+              AND lb.estado IN ('activo', 'asignado')
+            ORDER BY lb.created_at DESC
+            LIMIT 1
+          ) lote ON true
+          LEFT JOIN LATERAL (
+            SELECT
+              lmh.resultado AS ultimo_estado_gestion,
+              (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.contact_id = c.id
+              AND lb.tipo = 'recupero'
+            ORDER BY lmh.fecha_gestion DESC
+            LIMIT 1
+          ) gestion ON true
           WHERE ${where}
           ORDER BY c.telefono, ${orderBy}
           LIMIT $${idx} OFFSET $${idx + 1}
