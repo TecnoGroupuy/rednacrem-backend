@@ -7975,8 +7975,30 @@ const items = result.rows.map((row) => ({
           `
           SELECT COUNT(*)::int AS manual_sales
           FROM sales s
+          JOIN contacts c ON c.id = s.contact_id
           WHERE s.seller_user_id = $1
             AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
+            AND NOT EXISTS (
+              SELECT 1
+              FROM datos_para_trabajar d
+              JOIN lead_management_history lmh ON lmh.contact_id = d.id
+              WHERE d.contact_id = s.contact_id
+                AND lmh.user_id = s.seller_user_id
+                AND lmh.resultado = 'venta'
+                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM datos_para_trabajar d
+              JOIN lead_management_history lmh ON lmh.contact_id = d.id
+              WHERE lmh.user_id = s.seller_user_id
+                AND lmh.resultado = 'venta'
+                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+                AND (
+                  REPLACE(REPLACE(REPLACE(COALESCE(NULLIF(d.telefono, ''), NULLIF(d.celular, '')), ' ', ''), '-', ''), '+', '')
+                  = REPLACE(REPLACE(REPLACE(COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')), ' ', ''), '-', ''), '+', '')
+                )
+            )
           `,
           [sellerId, fecha]
         );
@@ -11674,8 +11696,30 @@ const items = result.rows.map((row) => ({
           SELECT s.seller_user_id AS user_id,
                  COUNT(*)::int AS manual_ventas
           FROM sales s
+          JOIN contacts c ON c.id = s.contact_id
           WHERE s.seller_user_id = ANY($1::uuid[])
             AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
+            AND NOT EXISTS (
+              SELECT 1
+              FROM datos_para_trabajar d
+              JOIN lead_management_history lmh ON lmh.contact_id = d.id
+              WHERE d.contact_id = s.contact_id
+                AND lmh.user_id = s.seller_user_id
+                AND lmh.resultado = 'venta'
+                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM datos_para_trabajar d
+              JOIN lead_management_history lmh ON lmh.contact_id = d.id
+              WHERE lmh.user_id = s.seller_user_id
+                AND lmh.resultado = 'venta'
+                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+                AND (
+                  REPLACE(REPLACE(REPLACE(COALESCE(NULLIF(d.telefono, ''), NULLIF(d.celular, '')), ' ', ''), '-', ''), '+', '')
+                  = REPLACE(REPLACE(REPLACE(COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')), ' ', ''), '-', ''), '+', '')
+                )
+            )
           GROUP BY s.seller_user_id
           `,
           [sellerIds, fecha]
