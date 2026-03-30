@@ -401,6 +401,11 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
+function isValidUuid(value) {
+  const v = String(value || "").trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
 function splitFullName(value) {
   const text = normalizeText(value);
   if (!text) return { nombre: "", apellido: "" };
@@ -10974,7 +10979,7 @@ const items = result.rows.map((row) => ({
   if (method === "GET" && path.match(/\/api\/codificaciones\/([^/]+)\/historial$/)) {
     const match = path.match(/\/api\/codificaciones\/([^/]+)\/historial$/);
     const managementId = match?.[1];
-    if (!managementId) {
+    if (!managementId || !isValidUuid(managementId)) {
       return json(400, { ok: false, message: "Management id requerido" });
     }
     try {
@@ -11066,7 +11071,7 @@ const items = result.rows.map((row) => ({
   if (method === "GET" && path.match(/\/api\/codificaciones\/([^/]+)$/)) {
     const match = path.match(/\/api\/codificaciones\/([^/]+)$/);
     const managementId = match?.[1];
-    if (!managementId) {
+    if (!managementId || !isValidUuid(managementId)) {
       return json(400, { ok: false, message: "Management id requerido" });
     }
     try {
@@ -11150,7 +11155,7 @@ const items = result.rows.map((row) => ({
     const match = path.match(/\/api\/codificaciones\/([^/]+)\/correccion$/);
     const managementId = match?.[1];
     const body = safeParseBody(event);
-    if (!managementId) {
+    if (!managementId || !isValidUuid(managementId)) {
       return json(400, { ok: false, message: "Management id requerido" });
     }
     if (body === null) {
