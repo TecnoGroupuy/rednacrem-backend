@@ -7602,6 +7602,8 @@ const items = result.rows.map((row) => ({
       const offset = (page - 1) * limit;
       const tab = getQueryParam(event, "tab") || "todos";
       const tipo = getQueryParam(event, "tipo") || null;
+      const searchRaw = String(getQueryParam(event, "search") || "").trim();
+      const search = searchRaw ? `%${searchRaw}%` : null;
       let tabNormalized = tab;
       if (tabNormalized === "nuevos") tabNormalized = "nuevo";
 
@@ -7640,13 +7642,29 @@ const items = result.rows.map((row) => ({
           SELECT COUNT(*) AS count
           FROM lead_contact_status lcs
           JOIN lead_batches lb ON lb.id = lcs.batch_id
+          LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          LEFT JOIN contacts c ON c.id = d.contact_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND lcs.estado_venta != 'dato_erroneo'
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND (
+              $3::text IS NULL OR (
+                COALESCE(d.nombre, c.nombre, '') ILIKE $3
+                OR COALESCE(d.apellido, c.apellido, '') ILIKE $3
+                OR COALESCE(d.documento, c.documento, '') ILIKE $3
+                OR COALESCE(d.telefono, c.telefono, '') ILIKE $3
+                OR COALESCE(d.celular, c.celular, '') ILIKE $3
+                OR COALESCE(d.email, c.email, '') ILIKE $3
+                OR COALESCE(d.departamento, c.departamento, '') ILIKE $3
+                OR COALESCE(d.localidad, c.localidad, '') ILIKE $3
+                OR COALESCE(d.direccion, c.direccion, '') ILIKE $3
+                OR (COALESCE(d.nombre, c.nombre, '') || ' ' || COALESCE(d.apellido, c.apellido, '')) ILIKE $3
+              )
+            )
             ${countExtra}
           `,
-          [sellerId, tipo]
+          [sellerId, tipo, search]
         );
         const result = await client.query(
           `
@@ -7682,11 +7700,25 @@ const items = result.rows.map((row) => ({
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND (
+              $3::text IS NULL OR (
+                COALESCE(d.nombre, c.nombre, '') ILIKE $3
+                OR COALESCE(d.apellido, c.apellido, '') ILIKE $3
+                OR COALESCE(d.documento, c.documento, '') ILIKE $3
+                OR COALESCE(d.telefono, c.telefono, '') ILIKE $3
+                OR COALESCE(d.celular, c.celular, '') ILIKE $3
+                OR COALESCE(d.email, c.email, '') ILIKE $3
+                OR COALESCE(d.departamento, c.departamento, '') ILIKE $3
+                OR COALESCE(d.localidad, c.localidad, '') ILIKE $3
+                OR COALESCE(d.direccion, c.direccion, '') ILIKE $3
+                OR (COALESCE(d.nombre, c.nombre, '') || ' ' || COALESCE(d.apellido, c.apellido, '')) ILIKE $3
+              )
+            )
             ${tabWhere}
           ORDER BY lcs.intentos ASC, lcs.contact_id ASC
-          LIMIT $3 OFFSET $4
+          LIMIT $4 OFFSET $5
           `,
-          [sellerId, tipo, limit, offset]
+          [sellerId, tipo, search, limit, offset]
         );
         const total = parseInt(countResult.rows[0]?.count || "0", 10);
 
