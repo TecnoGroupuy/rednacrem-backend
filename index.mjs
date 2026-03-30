@@ -7760,9 +7760,9 @@ const items = result.rows.map((row) => ({
         if (motivoBaja) {
           const normalizedMotivo = motivoBaja.toLowerCase();
           if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
-            conditions.push(`(cp.motivo_baja IS NULL OR cp.motivo_baja = '')`);
+            conditions.push(`(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL)`);
           } else {
-            conditions.push(`cp.motivo_baja = $${idx}`);
+            conditions.push(`COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) = $${idx}`);
             values.push(motivoBaja);
             idx += 1;
           }
@@ -7859,7 +7859,7 @@ const items = result.rows.map((row) => ({
             cp.nombre_producto,
             cp.precio,
             cp.fecha_baja,
-            NULLIF(cp.motivo_baja, '') AS motivo_baja,
+            COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
             lote.batch_id,
             lote.nombre_lote,
             lote.vendedor_asignado_id,
@@ -7868,6 +7868,8 @@ const items = result.rows.map((row) => ({
             gestion.fecha_ultima_gestion
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN external_management_status ems
+            ON ems.documento = c.documento
           LEFT JOIN LATERAL (
             SELECT
               lbc.batch_id,
@@ -7909,6 +7911,8 @@ const items = result.rows.map((row) => ({
           SELECT COUNT(DISTINCT c.telefono) AS total
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN external_management_status ems
+            ON ems.documento = c.documento
           WHERE ${where}
           `,
           values
@@ -7955,6 +7959,8 @@ const items = result.rows.map((row) => ({
             COUNT(DISTINCT c.telefono) FILTER (WHERE gestion.ultimo_estado_gestion = 'rechazo') AS rechazados
           FROM contacts c
           JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN external_management_status ems
+            ON ems.documento = c.documento
           LEFT JOIN LATERAL (
             SELECT
               lbc.batch_id,
@@ -8148,7 +8154,7 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
-        const [productosRes, departamentosRes] = await Promise.all([
+        const [productosRes, departamentosRes, motivosRes] = await Promise.all([
           client.query(
             `
             SELECT DISTINCT cp.nombre_producto
@@ -8169,13 +8175,23 @@ const items = result.rows.map((row) => ({
               AND c.departamento != ''
             ORDER BY c.departamento
             `
+          ),
+          client.query(
+            `
+            SELECT DISTINCT motivo_baja
+            FROM external_management_status
+            WHERE motivo_baja IS NOT NULL
+              AND motivo_baja <> ''
+            ORDER BY motivo_baja
+            `
           )
         ]);
 
         return json(200, {
           ok: true,
           productos: productosRes.rows.map((r) => r.nombre_producto),
-          departamentos: departamentosRes.rows.map((r) => r.departamento)
+          departamentos: departamentosRes.rows.map((r) => r.departamento),
+          motivos_baja: motivosRes.rows.map((r) => r.motivo_baja)
         });
       } finally {
         await client.end();
