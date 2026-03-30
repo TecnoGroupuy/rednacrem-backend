@@ -847,6 +847,22 @@ function buildRecuperoErrorCsv(errors = []) {
   return lines.join("\n");
 }
 
+function normalizeMotivoBaja(value) {
+  const normalized = normalizeImportValue(value);
+  if (!normalized) return null;
+  if (normalized.includes("fallec")) return "fallecido";
+  if (
+    normalized.includes("medio pago") ||
+    normalized.includes("tarjeta") ||
+    normalized.includes("cobro") ||
+    normalized.includes("debito") ||
+    normalized.includes("débito")
+  )
+    return "error_medio_pago";
+  if (normalized.includes("auditor")) return "no_pasa_auditoria";
+  return "otro";
+}
+
 function detectCsvDelimiter(headerLine) {
   if (!headerLine) return ",";
   const commaCount = (headerLine.match(/,/g) || []).length;
@@ -2835,6 +2851,7 @@ export async function processRecuperoImportJob(jobId) {
       const rawDocumento = cells[idxDocumento] || "";
       const documento = normalizeDocumento(rawDocumento);
       const motivoBajaRaw = String(cells[idxMotivo] || "").trim();
+      const motivoBajaNorm = normalizeMotivoBaja(motivoBajaRaw);
       const ultimoEstadoRaw = String(cells[idxEstado] || "").trim();
 
       if (!documento) {
@@ -2885,7 +2902,8 @@ export async function processRecuperoImportJob(jobId) {
       }
       entriesByDocumento.set(documento, {
         documento,
-        motivo_baja: motivoBajaRaw || null,
+        motivo_baja: motivoBajaNorm,
+        motivo_baja_raw: motivoBajaRaw || null,
         ultimo_estado_raw: ultimoEstadoRaw || null,
         ultimo_estado_norm: ultimoEstadoNorm,
         row: rowNumber
@@ -2947,7 +2965,7 @@ export async function processRecuperoImportJob(jobId) {
         errors.push({
           row: entry.row,
           documento: entry.documento,
-          motivo_baja: entry.motivo_baja,
+          motivo_baja: entry.motivo_baja_raw,
           ultimo_estado: entry.ultimo_estado_raw,
           code: "NOT_FOUND",
           message: "Documento no encontrado"
@@ -2958,6 +2976,7 @@ export async function processRecuperoImportJob(jobId) {
         contact_id: contactId,
         documento: entry.documento,
         motivo_baja: entry.motivo_baja,
+        motivo_baja_raw: entry.motivo_baja_raw,
         ultimo_estado_raw: entry.ultimo_estado_raw,
         ultimo_estado_norm: entry.ultimo_estado_norm
       });
@@ -2980,8 +2999,9 @@ export async function processRecuperoImportJob(jobId) {
             $2::text[],
             $3::text[],
             $4::text[],
-            $5::text[]
-          ) AS t(contact_id, documento, motivo_baja, estado_raw, estado_norm)
+            $5::text[],
+            $6::text[]
+          ) AS t(contact_id, documento, motivo_baja, motivo_baja_raw, estado_raw, estado_norm)
         )
         UPDATE contact_products cp
         SET motivo_baja = src.motivo_baja,
@@ -2990,7 +3010,7 @@ export async function processRecuperoImportJob(jobId) {
         WHERE cp.contact_id = src.contact_id
           AND cp.estado = 'baja'
         `,
-        [contactIds, documentosChunk, motivos, estadosRaw, estadosNorm]
+        [contactIds, documentosChunk, motivos, chunk.map((row) => row.motivo_baja_raw), estadosRaw, estadosNorm]
       );
 
       await client.query(
@@ -3001,8 +3021,9 @@ export async function processRecuperoImportJob(jobId) {
             $2::text[],
             $3::text[],
             $4::text[],
-            $5::text[]
-          ) AS t(contact_id, documento, motivo_baja, estado_raw, estado_norm)
+            $5::text[],
+            $6::text[]
+          ) AS t(contact_id, documento, motivo_baja, motivo_baja_raw, estado_raw, estado_norm)
         )
         INSERT INTO external_management_status (
           contact_id,
@@ -3018,7 +3039,7 @@ export async function processRecuperoImportJob(jobId) {
           documento,
           estado_raw,
           estado_norm,
-          motivo_baja,
+          motivo_baja_raw,
           'csv',
           now()
         FROM src
@@ -3031,7 +3052,7 @@ export async function processRecuperoImportJob(jobId) {
           fuente = 'csv',
           updated_at = now()
         `,
-        [contactIds, documentosChunk, motivos, estadosRaw, estadosNorm]
+        [contactIds, documentosChunk, motivos, chunk.map((row) => row.motivo_baja_raw), estadosRaw, estadosNorm]
       );
     }
 
