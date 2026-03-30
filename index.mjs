@@ -7078,6 +7078,21 @@ const items = result.rows.map((row) => ({
           values.push(departamento);
           idx += 1;
         }
+        if (search) {
+          conditions.push(`
+            (
+              c.nombre ILIKE $${idx}
+              OR c.apellido ILIKE $${idx}
+              OR c.telefono ILIKE $${idx}
+              OR c.celular ILIKE $${idx}
+              OR c.documento ILIKE $${idx}
+              OR c.departamento ILIKE $${idx}
+              OR cp.nombre_producto ILIKE $${idx}
+            )
+          `);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
         if (motivoBaja) {
           const normalizedMotivo = motivoBaja.toLowerCase();
           if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
@@ -7087,6 +7102,20 @@ const items = result.rows.map((row) => ({
             values.push(motivoBaja);
             idx += 1;
           }
+        }
+
+        if (search) {
+          conditions.push(`(
+            c.nombre ILIKE $${idx}
+            OR c.apellido ILIKE $${idx}
+            OR c.telefono ILIKE $${idx}
+            OR c.celular ILIKE $${idx}
+            OR c.documento ILIKE $${idx}
+            OR c.departamento ILIKE $${idx}
+            OR cp.nombre_producto ILIKE $${idx}
+          )`);
+          values.push(`%${search}%`);
+          idx += 1;
         }
 
         if (tab) {
