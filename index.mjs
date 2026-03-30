@@ -1,4 +1,5 @@
-﻿import fs from "node:fs";
+import fs from "node:fs";
+import crypto from "node:crypto";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -108,6 +109,42 @@ async function enqueueContactImportJob(batchId, options = {}) {
     })
   );
 }
+
+function getRecuperoImportQueueUrl() {
+  return process.env.RECUPERO_IMPORT_QUEUE_URL || process.env.CONTACT_IMPORT_QUEUE_URL || "";
+}
+
+async function enqueueRecuperoImportJob(jobId) {
+  const queueUrl = getRecuperoImportQueueUrl();
+  if (!queueUrl) {
+    throw new Error("RECUPERO_IMPORT_QUEUE_URL not set");
+  }
+  const payload = { type: "recupero_import", jobId };
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(payload),
+    })
+  );
+}
+function getRecuperoImportQueueUrl() {
+  return process.env.RECUPERO_IMPORT_QUEUE_URL || process.env.CONTACT_IMPORT_QUEUE_URL || ;
+}
+
+async function enqueueRecuperoImportJob(jobId) {
+ const queueUrl = getRecuperoImportQueueUrl();
+ if (!queueUrl) {
+ throw new Error( RECUPERO_IMPORT_QUEUE_URL not set);
+ }
+ const payload = { type: recupero_import, jobId };
+ await sqs.send(
+ new SendMessageCommand({
+ QueueUrl: queueUrl,
+ MessageBody: JSON.stringify(payload),
+ })
+ );
+}
+
 const VALID_USER_STATUSES = [
   "pending",
   "approved",
@@ -537,15 +574,15 @@ function getDepartamentoFromFixed(numero) {
   if (n.startsWith("444")) return "Lavalleja";
   if (n.startsWith("477")) return "Artigas";
   if (n.startsWith("473")) return "Salto";
-  if (n.startsWith("472")) return "Paysandú";
-  if (n.startsWith("456")) return "Río Negro";
+  if (n.startsWith("472")) return "Paysand�";
+  if (n.startsWith("456")) return "R�o Negro";
   if (n.startsWith("453")) return "Soriano";
-  if (n.startsWith("434")) return "San José";
+  if (n.startsWith("434")) return "San Jos�";
   if (n.startsWith("447")) return "Rocha";
   if (n.startsWith("445")) return "Treinta y Tres";
   if (n.startsWith("464")) return "Cerro Largo";
   if (n.startsWith("462")) return "Rivera";
-  if (n.startsWith("463")) return "Tacuarembó";
+  if (n.startsWith("463")) return "Tacuaremb�";
   return null;
 }
 
@@ -589,10 +626,10 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2314": "Cerro",
   "2601": "Carrasco",
   "2916": "Ciudad Vieja",
-  "2320": "Colón",
+  "2320": "Col�n",
   "2222": "Piedras Blancas",
-  "2401": "Cordón",
-  "2487": "Hosp. Clínicas",
+  "2401": "Cord�n",
+  "2487": "Hosp. Cl�nicas",
   "2292": "Pando",
   "2294": "Sauce",
   "2295": "Empalme Olmos",
@@ -602,51 +639,51 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2312": "Paso de la Arena",
   "2355": "Sayago",
   "2409": "Tres Cruces",
-  "2506": "Unión",
-  "2347": "Autódromo",
+  "2506": "Uni�n",
+  "2347": "Aut�dromo",
   "2362": "La Paz",
   "2364": "Las Piedras",
   "2369": "Progreso",
-  "2372": "Atlántida",
+  "2372": "Atl�ntida",
   "2682": "Lagomar",
   "2696": "Solymar",
   "4332": "Canelones",
-  "4530": "Cañada Nieto",
+  "4530": "Ca�ada Nieto",
   "4222": "Maldonado",
   "4223": "Maldonado",
   "4224": "Maldonado",
   "4225": "Maldonado",
-  "4244": "Punta del Este (Península)",
+  "4244": "Punta del Este (Pen�nsula)",
   "4248": "Punta del Este Parada 5",
   "4249": "Punta del Este Parada 5",
   "4255": "Laguna del Sauce",
   "4257": "Portezuelo",
   "4266": "San Carlos",
   "4277": "La Barra",
-  "4311": "Casupá",
-  "4312": "San Ramón",
+  "4311": "Casup�",
+  "4312": "San Ram�n",
   "4313": "San Antonio",
   "4315": "Tala",
   "4317": "Miguez",
   "4318": "Cerro Colorado",
   "4319": "Chamizo",
-  "4334": "Santa Lucía",
-  "4335": "Juanicó",
+  "4334": "Santa Luc�a",
+  "4335": "Juanic�",
   "4336": "Los Cerrillos",
   "4338": "Colonia Etchepare",
   "4339": "Cardal",
-  "4342": "San José",
-  "4345": "Kiyú",
+  "4342": "San Jos�",
+  "4345": "Kiy�",
   "4346": "Rafael Peraza",
   "4348": "Villa Rodriguez",
   "4349": "Colonia Agra.Delta",
   "4352": "Florida",
-  "4354": "Sarandí Grande",
+  "4354": "Sarand� Grande",
   "4360": "Blanquillo",
   "4362": "Durazno",
   "4364": "Trinidad",
   "4365": "Carmen",
-  "4367": "Sarandí del Yi",
+  "4367": "Sarand� del Yi",
   "4368": "Carlos Reyles",
   "4369": "La Paloma",
   "4373": "La Floresta",
@@ -657,77 +694,77 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "4378": "Cuchilla Alta",
   "4399": "San Jacinto",
   "4430": "Gregorio Aznarez",
-  "4432": "Piriápolis",
-  "4434": "Pan de Azúcar",
-  "4438": "Balneario Solís",
+  "4432": "Piri�polis",
+  "4434": "Pan de Az�car",
+  "4438": "Balneario Sol�s",
   "4442": "Minas",
-  "4446": "Aiguá",
-  "4447": "Solís de Mataojo",
-  "4448": "Pirarajá",
+  "4446": "Aigu�",
+  "4447": "Sol�s de Mataojo",
+  "4448": "Piraraj�",
   "4449": "Mariscala",
   "4452": "Treinta y Tres",
-  "4455": "José P. Varela",
+  "4455": "Jos� P. Varela",
   "4456": "Lascano",
-  "4457": "Velázquez",
+  "4457": "Vel�zquez",
   "4458": "Vergara",
-  "4459": "Cebollatí",
-  "4463": "Zapicán",
+  "4459": "Cebollat�",
+  "4463": "Zapic�n",
   "4464": "Santa Clara de Olimar",
   "4466": "Cerro Chato",
-  "4469": "Batlle y Ordoñez",
+  "4469": "Batlle y Ordo�ez",
   "4472": "Rocha",
   "4474": "Barra del Chuy",
   "4475": "Aguas Dulces",
   "4476": "La Coronilla",
   "4477": "Santa Teresa",
   "4479": "La Paloma (Rocha)",
-  "4486": "Faro José Ignacio",
+  "4486": "Faro Jos� Ignacio",
   "4522": "Colonia",
   "4534": "Dolores",
   "4536": "Cardona",
   "4537": "Palmitas",
-  "4538": "José E. Rodó",
+  "4538": "Jos� E. Rod�",
   "4539": "Ismael Cortinas",
-  "4542": "Balneario Zagarazú",
+  "4542": "Balneario Zagaraz�",
   "4544": "Nueva Palmira",
   "4552": "Rosario",
   "4554": "Nueva Helvecia",
   "4558": "Colonia Valdense",
   "4562": "Fray Bentos",
   "4567": "Young",
-  "4568": "Nuevo Berlín",
+  "4568": "Nuevo Berl�n",
   "4569": "San Javier",
   "4574": "Semillero",
   "4575": "Colonia Miguelete",
-  "4576": "Ombúes de Lavalle",
+  "4576": "Omb�es de Lavalle",
   "4577": "Conchillas",
   "4586": "Juan Lacaze",
   "4587": "Playa Fomento",
   "4588": "Santa Ana",
   "4622": "Rivera",
-  "4632": "Tacuarembó",
-  "4640": "Aceguá",
+  "4632": "Tacuaremb�",
+  "4640": "Acegu�",
   "4642": "Melo",
   "4654": "Vichadero",
   "4656": "Tranqueras",
   "4658": "Minas de Corrales",
   "4664": "Paso de los Toros",
-  "4675": "Río Branco",
-  "4679": "Lago Merín",
-  "4722": "Paysandú",
+  "4675": "R�o Branco",
+  "4679": "Lago Mer�n",
+  "4722": "Paysand�",
   "4730": "Defensa (Salto)",
   "4732": "Pueblo Lavalleja",
   "4733": "Cuchilla de Salto",
-  "4742": "Guichón",
+  "4742": "Guich�n",
   "4747": "Piedras Coloradas",
   "4754": "Quebracho",
-  "4764": "Constitución",
-  "4766": "Belén",
+  "4764": "Constituci�n",
+  "4766": "Bel�n",
   "4772": "Artigas",
   "4776": "Baltasar Brum",
-  "4777": "Tomás Gomensoro",
+  "4777": "Tom�s Gomensoro",
   "4778": "Mones Quintela",
-  "4779": "Bella Unión",
+  "4779": "Bella Uni�n",
   "4888": "Fraile Muerto",
   "5432": "Mercedes"
 };
@@ -740,6 +777,92 @@ function getLocalidadFromFixed(numero) {
 
 const NO_CALL_JOB_CHUNK_SIZE = 5000;
 const CONTACT_IMPORT_BATCH_SIZE = 500;
+
+function parseMultipartFormData(event) {
+  const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
+  if (!contentType.toLowerCase().includes("multipart/form-data")) return null;
+  const boundaryMatch = contentType.match(/boundary=([^;]+)/i);
+  if (!boundaryMatch) return null;
+  const boundary = boundaryMatch[1];
+  const rawBody = event?.body || "";
+  const buffer = event?.isBase64Encoded
+    ? Buffer.from(rawBody, "base64")
+    : Buffer.from(typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody));
+  const text = buffer.toString("utf8");
+  const parts = text.split("--" + boundary);
+  const fields = {};
+  const files = {};
+  for (const part of parts) {
+    if (!part || part === "--" || part === "--\r\n") continue;
+    const trimmed = part.startsWith("\r\n") ? part.slice(2) : part;
+    const [rawHeaders, ...rest] = trimmed.split("\r\n\r\n");
+    if (!rest.length) continue;
+    const body = rest.join("\r\n\r\n");
+    const headers = rawHeaders.split("\r\n");
+    const disposition = headers.find((h) =>
+      h.toLowerCase().startsWith("content-disposition")
+    );
+    if (!disposition) continue;
+    const nameMatch = disposition.match(/name=\"([^\"]+)\"/i);
+    if (!nameMatch) continue;
+    const name = nameMatch[1];
+    const filenameMatch = disposition.match(/filename=\"([^\"]*)\"/i);
+    const value = body.replace(/\r\n$/, "");
+    if (filenameMatch) {
+      files[name] = { filename: filenameMatch[1], content: value };
+    } else {
+      fields[name] = value;
+    }
+  }
+  return { fields, files };
+}
+
+function normalizeImportValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[._-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeDocumento(value) {
+  return String(value || "").replace(/[^0-9]/g, "");
+}
+
+function normalizeRecuperoEstado(value) {
+  const normalized = normalizeImportValue(value);
+  if (!normalized) return null;
+  if (normalized.includes("no contesta")) return "no_contesta";
+  if (normalized.includes("rechazo")) return "rechazo";
+  if (normalized.includes("rellamar") || normalized.includes("volver a llamar"))
+    return "rellamar";
+  if (normalized.includes("seguimiento")) return "seguimiento";
+  if (normalized.includes("venta") || normalized.includes("alta")) return "venta";
+  if (normalized.includes("dato error") || normalized.includes("dato erroneo"))
+    return "dato_erroneo";
+  if (normalized.includes("abitab")) return "abitab_pendiente";
+  return null;
+}
+
+function buildRecuperoErrorCsv(errors = []) {
+  const lines = [
+    ["Documento", "Motivo de la baja", "Ultimo estado", "Error"].join(";")
+  ];
+  for (const err of errors) {
+    lines.push(
+      [
+        err.documento || "",
+        err.motivo_baja || "",
+        err.ultimo_estado || "",
+        err.message || err.code || ""
+      ].join(";")
+    );
+  }
+  return lines.join("\n");
+}
 
 function detectCsvDelimiter(headerLine) {
   if (!headerLine) return ",";
@@ -1232,7 +1355,7 @@ function mapProductRowToApi(row) {
 const IMPORT_TYPE_LABEL = {
   clientes: "CSV de clientes",
   no_llamar: "CSV Base No llamar",
-  resultados: "CSV de resultados telefónicos",
+  resultados: "CSV de resultados telef�nicos",
   datos_para_trabajar: "CSV Datos para trabajar"
 };
 
@@ -1450,12 +1573,12 @@ function formatDurationLabel(seconds) {
 function normalizeEstadoTipo(rawTipo) {
   const text = String(rawTipo || "").trim().toUpperCase();
   if (!text) return "";
-  if (text === "BANO" || text === "BANIO" || text === "BA?O") return "BAÑO";
+  if (text === "BANO" || text === "BANIO" || text === "BA?O") return "BA�O";
   return text;
 }
 
 function isPausaTipo(tipo) {
-  return tipo === "DESCANSO" || tipo === "SUPERVISOR" || tipo === "BAÑO" || tipo === "BA?O";
+  return tipo === "DESCANSO" || tipo === "SUPERVISOR" || tipo === "BA�O" || tipo === "BA?O";
 }
 
 function addMinutes(date, minutes) {
@@ -1562,7 +1685,7 @@ async function closeActiveTurnEvent(client, eventRow, now, config) {
   let excedido = false;
   let exceso = 0;
   if (isPausaTipo(eventRow.tipo)) {
-    const limite = eventRow.tipo === "BAÑO" || eventRow.tipo === "BA?O"
+    const limite = eventRow.tipo === "BA�O" || eventRow.tipo === "BA?O"
       ? config.limite_bano_minutos
       : config.limite_descanso_minutos;
     const dur = minutesBetween(new Date(eventRow.inicio), fin);
@@ -1661,7 +1784,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     });
   }
 
-  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BA?O", "BAÑO"];
+  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BA?O", "BA�O"];
   const eventsRes = sellerIds.length
     ? await client.query(
       `
@@ -1846,7 +1969,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
           WHEN 'TRABAJO' THEN 1
           WHEN 'INACTIVO' THEN 2
           WHEN 'DESCANSO' THEN 3
-          WHEN 'BAÑO' THEN 4
+          WHEN 'BA�O' THEN 4
           WHEN 'BA?O' THEN 4
           WHEN 'SUPERVISOR' THEN 5
           WHEN 'LOGOUT' THEN 6
@@ -1910,7 +2033,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
         SUM(CASE WHEN tipo = 'DESCANSO' AND siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS descanso_seg,
-        SUM(CASE WHEN tipo IN ('BAÑO', 'BA?O') AND siguiente_inicio IS NOT NULL
+        SUM(CASE WHEN tipo IN ('BA�O', 'BA?O') AND siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS bano_seg,
         SUM(CASE WHEN tipo = 'SUPERVISOR' AND siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS supervisor_seg
@@ -1923,7 +2046,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
         SUM(CASE WHEN siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS total_jornada_seg
       FROM intervalos
-      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BAÑO', 'BA?O', 'INACTIVO')
+      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BA�O', 'BA?O', 'INACTIVO')
       GROUP BY agente_id
     )
     SELECT
@@ -2027,7 +2150,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   );
   const eventosRows = eventosRes.rows || [];
 
-  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BA?O", "BAÑO"]);
+  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BA?O", "BA�O"]);
   let totalPausas = 0;
   let totalTrabajo = 0;
   let pausaCount = 0;
@@ -2092,7 +2215,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   if (conversion < config.conversion_minima_porcentaje) {
     alertas.push({
       tipo: "conversion_baja",
-      descripcion: `${conversion}% actual vs mínimo ${config.conversion_minima_porcentaje}%`,
+      descripcion: `${conversion}% actual vs m�nimo ${config.conversion_minima_porcentaje}%`,
       severidad: "alta"
     });
   }
@@ -2323,10 +2446,10 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "telefono": "telefono",
   "celular": "celular",
   "correo electronico": "correo_electronico",
-  "correo electrónico": "correo_electronico",
+  "correo electr�nico": "correo_electronico",
   "email": "correo_electronico",
   "direccion": "direccion",
-  "dirección": "direccion",
+  "direcci�n": "direccion",
   "departamento": "departamento",
   "localidad": "localidad",
   "pais": "pais",
@@ -2627,6 +2750,354 @@ function buildDatosTrabajarInsertBatch(batchRows) {
     `,
     values
   };
+}
+
+export async function processRecuperoImportJob(jobId) {
+  const client = createDbClient();
+  await client.connect();
+
+  try {
+    const jobRes = await client.query(
+      `
+      SELECT id, csv_text, status, total_rows, processed_rows, updated_rows, error_rows, delimiter
+      FROM recupero_import_jobs
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [jobId]
+    );
+
+    if (!jobRes.rows.length) return;
+    const job = jobRes.rows[0];
+    const csvText = job.csv_text || "";
+    const totalRows = Math.max(0, countCsvRows(csvText) - 1);
+
+    await client.query(
+      `
+      UPDATE recupero_import_jobs
+      SET status = 'processing',
+          total_rows = $1,
+          processed_rows = $2,
+          updated_rows = $3,
+          error_rows = $4,
+          error_message = NULL,
+          started_at = now(),
+          updated_at = now()
+      WHERE id = $5
+      `,
+      [
+        totalRows,
+        job.processed_rows || 0,
+        job.updated_rows || 0,
+        job.error_rows || 0,
+        jobId
+      ]
+    );
+
+    if (!csvText.trim()) {
+      await client.query(
+        `
+        UPDATE recupero_import_jobs
+        SET status = 'failed',
+            error_message = 'CSV vacio',
+            finished_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        `,
+        [jobId]
+      );
+      return;
+    }
+
+    const iterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+    const headerResult = iterator.next();
+    const headerLine = headerResult.done ? "" : headerResult.value || "";
+    const delimiter = job.delimiter || detectCsvDelimiter(headerLine);
+    const headers = parseCsvLine(headerLine, delimiter).map((h) => normalizeImportValue(h));
+
+    const idxDocumento = headers.findIndex((h) => h === "documento");
+    const idxMotivo = headers.findIndex(
+      (h) => h === "motivo de la baja" || h === "motivo de baja"
+    );
+    const idxEstado = headers.findIndex(
+      (h) => h === "ultimo estado" || h === "último estado"
+    );
+
+    if (idxDocumento === -1 || idxMotivo === -1 || idxEstado === -1) {
+      await client.query(
+        `
+        UPDATE recupero_import_jobs
+        SET status = 'failed',
+            error_message = 'Headers invalidos',
+            finished_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        `,
+        [jobId]
+      );
+      return;
+    }
+
+    const entriesByDocumento = new Map();
+    const errors = [];
+    let duplicateRows = 0;
+    let invalidRows = 0;
+    let notFoundRows = 0;
+    let rowNumber = 1;
+
+    for (const line of iterator) {
+      rowNumber += 1;
+      if (!line) continue;
+      const cells = parseCsvLine(line, delimiter);
+      const rawDocumento = cells[idxDocumento] || "";
+      const documento = normalizeDocumento(rawDocumento);
+      const motivoBajaRaw = String(cells[idxMotivo] || "").trim();
+      const ultimoEstadoRaw = String(cells[idxEstado] || "").trim();
+
+      if (!documento) {
+        invalidRows += 1;
+        errors.push({
+          row: rowNumber,
+          documento: rawDocumento,
+          motivo_baja: motivoBajaRaw,
+          ultimo_estado: ultimoEstadoRaw,
+          code: "MISSING_FIELD",
+          message: "Documento requerido"
+        });
+        continue;
+      }
+
+      if (!motivoBajaRaw && !ultimoEstadoRaw) {
+        invalidRows += 1;
+        errors.push({
+          row: rowNumber,
+          documento,
+          motivo_baja: motivoBajaRaw,
+          ultimo_estado: ultimoEstadoRaw,
+          code: "MISSING_FIELD",
+          message: "Motivo o ultimo estado requerido"
+        });
+        continue;
+      }
+
+      let ultimoEstadoNorm = null;
+      if (ultimoEstadoRaw) {
+        ultimoEstadoNorm = normalizeRecuperoEstado(ultimoEstadoRaw);
+        if (!ultimoEstadoNorm) {
+          invalidRows += 1;
+          errors.push({
+            row: rowNumber,
+            documento,
+            motivo_baja: motivoBajaRaw,
+            ultimo_estado: ultimoEstadoRaw,
+            code: "INVALID_VALUE",
+            message: "Ultimo estado invalido"
+          });
+          continue;
+        }
+      }
+
+      if (entriesByDocumento.has(documento)) {
+        duplicateRows += 1;
+      }
+      entriesByDocumento.set(documento, {
+        documento,
+        motivo_baja: motivoBajaRaw || null,
+        ultimo_estado_raw: ultimoEstadoRaw || null,
+        ultimo_estado_norm: ultimoEstadoNorm,
+        row: rowNumber
+      });
+    }
+
+    const documentos = Array.from(entriesByDocumento.keys());
+    if (!documentos.length) {
+      await client.query(
+        `
+        UPDATE recupero_import_jobs
+        SET status = 'done',
+            total_rows = $1,
+            processed_rows = $2,
+            updated_rows = 0,
+            error_rows = $3,
+            duplicate_rows = $4,
+            invalid_rows = $5,
+            not_found_rows = $6,
+          error_rows_detail = $7,
+          error_report_csv = $8,
+          finished_at = now(),
+          updated_at = now()
+        WHERE id = $9
+        `,
+        [
+          totalRows,
+          totalRows,
+          errors.length,
+          duplicateRows,
+          invalidRows,
+          notFoundRows,
+          errors.length ? JSON.stringify(errors.slice(0, 200)) : null,
+          errors.length ? buildRecuperoErrorCsv(errors) : null,
+          jobId
+        ]
+      );
+      return;
+    }
+
+    const contactsRes = await client.query(
+      `
+      SELECT id, documento
+      FROM contacts
+      WHERE documento = ANY($1)
+      `,
+      [documentos]
+    );
+    const contactMap = new Map();
+    for (const row of contactsRes.rows) {
+      contactMap.set(row.documento, row.id);
+    }
+
+    const validRows = [];
+    for (const entry of entriesByDocumento.values()) {
+      const contactId = contactMap.get(entry.documento);
+      if (!contactId) {
+        notFoundRows += 1;
+        errors.push({
+          row: entry.row,
+          documento: entry.documento,
+          motivo_baja: entry.motivo_baja,
+          ultimo_estado: entry.ultimo_estado_raw,
+          code: "NOT_FOUND",
+          message: "Documento no encontrado"
+        });
+        continue;
+      }
+      validRows.push({
+        contact_id: contactId,
+        documento: entry.documento,
+        motivo_baja: entry.motivo_baja,
+        ultimo_estado_raw: entry.ultimo_estado_raw,
+        ultimo_estado_norm: entry.ultimo_estado_norm
+      });
+    }
+
+    const chunkSize = 500;
+    for (let i = 0; i < validRows.length; i += chunkSize) {
+      const chunk = validRows.slice(i, i + chunkSize);
+      const contactIds = chunk.map((row) => row.contact_id);
+      const documentosChunk = chunk.map((row) => row.documento);
+      const motivos = chunk.map((row) => row.motivo_baja);
+      const estadosRaw = chunk.map((row) => row.ultimo_estado_raw);
+      const estadosNorm = chunk.map((row) => row.ultimo_estado_norm);
+
+      await client.query(
+        `
+        WITH src AS (
+          SELECT * FROM UNNEST(
+            $1::uuid[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[]
+          ) AS t(contact_id, documento, motivo_baja, estado_raw, estado_norm)
+        )
+        UPDATE contact_products cp
+        SET motivo_baja = src.motivo_baja,
+            updated_at = now()
+        FROM src
+        WHERE cp.contact_id = src.contact_id
+          AND cp.estado = 'baja'
+        `,
+        [contactIds, documentosChunk, motivos, estadosRaw, estadosNorm]
+      );
+
+      await client.query(
+        `
+        WITH src AS (
+          SELECT * FROM UNNEST(
+            $1::uuid[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[]
+          ) AS t(contact_id, documento, motivo_baja, estado_raw, estado_norm)
+        )
+        INSERT INTO external_management_status (
+          contact_id,
+          documento,
+          estado_raw,
+          estado_normalizado,
+          motivo_baja,
+          fuente,
+          updated_at
+        )
+        SELECT
+          contact_id,
+          documento,
+          estado_raw,
+          estado_norm,
+          motivo_baja,
+          'csv',
+          now()
+        FROM src
+        ON CONFLICT (documento) DO UPDATE
+        SET
+          contact_id = EXCLUDED.contact_id,
+          estado_raw = EXCLUDED.estado_raw,
+          estado_normalizado = EXCLUDED.estado_normalizado,
+          motivo_baja = EXCLUDED.motivo_baja,
+          fuente = 'csv',
+          updated_at = now()
+        `,
+        [contactIds, documentosChunk, motivos, estadosRaw, estadosNorm]
+      );
+    }
+
+    await client.query(
+      `
+      UPDATE recupero_import_jobs
+      SET status = 'done',
+          total_rows = $1,
+          processed_rows = $2,
+          updated_rows = $3,
+          error_rows = $4,
+          duplicate_rows = $5,
+          invalid_rows = $6,
+          not_found_rows = $7,
+          error_rows_detail = $8,
+          error_report_csv = $9,
+          finished_at = now(),
+          updated_at = now()
+      WHERE id = $10
+      `,
+      [
+        totalRows,
+        totalRows,
+        validRows.length,
+        errors.length,
+        duplicateRows,
+        invalidRows,
+        notFoundRows,
+        errors.length ? JSON.stringify(errors.slice(0, 200)) : null,
+        errors.length ? buildRecuperoErrorCsv(errors) : null,
+        jobId
+      ]
+    );
+  } catch (error) {
+    await client.query(
+      `
+      UPDATE recupero_import_jobs
+      SET status = 'failed',
+          error_message = $1,
+          finished_at = now(),
+          updated_at = now()
+      WHERE id = $2
+      `,
+      [error.message, jobId]
+    );
+    throw error;
+  } finally {
+    await client.end();
+  }
 }
 
 export async function processDatosTrabajarJob(jobId, options = {}) {
@@ -3243,7 +3714,7 @@ function buildImportSampleCsv(type) {
     "telefono",
     "Celular",
     "Correo electronico",
-    "Dirección",
+    "Direcci�n",
     "Departamento",
     "Pais",
     "Nombre del familiar",
@@ -3267,7 +3738,7 @@ function buildImportSampleCsv(type) {
     "telefono": "099123456",
     "Celular": "099123456",
     "Correo electronico": "ana.pereira@example.com",
-    "Dirección": "18 de Julio 1234",
+    "Direcci�n": "18 de Julio 1234",
     "Departamento": "Montevideo",
     "Pais": "Uruguay",
     "Nombre del familiar": "Luis",
@@ -3309,7 +3780,7 @@ function validateProductPayload(body, options = {}) {
 
   const parsedPrecio = Number(String(precio || 0).replace(/[^0-9.-]/g, ""));
   if (Number.isNaN(parsedPrecio)) {
-    errors.precio = ["precio inválido"];
+    errors.precio = ["precio inv�lido"];
   }
 
   if (Object.keys(errors).length > 0) {
@@ -3528,13 +3999,13 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!email) {
       errors.email = "El email es obligatorio";
     } else if (!isValidEmail(email)) {
-      errors.email = "El email no es válido";
+      errors.email = "El email no es v�lido";
     }
   }
 
   if (!options.partial || body?.telefono !== undefined) {
     if (!telefono) {
-      errors.telefono = "El teléfono es obligatorio";
+      errors.telefono = "El tel�fono es obligatorio";
     }
   }
 
@@ -3542,7 +4013,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!rol) {
       errors.rol = "El rol es obligatorio";
     } else if (!VALID_ROLES.includes(rol)) {
-      errors.rol = "El rol no es válido";
+      errors.rol = "El rol no es v�lido";
     }
   }
 
@@ -3550,7 +4021,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!status) {
       errors.status = "El estado es obligatorio";
     } else if (!VALID_USER_STATUSES.includes(status)) {
-      errors.status = "El estado no es válido";
+      errors.status = "El estado no es v�lido";
     }
   }
 
@@ -3588,7 +4059,7 @@ function validateVendorRegistrationPayload(body) {
   if (!nombre) errors.nombre = "El nombre es obligatorio";
   if (!apellido) errors.apellido = "El apellido es obligatorio";
   if (!email) errors.email = "El email es obligatorio";
-  if (!telefono) errors.telefono = "El teléfono es obligatorio";
+  if (!telefono) errors.telefono = "El tel�fono es obligatorio";
 
   return {
     valid: Object.keys(errors).length === 0,
@@ -5172,7 +5643,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.role_key,
           updatedUser.role_key,
           actorUserId,
-          "Actualización desde superadmin/users"
+          "Actualizaci�n desde superadmin/users"
         ]
       );
     }
@@ -5195,7 +5666,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.status,
           updatedUser.status,
           actorUserId,
-          "Actualización desde superadmin/users"
+          "Actualizaci�n desde superadmin/users"
         ]
       );
     }
@@ -5256,7 +5727,7 @@ function requireApproved(event, dbUser) {
 function requireRole(event, dbUser, allowedRoles) {
   console.log("[role-check] roles requeridos:", allowedRoles);
   console.log("[role-check] rol del usuario:", dbUser?.role_key);
-  console.log("[role-check] ¿tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
+  console.log("[role-check] �tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
     return json(403, {
       ok: false,
@@ -5484,7 +5955,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
     if (requestRow.status !== "pending") {
       return {
         invalidState: true,
-        message: "La solicitud ya no está pendiente"
+        message: "La solicitud ya no est� pendiente"
       };
     }
 
@@ -5557,7 +6028,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
         null,
         "vendedor",
         reviewerUserId,
-        "Aprobación de solicitud de vendedor"
+        "Aprobaci�n de solicitud de vendedor"
       ]
     );
 
@@ -5625,7 +6096,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
       await client.query("ROLLBACK");
       return {
         invalidState: true,
-        message: "La solicitud ya no está pendiente"
+        message: "La solicitud ya no est� pendiente"
       };
     }
 
@@ -5666,6 +6137,13 @@ export const handler = async (event) => {
         continue;
       }
       if (!payload) continue;
+      if (payload.type === "recupero_import") {
+        const jobId = payload.jobId;
+        if (jobId) {
+          await processRecuperoImportJob(jobId);
+        }
+        continue;
+      }
       if (payload.type && payload.type !== "contact_import" && payload.type !== "clientes") {
         continue;
       }
@@ -7919,7 +8397,7 @@ const items = result.rows.map((row) => ({
             ok: true,
             success: true,
             data: null,
-            message: "No tenés lotes activos asignados",
+            message: "No ten�s lotes activos asignados",
             error: null
           });
         }
@@ -8033,8 +8511,8 @@ const items = result.rows.map((row) => ({
               success: true,
               data: null,
               message: enOla2
-                ? `No hay contactos disponibles en esta franja. Volvé a las ${ola1Inicio}`
-                : `No hay contactos disponibles en esta franja. Volvé a las ${ola2Inicio}`,
+                ? `No hay contactos disponibles en esta franja. Volv� a las ${ola1Inicio}`
+                : `No hay contactos disponibles en esta franja. Volv� a las ${ola2Inicio}`,
               error: null
             });
           }
@@ -8043,7 +8521,7 @@ const items = result.rows.map((row) => ({
             ok: true,
             success: true,
             data: null,
-            message: "Todos los contactos del lote fueron gestionados. ¡Buen trabajo!",
+            message: "Todos los contactos del lote fueron gestionados. �Buen trabajo!",
             error: null
           });
         }
@@ -8533,12 +9011,12 @@ const items = result.rows.map((row) => ({
         const validationErrors = [];
 
         if (!resultadoInput || resultadoInput === "nuevo") {
-          validationErrors.push({ field: "estado_venta", message: "Estado inválido" });
+          validationErrors.push({ field: "estado_venta", message: "Estado inv�lido" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
-          validationErrors.push({ field: "estado_venta", message: "Estado no existe en catálogo" });
+          validationErrors.push({ field: "estado_venta", message: "Estado no existe en cat�logo" });
         }
 
         if (resultadoInput === "seguimiento" && !fechaAgenda) {
@@ -8555,13 +9033,13 @@ const items = result.rows.map((row) => ({
               success: false,
               data: null,
               error: {
-                message: "Contacto ya está en estado final",
+                message: "Contacto ya est� en estado final",
                 estado_actual: currentEstadoVenta
               }
             });
           }
 
-          // Rechazo solo se puede corregir el mismo día
+          // Rechazo solo se puede corregir el mismo d�a
           if (currentEstadoVenta === "rechazo") {
             const ultimaGestionRes = await client.query(
               `
@@ -8585,7 +9063,7 @@ const items = result.rows.map((row) => ({
                 success: false,
                 data: null,
                 error: {
-                  message: "El rechazo solo puede corregirse el mismo día",
+                  message: "El rechazo solo puede corregirse el mismo d�a",
                   estado_actual: currentEstadoVenta
                 }
               });
@@ -8600,7 +9078,7 @@ const items = result.rows.map((row) => ({
             success: false,
             data: null,
             error: {
-              message: "Validación",
+              message: "Validaci�n",
               errors: validationErrors
             }
           });
@@ -10067,7 +10545,7 @@ const items = result.rows.map((row) => ({
             success: false,
             data: null,
             error: {
-              message: "Contactos inválidos para asignar",
+              message: "Contactos inv�lidos para asignar",
               errors
             }
           });
@@ -11037,6 +11515,286 @@ const items = result.rows.map((row) => ({
       });
     }
   }
+  if (
+    method === "POST" &&
+    (path.endsWith("/api/recupero/importaciones") ||
+      path.endsWith("/api/recupero/importar-bajas"))
+  ) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const multipart = parseMultipartFormData(event);
+      if (!multipart) {
+        return json(400, { ok: false, message: "Archivo invalido" });
+      }
+
+      const fileEntry =
+        multipart.files?.file ||
+        multipart.files?.archivo ||
+        Object.values(multipart.files || {})[0];
+      const fileNameHeader =
+        event?.headers?.["x-file-name"] ||
+        event?.headers?.["X-File-Name"] ||
+        event?.headers?.["x-filename"] ||
+        event?.headers?.["X-Filename"] ||
+        "recupero.csv";
+      const fileName = fileEntry?.filename || fileNameHeader || "recupero.csv";
+      const csvText = fileEntry?.content || "";
+
+      if (!fileName.toLowerCase().endsWith(".csv")) {
+        return json(400, { ok: false, message: "Formato invalido" });
+      }
+
+      if (!csvText || !csvText.trim()) {
+        return json(400, { ok: false, message: "CSV vacio" });
+      }
+
+      const sizeBytes = Buffer.byteLength(csvText, "utf8");
+      if (sizeBytes > 5 * 1024 * 1024) {
+        return json(400, { ok: false, message: "Archivo demasiado grande" });
+      }
+
+      const delimiterRaw = String(multipart.fields?.delimiter || "").trim();
+      const delimiter = delimiterRaw && delimiterRaw.length === 1 ? delimiterRaw : null;
+      const iterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+      const headerResult = iterator.next();
+      const headerLine = headerResult.done ? "" : headerResult.value || "";
+      const headerDelimiter = delimiter || detectCsvDelimiter(headerLine);
+      const headers = parseCsvLine(headerLine, headerDelimiter).map((h) =>
+        normalizeImportValue(h)
+      );
+      const hasDocumento = headers.includes("documento");
+      const hasMotivo = headers.some(
+        (h) => h === "motivo de la baja" || h === "motivo de baja"
+      );
+      const hasEstado = headers.some(
+        (h) => h === "ultimo estado" || h === "último estado"
+      );
+      if (!hasDocumento || !hasMotivo || !hasEstado) {
+        return json(400, { ok: false, message: "Headers invalidos" });
+      }
+
+      const fileHash = crypto.createHash("sha256").update(csvText).digest("hex");
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const existingRes = await client.query(
+          `
+          SELECT id, status
+          FROM recupero_import_jobs
+          WHERE file_hash = $1
+            AND status IN ('queued', 'processing', 'done')
+          ORDER BY created_at DESC
+          LIMIT 1
+          `,
+          [fileHash]
+        );
+        if (existingRes.rows.length) {
+          return json(200, {
+            ok: true,
+            job_id: existingRes.rows[0].id,
+            status: existingRes.rows[0].status,
+            duplicated: true
+          });
+        }
+
+        const jobRes = await client.query(
+          `
+          INSERT INTO recupero_import_jobs (
+            file_name,
+            status,
+            total_rows,
+            processed_rows,
+            updated_rows,
+            error_rows,
+            duplicate_rows,
+            invalid_rows,
+            not_found_rows,
+            csv_text,
+            created_by,
+            file_hash,
+            delimiter
+          )
+          VALUES ($1, 'queued', 0, 0, 0, 0, 0, 0, 0, $2, $3, $4, $5)
+          RETURNING id, status
+          `,
+          [fileName, csvText, dbUser?.id || null, fileHash, headerDelimiter]
+        );
+
+        await enqueueRecuperoImportJob(jobRes.rows[0].id);
+        return json(201, {
+          ok: true,
+          job_id: jobRes.rows[0].id,
+          status: jobRes.rows[0].status
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to create recupero import job",
+        error: error.message
+      });
+    }
+  }
+  if (method === "GET" && path.match(/\/api\/recupero\/importaciones\/([^/]+)\/errores\.csv$/)) {
+    const match = path.match(/\/api\/recupero\/importaciones\/([^/]+)\/errores\.csv$/);
+    const jobId = match ? match[1] : null;
+    if (!isValidUuid(jobId)) {
+      return json(400, { ok: false, message: "job_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const jobRes = await client.query(
+          `
+          SELECT id, error_report_csv
+          FROM recupero_import_jobs
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [jobId]
+        );
+        if (!jobRes.rows.length) {
+          return json(404, { ok: false, message: "Job no encontrado" });
+        }
+        const csv = jobRes.rows[0].error_report_csv || "";
+        return {
+          statusCode: 200,
+          headers: {
+            ...CORS_HEADERS,
+            "Content-Type": "text/csv; charset=utf-8"
+          },
+          body: csv
+        };
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load error report",
+        error: error.message
+      });
+    }
+  }
+  if (method === "GET" && path.match(/\/api\/recupero\/importaciones\/([^/]+)$/)) {
+    const match = path.match(/\/api\/recupero\/importaciones\/([^/]+)$/);
+    const jobId = match ? match[1] : null;
+    if (!isValidUuid(jobId)) {
+      return json(400, { ok: false, message: "job_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const jobRes = await client.query(
+          `
+          SELECT
+            id,
+            status,
+            total_rows,
+            processed_rows,
+            updated_rows,
+            error_rows,
+            duplicate_rows,
+            invalid_rows,
+            not_found_rows,
+            error_rows_detail,
+            error_report_csv
+          FROM recupero_import_jobs
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [jobId]
+        );
+        if (!jobRes.rows.length) {
+          return json(404, { ok: false, message: "Job no encontrado" });
+        }
+        const row = jobRes.rows[0];
+        const total = Number(row.total_rows || 0);
+        const processed = Number(row.processed_rows || 0);
+        const percentage = total ? Math.round((processed / total) * 100) : 0;
+        const errors = Array.isArray(row.error_rows_detail)
+          ? row.error_rows_detail
+          : row.error_rows_detail
+          ? JSON.parse(row.error_rows_detail)
+          : [];
+        return json(200, {
+          ok: true,
+          job_id: row.id,
+          status: row.status,
+          duplicate_policy: "last_wins",
+          progress: {
+            processed_rows: processed,
+            total_rows: total,
+            percentage
+          },
+          summary: {
+            total,
+            actualizadas: Number(row.updated_rows || 0),
+            no_encontradas: Number(row.not_found_rows || 0),
+            duplicadas: Number(row.duplicate_rows || 0),
+            invalidas: Number(row.invalid_rows || 0)
+          },
+          errores: errors,
+          error_report_url: row.error_report_csv
+            ? `/api/recupero/importaciones/${row.id}/errores.csv`
+            : null
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load recupero import job",
+        error: error.message
+      });
+    }
+  }
 
   if (method === "GET" && path.endsWith("/api/codificaciones/ultimos")) {
     try {
@@ -11236,7 +11994,7 @@ const items = result.rows.map((row) => ({
 
         const management = managementRes.rows[0];
         if (!management) {
-          return json(404, { ok: false, message: "Gestión no encontrada" });
+          return json(404, { ok: false, message: "Gesti�n no encontrada" });
         }
 
         const auditsRes = await client.query(
@@ -11341,7 +12099,7 @@ const items = result.rows.map((row) => ({
 
         const detail = detailRes.rows[0];
         if (!detail) {
-          return json(404, { ok: false, message: "Gestión no encontrada" });
+          return json(404, { ok: false, message: "Gesti�n no encontrada" });
         }
 
         return json(200, {
@@ -11374,7 +12132,7 @@ const items = result.rows.map((row) => ({
       return json(400, { ok: false, message: "management_id requerido" });
     }
     if (!isValidUuid(managementId)) {
-      return json(400, { ok: false, message: "management_id inválido" });
+      return json(400, { ok: false, message: "management_id inv�lido" });
     }
     if (body === null) {
       return json(400, { ok: false, message: "Invalid JSON body" });
@@ -11420,13 +12178,13 @@ const items = result.rows.map((row) => ({
         const management = managementRes.rows[0];
         if (!management) {
           await client.query("ROLLBACK");
-          return json(404, { ok: false, message: "Gestión no encontrada" });
+          return json(404, { ok: false, message: "Gesti�n no encontrada" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
           await client.query("ROLLBACK");
-          return json(400, { ok: false, message: "resultado_corregido no existe en catálogo" });
+          return json(400, { ok: false, message: "resultado_corregido no existe en cat�logo" });
         }
 
         const insertRes = await client.query(
@@ -11485,9 +12243,9 @@ const items = result.rows.map((row) => ({
   if (method === "POST" && path.endsWith("/api/agente/estado")) {
     const body = safeParseBody(event) || {};
     const tipoRaw = normalizeEstadoTipo(body.tipo);
-    const tipo = tipoRaw === "BANO" ? "BAÑO" : tipoRaw;
-    if (!["BAÑO", "DESCANSO", "SUPERVISOR"].includes(tipo)) {
-      return json(400, { ok: false, message: "Tipo de estado no válido" });
+    const tipo = tipoRaw === "BANO" ? "BA�O" : tipoRaw;
+    if (!["BA�O", "DESCANSO", "SUPERVISOR"].includes(tipo)) {
+      return json(400, { ok: false, message: "Tipo de estado no v�lido" });
     }
 
     try {
@@ -12003,7 +12761,7 @@ const items = result.rows.map((row) => ({
           if (rawTipo === "CON_SUPERVISOR") return "SUPERVISOR";
           return rawTipo;
         };
-        const isBanoType = (t) => t === "BA?O" || t === "BAÑO";
+        const isBanoType = (t) => t === "BA?O" || t === "BA�O";
         const isPauseType = (t) => isBanoType(t) || t === "DESCANSO" || t === "SUPERVISOR";
         const getPauseLimit = (t) =>
           isBanoType(t) ? config.limite_bano_minutos : config.limite_descanso_minutos;
@@ -12234,7 +12992,7 @@ const items = result.rows.map((row) => ({
             createdAlert = await createAlert(client, {
               agente_id: agenteId,
               tipo: "conversion_baja",
-              descripcion: `${conversion}% actual vs mínimo ${config.conversion_minima_porcentaje}%`,
+              descripcion: `${conversion}% actual vs m�nimo ${config.conversion_minima_porcentaje}%`,
               hora_evento: now,
               fecha
             });
@@ -12400,7 +13158,7 @@ const items = result.rows.map((row) => ({
         }
         const status = statusRes.rows[0]?.status || "";
         if (status === "processing") {
-          return json(409, { ok: false, message: "El job está en proceso" });
+          return json(409, { ok: false, message: "El job est� en proceso" });
         }
         const deleted = await client.query(
           `
@@ -13670,6 +14428,8 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
 
 
 
