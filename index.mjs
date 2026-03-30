@@ -7956,6 +7956,7 @@ const items = result.rows.map((row) => ({
             COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'seguimiento') AS seguimiento,
             COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'rechazo') AS rechazos,
             COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta') AS ventas,
+            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'dato_erroneo') AS dato_erroneo,
             ROUND(
               100.0
               * COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta')
@@ -7973,10 +7974,19 @@ const items = result.rows.map((row) => ({
 
         const s = statsResult.rows[0] || {};
         const l = lotesResult.rows[0] || {};
-        const tocadosRaw = parseInt(s.tocados || "0", 10);
-        const tocados = tocadosRaw > 0 ? tocadosRaw : 1;
+        const ventasTotal = parseInt(s.ventas || "0", 10);
+        const rechazosTotal = parseInt(s.rechazos || "0", 10);
+        const seguimientoTotal = parseInt(s.seguimiento || "0", 10);
         const noContestaTotal = parseInt(s.no_contesta || "0", 10);
-        const contactosReales = Math.max(0, tocadosRaw - noContestaTotal);
+        const rellamarTotal = parseInt(s.rellamar || "0", 10);
+        const datosErroneosTotal = parseInt(s.dato_erroneo || "0", 10);
+
+        const utiles = ventasTotal + rechazosTotal + seguimientoTotal;
+        const inutiles = noContestaTotal + rellamarTotal + datosErroneosTotal;
+        const totalGestionado = utiles + inutiles;
+
+        const contactoPct = totalGestionado > 0 ? Math.round((utiles / totalGestionado) * 100) : 0;
+        const efectividadPct = utiles > 0 ? Math.round((ventasTotal / utiles) * 100) : 0;
 
         return json(200, {
           ok: true,
@@ -7984,22 +7994,22 @@ const items = result.rows.map((row) => ({
           data: {
             total_asignados: parseInt(l.total_asignados || "0", 10),
             nuevos: parseInt(l.nuevos || "0", 10),
-            no_contesta: parseInt(s.no_contesta || "0", 10),
-            seguimiento: parseInt(s.seguimiento || "0", 10),
-            rechazos: parseInt(s.rechazos || "0", 10),
-            ventas: parseInt(s.ventas || "0", 10),
-            tocados: parseInt(s.tocados || "0", 10),
-            contactos_reales: contactosReales,
-            pct_contacto: Math.round(contactosReales / tocados * 100),
-            pct_efectividad: parseFloat(s.efectividad_pct || "0"),
-            gestiones_hoy: parseInt(s.tocados || "0", 10),
-            ventas_hoy: parseInt(s.ventas || "0", 10),
-            no_contesta_hoy: parseInt(s.no_contesta || "0", 10),
-            tipificados_seguimiento_hoy: parseInt(s.seguimiento || "0", 10),
-            rechazos_hoy: parseInt(s.rechazos || "0", 10),
-            rellamar_hoy: parseInt(s.rellamar || "0", 10),
-            pct_contacto_hoy: Math.round(contactosReales / tocados * 100),
-            pct_efectividad_hoy: parseFloat(s.efectividad_pct || "0")
+            no_contesta: noContestaTotal,
+            seguimiento: seguimientoTotal,
+            rechazos: rechazosTotal,
+            ventas: ventasTotal,
+            tocados: totalGestionado,
+            contactos_reales: utiles,
+            pct_contacto: contactoPct,
+            pct_efectividad: efectividadPct,
+            gestiones_hoy: totalGestionado,
+            ventas_hoy: ventasTotal,
+            no_contesta_hoy: noContestaTotal,
+            tipificados_seguimiento_hoy: seguimientoTotal,
+            rechazos_hoy: rechazosTotal,
+            rellamar_hoy: rellamarTotal,
+            pct_contacto_hoy: contactoPct,
+            pct_efectividad_hoy: efectividadPct
           }
         });
       } finally {
