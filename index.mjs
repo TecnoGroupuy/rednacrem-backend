@@ -9167,7 +9167,7 @@ const items = result.rows.map((row) => ({
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
       const hasTipo = tipo === "recupero" || tipo === "captacion";
-      const batchTipo = hasTipo ? tipo : "";
+      const batchTipo = hasTipo ? tipo : null;
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
       const client = createDbClient();
@@ -9186,7 +9186,7 @@ const items = result.rows.map((row) => ({
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
           `,
-          [sellerId, tipo]
+          [sellerId, batchTipo]
         );
 
         const statsResult = await client.query(
@@ -9211,7 +9211,7 @@ const items = result.rows.map((row) => ({
             AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
             AND ($3::text IS NULL OR lb.tipo = $3)
           `,
-          [sellerId, fecha, tipo]
+          [sellerId, fecha, batchTipo]
         );
         const s = statsResult.rows[0] || {};
         const l = lotesResult.rows[0] || {};
@@ -15065,7 +15065,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
 
 
 
