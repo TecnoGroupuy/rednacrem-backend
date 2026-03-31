@@ -1575,12 +1575,12 @@ function formatDurationLabel(seconds) {
 function normalizeEstadoTipo(rawTipo) {
   const text = String(rawTipo || "").trim().toUpperCase();
   if (!text) return "";
-  if (text === "BANO" || text === "BANIO" || text === "BA?O") return "BA�O";
+  if (text === "BANO" || text === "BANIO" || text === "BA?O") return "BANO";
   return text;
 }
 
 function isPausaTipo(tipo) {
-  return tipo === "DESCANSO" || tipo === "SUPERVISOR" || tipo === "BA�O" || tipo === "BA?O";
+  return tipo === "DESCANSO" || tipo === "SUPERVISOR" || tipo === "BANO" || tipo === "BA?O";
 }
 
 function addMinutes(date, minutes) {
@@ -1687,7 +1687,7 @@ async function closeActiveTurnEvent(client, eventRow, now, config) {
   let excedido = false;
   let exceso = 0;
   if (isPausaTipo(eventRow.tipo)) {
-    const limite = eventRow.tipo === "BA�O" || eventRow.tipo === "BA?O"
+    const limite = eventRow.tipo === "BANO" || eventRow.tipo === "BA?O"
       ? config.limite_bano_minutos
       : config.limite_descanso_minutos;
     const dur = minutesBetween(new Date(eventRow.inicio), fin);
@@ -1786,7 +1786,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     });
   }
 
-  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BA?O", "BA�O"];
+  const pauseTypes = ["DESCANSO", "SUPERVISOR", "BA?O", "BANO"];
   const eventsRes = sellerIds.length
     ? await client.query(
       `
@@ -1971,7 +1971,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
           WHEN 'TRABAJO' THEN 1
           WHEN 'INACTIVO' THEN 2
           WHEN 'DESCANSO' THEN 3
-          WHEN 'BA�O' THEN 4
+          WHEN 'BANO' THEN 4
           WHEN 'BA?O' THEN 4
           WHEN 'SUPERVISOR' THEN 5
           WHEN 'LOGOUT' THEN 6
@@ -2035,7 +2035,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
         SUM(CASE WHEN tipo = 'DESCANSO' AND siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS descanso_seg,
-        SUM(CASE WHEN tipo IN ('BA�O', 'BA?O') AND siguiente_inicio IS NOT NULL
+        SUM(CASE WHEN tipo IN ('BANO', 'BA?O') AND siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS bano_seg,
         SUM(CASE WHEN tipo = 'SUPERVISOR' AND siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS supervisor_seg
@@ -2048,7 +2048,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
         SUM(CASE WHEN siguiente_inicio IS NOT NULL
           THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS total_jornada_seg
       FROM intervalos
-      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BA�O', 'BA?O', 'INACTIVO')
+      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BANO', 'BA?O', 'INACTIVO')
       GROUP BY agente_id
     )
     SELECT
@@ -2152,7 +2152,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   );
   const eventosRows = eventosRes.rows || [];
 
-  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BA?O", "BA�O"]);
+  const pauseTypes = new Set(["DESCANSO", "SUPERVISOR", "BA?O", "BANO"]);
   let totalPausas = 0;
   let totalTrabajo = 0;
   let pausaCount = 0;
@@ -12369,10 +12369,9 @@ const items = result.rows.map((row) => ({
 
   if (method === "POST" && path.endsWith("/api/agente/estado")) {
     const body = safeParseBody(event) || {};
-    const tipoRaw = normalizeEstadoTipo(body.tipo);
-    const tipo = tipoRaw === "BANO" ? "BA�O" : tipoRaw;
-    if (!["BA�O", "DESCANSO", "SUPERVISOR"].includes(tipo)) {
-      return json(400, { ok: false, message: "Tipo de estado no v�lido" });
+    const tipo = normalizeEstadoTipo(body.tipo);
+    if (!["BANO", "DESCANSO", "SUPERVISOR", "BA?O"].includes(tipo)) {
+      return json(400, { ok: false, message: "Tipo de estado no valido" });
     }
 
     try {
@@ -12888,7 +12887,7 @@ const items = result.rows.map((row) => ({
           if (rawTipo === "CON_SUPERVISOR") return "SUPERVISOR";
           return rawTipo;
         };
-        const isBanoType = (t) => t === "BA?O" || t === "BA�O";
+        const isBanoType = (t) => t === "BA?O" || t === "BANO";
         const isPauseType = (t) => isBanoType(t) || t === "DESCANSO" || t === "SUPERVISOR";
         const getPauseLimit = (t) =>
           isBanoType(t) ? config.limite_bano_minutos : config.limite_descanso_minutos;
@@ -14555,6 +14554,7 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
 
 
 
