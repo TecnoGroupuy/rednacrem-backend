@@ -9163,7 +9163,10 @@ const items = result.rows.map((row) => ({
 
       const sellerId = dbUser?.id || null;
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
-      const tipo = (getQueryParam(event, "tipo") || "").trim() || null;
+      const tipoRaw = getQueryParam(event, "tipo");
+      const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
+      const hasTipo = tipo === "recupero" || tipo === "captacion";
+      const batchTipo = hasTipo ? tipo : "";
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
       const client = createDbClient();
@@ -13147,9 +13150,10 @@ const items = result.rows.map((row) => ({
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = ANY($1::uuid[])
             AND lb.estado IN ('activo', 'asignado')
+            AND ($2 = '' OR lb.tipo = $2)
           GROUP BY lcs.assigned_to
           `,
-          [sellerIds]
+          [sellerIds, batchTipo]
         );
         const assignedMap = new Map(assignedRes.rows.map((row) => [row.user_id, Number(row.asignados || 0)]));
 
@@ -13161,8 +13165,10 @@ const items = result.rows.map((row) => ({
                    lmh.resultado,
                    lmh.fecha_gestion
             FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
             WHERE lmh.user_id = ANY($1::uuid[])
               AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+              AND ($3 = '' OR lb.tipo = $3)
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
               user_id,
@@ -13182,7 +13188,7 @@ const items = result.rows.map((row) => ({
           FROM last_result
           GROUP BY user_id
           `,
-          [sellerIds, fecha]
+          [sellerIds, fecha, batchTipo]
         );
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
@@ -13191,11 +13197,15 @@ const items = result.rows.map((row) => ({
           SELECT s.seller_user_id AS user_id,
                  COUNT(*)::int AS manual_ventas
           FROM sales s
+          LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
+          LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
+          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
           WHERE s.seller_user_id = ANY($1::uuid[])
             AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
+            AND ($3 = '' OR lb.tipo = $3 OR lb.id IS NULL)
           GROUP BY s.seller_user_id
           `,
-          [sellerIds, fecha]
+          [sellerIds, fecha, batchTipo]
         );
         const manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
 
@@ -13240,7 +13250,7 @@ const items = result.rows.map((row) => ({
           };
         });
 
-        return json(200, { ok: true, fecha, items });
+        return json(200, { ok: true, fecha, tipo: batchTipo || "all", items });
       } finally {
         await client.end();
       }
@@ -15028,8 +15038,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
-
 
 
 
