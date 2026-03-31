@@ -578,6 +578,9 @@ function normalizeLeadResultado(value) {
   if (normalized.includes("rechazo")) return "rechazo";
   if (normalized.includes("dato_erroneo") || normalized.includes("dato err") || normalized.includes("error")) return "dato_erroneo";
   if (normalized.includes("venta")) return "venta";
+  if (normalized.includes("alta")) return "venta";
+  if (normalized.includes("interesado")) return "seguimiento";
+  if (normalized.includes("volver_a_llamar") || normalized.includes("volver a llamar")) return "rellamar";
   return normalized;
 }
 
@@ -8066,6 +8069,14 @@ const items = result.rows.map((row) => ({
       try {
         await client.query("BEGIN");
 
+        const columnsInfo = await getLeadContactColumns(client);
+        const dCols = columnsInfo?.d || new Set();
+        const hasContactIdCol = dCols.has("contact_id");
+        const hasLocalidadCol = dCols.has("localidad");
+        const hasOrigenCol = dCols.has("origen_dato");
+        const hasEstadoCol = dCols.has("estado");
+        const hasCorreoCol = dCols.has("correo_electronico");
+
         const batchRes = await client.query(
           `
           INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a)
@@ -8075,6 +8086,83 @@ const items = result.rows.map((row) => ({
           [nombre, dbUser?.id || null, sellerIds[0] || null]
         );
         const batchId = batchRes.rows[0]?.id;
+
+        const contactsRes = await client.query(
+          `
+          SELECT id, nombre, apellido, documento, fecha_nacimiento, telefono, celular,
+                 direccion, departamento, localidad, email
+          FROM contacts
+          WHERE id = ANY($1::uuid[])
+          `,
+          [contactIds]
+        );
+        const contactById = new Map();
+        for (const row of contactsRes.rows) contactById.set(row.id, row);
+
+        const dptIdsByContact = new Map();
+
+        for (const contactId of contactIds) {
+          const contact = contactById.get(contactId);
+          if (!contact) continue;
+
+          let existingId = null;
+          if (hasContactIdCol) {
+            const existingRes = await client.query(
+              `SELECT id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              [contactId]
+            );
+            existingId = existingRes.rows[0]?.id || null;
+          } else if (contact.documento) {
+            const existingRes = await client.query(
+              `SELECT id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
+              [contact.documento]
+            );
+            existingId = existingRes.rows[0]?.id || null;
+          }
+
+          if (!existingId) {
+            const columns = [];
+            const values = [];
+            const params = [];
+            let p = 1;
+
+            const pushCol = (name, value) => {
+              if (!dCols.has(name)) return;
+              columns.push(name);
+              values.push(value ?? null);
+              params.push(`$${p}`);
+              p += 1;
+            };
+
+            pushCol("nombre", contact.nombre);
+            pushCol("apellido", contact.apellido);
+            pushCol("documento", contact.documento);
+            pushCol("fecha_nacimiento", contact.fecha_nacimiento);
+            pushCol("telefono", contact.telefono);
+            pushCol("celular", contact.celular);
+            pushCol("direccion", contact.direccion);
+            pushCol("departamento", contact.departamento);
+            if (hasLocalidadCol) pushCol("localidad", contact.localidad);
+            if (hasCorreoCol) pushCol("correo_electronico", contact.email);
+            if (hasOrigenCol) pushCol("origen_dato", "recupero");
+            if (hasEstadoCol) pushCol("estado", "nuevo");
+            if (hasContactIdCol) pushCol("contact_id", contactId);
+
+            const insertRes = await client.query(
+              `
+              INSERT INTO datos_para_trabajar (${columns.join(", ")})
+              VALUES (${params.join(", ")})
+              RETURNING id
+              `,
+              values
+            );
+            existingId = insertRes.rows[0]?.id || null;
+          }
+
+          if (existingId) {
+            dptIdsByContact.set(contactId, existingId);
+          }
+        }
 
         for (const sellerId of sellerIds) {
           await client.query(
@@ -8102,6 +8190,9 @@ const items = result.rows.map((row) => ({
 
         const assignedSellerId = sellerIds[0] || null;
         if (assignedSellerId) {
+          const dptIds = contactIds
+            .map((id) => dptIdsByContact.get(id))
+            .filter(Boolean);
           await client.query(
             `
             INSERT INTO lead_contact_status (
@@ -8113,17 +8204,15 @@ const items = result.rows.map((row) => ({
               ultimo_intento_at
             )
             SELECT
-              lbc.client_contact_id,
-              $1,
+              UNNEST($1::uuid[]),
               $2,
+              $3,
               'nuevo',
               0,
               NULL
-            FROM lead_batch_contacts lbc
-            WHERE lbc.batch_id = $1
             ON CONFLICT (contact_id, batch_id) DO NOTHING
             `,
-            [batchId, assignedSellerId]
+            [dptIds, batchId, assignedSellerId]
           );
         }
 
