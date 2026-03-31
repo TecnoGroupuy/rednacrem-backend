@@ -5706,11 +5706,14 @@ async function getClientDetailData(clientId) {
       const sellerName = row.seller_origin === "externo"
         ? row.seller_name_snapshot
         : [row.seller_nombre, row.seller_apellido].filter(Boolean).join(" ").trim() || row.seller_name_snapshot;
+      const saleFecha = row.fecha_venta || row.created_at;
 
       return {
         id: row.id,
-        fecha: row.created_at,
-        fecha_alta: row.created_at,
+        fecha: saleFecha,
+        fecha_alta: saleFecha,
+        fecha_venta: row.fecha_venta,
+        fechaVenta: saleFecha,
         medioPago: row.medio_pago,
         medio_pago: row.medio_pago,
         sellerName,
