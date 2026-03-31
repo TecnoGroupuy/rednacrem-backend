@@ -8035,6 +8035,480 @@ const items = result.rows.map((row) => ({
     }
   }
 
+  if (method === "POST" && path.endsWith("/api/recupero/contactos/search")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+
+      const producto = body?.producto ? String(body.producto).trim() : "";
+      const departamento = body?.departamento ? String(body.departamento).trim() : "";
+      const search = body?.search ? String(body.search).trim() : "";
+      const motivoBaja = body?.motivo_baja ? String(body.motivo_baja).trim() : "";
+      const tab = body?.tab ? String(body.tab).trim().toLowerCase() : "";
+      const sortField = body?.sort?.field ? String(body.sort.field).trim() : "";
+      const sortDir = body?.sort?.dir === "desc" ? "DESC" : "ASC";
+      const filters = body?.filters || null;
+
+      const sortableColumns = {
+        edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
+        telefono: "c.telefono",
+        departamento: "c.departamento",
+        nombre_producto: "cp.nombre_producto",
+        precio: "cp.precio",
+        fecha_baja: "cp.fecha_baja"
+      };
+
+      const page = Math.max(1, Number(body?.page || 1));
+      const limit = Math.min(200, Math.max(1, Number(body?.limit || 50)));
+      const offset = (page - 1) * limit;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const conditions = [
+          "cp.estado = 'baja'",
+          "c.telefono IS NOT NULL",
+          "c.telefono != ''",
+          `c.telefono NOT IN (
+            SELECT c2.telefono FROM contacts c2
+            JOIN contact_products cp2 ON cp2.contact_id = c2.id
+            WHERE cp2.estado = 'alta'
+              AND c2.telefono IS NOT NULL AND c2.telefono != ''
+          )`,
+          "cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'"
+        ];
+
+        const values = [];
+        let idx = 1;
+
+        if (producto) {
+          conditions.push(`cp.nombre_producto = $${idx}`);
+          values.push(producto);
+          idx += 1;
+        }
+        if (departamento) {
+          conditions.push(`c.departamento = $${idx}`);
+          values.push(departamento);
+          idx += 1;
+        }
+        if (search) {
+          conditions.push(`
+            (
+              c.nombre ILIKE $${idx}
+              OR c.apellido ILIKE $${idx}
+              OR c.telefono ILIKE $${idx}
+              OR c.celular ILIKE $${idx}
+              OR c.documento ILIKE $${idx}
+              OR c.departamento ILIKE $${idx}
+              OR cp.nombre_producto ILIKE $${idx}
+            )
+          `);
+          values.push(`%${search}%`);
+          idx += 1;
+        }
+        if (motivoBaja) {
+          const normalizedMotivo = motivoBaja.toLowerCase();
+          if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
+            conditions.push(`(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL)`);
+          } else {
+            conditions.push(`COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) = $${idx}`);
+            values.push(motivoBaja);
+            idx += 1;
+          }
+        }
+
+        const filterFields = {
+          contacto: { expr: "COALESCE(NULLIF(TRIM(CONCAT(c.nombre, ' ', c.apellido)), ''), c.nombre)", type: "text" },
+          documento: { expr: "c.documento", type: "text" },
+          edad: { expr: "DATE_PART('year', AGE(c.fecha_nacimiento))", type: "number" },
+          telefono: { expr: "COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, ''))", type: "text" },
+          departamento: { expr: "c.departamento", type: "text" },
+          producto: { expr: "cp.nombre_producto", type: "text" },
+          precio: { expr: "cp.precio", type: "number" },
+          fecha_baja: { expr: "cp.fecha_baja", type: "date" },
+          motivo_baja: { expr: "COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))", type: "text" },
+          lote: { expr: "lote.nombre_lote", type: "text" },
+          vendedor_asignado: { expr: "lote.vendedor_asignado_nombre", type: "text" },
+          ultimo_estado: { expr: "COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)", type: "text" },
+          ultima_gestion: { expr: "gestion.fecha_ultima_gestion", type: "date" }
+        };
+
+        const buildRuleClause = (rule) => {
+          if (!rule || typeof rule !== "object") return null;
+          const fieldKey = String(rule.field || "").trim();
+          const operator = String(rule.operator || "").trim();
+          const field = filterFields[fieldKey];
+          if (!field || !operator) return null;
+          const expr = field.expr;
+          const type = field.type;
+          const value = rule.value;
+
+          const pushValue = (val) => {
+            values.push(val);
+            const placeholder = `$${idx}`;
+            idx += 1;
+            return placeholder;
+          };
+
+          if (operator === "empty") {
+            return type === "text"
+              ? `(${expr} IS NULL OR ${expr} = '')`
+              : `${expr} IS NULL`;
+          }
+          if (operator === "not_empty") {
+            return type === "text"
+              ? `(${expr} IS NOT NULL AND ${expr} <> '')`
+              : `${expr} IS NOT NULL`;
+          }
+
+          if (type === "text") {
+            const textVal = value === null || value === undefined ? "" : String(value);
+            if (operator === "contains") return `${expr} ILIKE ${pushValue(`%${textVal}%`)}`;
+            if (operator === "not_contains") return `${expr} NOT ILIKE ${pushValue(`%${textVal}%`)}`;
+            if (operator === "eq") return `${expr} ILIKE ${pushValue(textVal)}`;
+            if (operator === "ne") return `${expr} NOT ILIKE ${pushValue(textVal)}`;
+            if (operator === "starts") return `${expr} ILIKE ${pushValue(`${textVal}%`)}`;
+            if (operator === "ends") return `${expr} ILIKE ${pushValue(`%${textVal}`)}`;
+            if (operator === "in") {
+              const list = Array.isArray(value) ? value : [value];
+              const cleaned = list.map((v) => String(v)).filter(Boolean);
+              if (!cleaned.length) return null;
+              return `${expr} = ANY(${pushValue(cleaned)}::text[])`;
+            }
+            if (operator === "not_in") {
+              const list = Array.isArray(value) ? value : [value];
+              const cleaned = list.map((v) => String(v)).filter(Boolean);
+              if (!cleaned.length) return null;
+              return `${expr} <> ALL(${pushValue(cleaned)}::text[])`;
+            }
+          }
+
+          if (type === "number") {
+            const numVal = value === null || value === undefined || value === "" ? null : Number(value);
+            if (operator === "between" && Array.isArray(value) && value.length === 2) {
+              const minVal = Number(value[0]);
+              const maxVal = Number(value[1]);
+              const p1 = pushValue(minVal);
+              const p2 = pushValue(maxVal);
+              return `${expr} BETWEEN ${p1} AND ${p2}`;
+            }
+            if (numVal === null || Number.isNaN(numVal)) return null;
+            if (operator === "eq") return `${expr} = ${pushValue(numVal)}`;
+            if (operator === "ne") return `${expr} <> ${pushValue(numVal)}`;
+            if (operator === "gt") return `${expr} > ${pushValue(numVal)}`;
+            if (operator === "gte") return `${expr} >= ${pushValue(numVal)}`;
+            if (operator === "lt") return `${expr} < ${pushValue(numVal)}`;
+            if (operator === "lte") return `${expr} <= ${pushValue(numVal)}`;
+          }
+
+          if (type === "date") {
+            if (operator === "today") return `${expr} = CURRENT_DATE`;
+            if (operator === "this_month") {
+              return `${expr} >= date_trunc('month', CURRENT_DATE)::date AND ${expr} < (date_trunc('month', CURRENT_DATE) + interval '1 month')::date`;
+            }
+            if (operator === "last_days") {
+              const daysVal = value === null || value === undefined || value === "" ? null : Number(value);
+              if (daysVal === null || Number.isNaN(daysVal)) return null;
+              return `${expr} >= (CURRENT_DATE - ${pushValue(daysVal)}::int)`;
+            }
+            if (operator === "between" && Array.isArray(value) && value.length === 2) {
+              const p1 = pushValue(value[0]);
+              const p2 = pushValue(value[1]);
+              return `${expr} BETWEEN ${p1}::date AND ${p2}::date`;
+            }
+            if (operator === "before" && value) return `${expr} < ${pushValue(value)}::date`;
+            if (operator === "after" && value) return `${expr} > ${pushValue(value)}::date`;
+          }
+
+          if (type === "enum") {
+            const list = Array.isArray(value) ? value : [value];
+            const cleaned = list.map((v) => String(v)).filter(Boolean);
+            if (!cleaned.length) return null;
+            if (operator === "in") return `${expr} = ANY(${pushValue(cleaned)}::text[])`;
+            if (operator === "not_in") return `${expr} <> ALL(${pushValue(cleaned)}::text[])`;
+          }
+
+          if (type === "boolean") {
+            if (operator === "is_true") return `${expr} = TRUE`;
+            if (operator === "is_false") return `${expr} = FALSE`;
+          }
+
+          return null;
+        };
+
+        const buildFilterClause = (node) => {
+          if (!node || typeof node !== "object") return null;
+          if (Array.isArray(node.rules)) {
+            const combinator = String(node.combinator || "AND").toUpperCase() === "OR" ? "OR" : "AND";
+            const parts = [];
+            for (const rule of node.rules) {
+              const clause = rule?.rules ? buildFilterClause(rule) : buildRuleClause(rule);
+              if (clause) parts.push(clause);
+            }
+            if (!parts.length) return null;
+            return `(${parts.join(` ${combinator} `)})`;
+          }
+          return buildRuleClause(node);
+        };
+
+        const advancedClause = buildFilterClause(filters);
+        if (advancedClause) conditions.push(advancedClause);
+
+        const baseConditions = [...conditions];
+
+        if (tab) {
+          if (tab === "disponibles") {
+            conditions.push(`
+              NOT EXISTS (
+                SELECT 1
+                FROM lead_batch_contacts lbc
+                JOIN lead_batches lb ON lb.id = lbc.batch_id
+                WHERE lbc.client_contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                  AND lb.estado IN ('activo', 'asignado')
+              )
+            `);
+          } else if (tab === "en_lote") {
+            conditions.push(`
+              EXISTS (
+                SELECT 1
+                FROM lead_batch_contacts lbc
+                JOIN lead_batches lb ON lb.id = lbc.batch_id
+                WHERE lbc.client_contact_id = c.id
+                  AND lb.tipo = 'recupero'
+              )
+            `);
+          } else if (tab === "asignados") {
+            conditions.push(`
+              EXISTS (
+                SELECT 1
+                FROM lead_contact_status lcs
+                JOIN lead_batches lb ON lb.id = lcs.batch_id
+                WHERE lcs.contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                  AND lcs.assigned_to IS NOT NULL
+              )
+            `);
+          } else if (tab === "gestionados") {
+            conditions.push(`
+              (
+                EXISTS (
+                  SELECT 1
+                  FROM lead_contact_status lcs
+                  JOIN lead_batches lb ON lb.id = lcs.batch_id
+                  WHERE lcs.contact_id = c.id
+                    AND lb.tipo = 'recupero'
+                    AND lcs.intentos > 0
+                )
+                OR COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NOT NULL
+              )
+            `);
+          } else if (tab === "recuperados") {
+            conditions.push(
+              `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('venta', 'alta')`
+            );
+          } else if (tab === "rechazados") {
+            conditions.push(
+              `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'rechazo'`
+            );
+          }
+        }
+
+        const where = conditions.join(" AND ");
+        const baseWhere = baseConditions.join(" AND ");
+        const orderBy = sortField && sortableColumns[sortField]
+          ? `${sortableColumns[sortField]} ${sortDir}`
+          : "cp.fecha_baja DESC";
+
+        const itemsRes = await client.query(
+          `
+          SELECT DISTINCT ON (c.telefono)
+            c.id,
+            c.nombre,
+            c.apellido,
+            c.telefono,
+            c.celular,
+            c.documento,
+            CASE WHEN c.fecha_nacimiento IS NULL THEN NULL ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int END AS edad,
+            c.departamento,
+            cp.nombre_producto,
+            cp.precio,
+            cp.fecha_baja,
+            COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
+            lote.batch_id,
+            lote.nombre_lote,
+            lote.vendedor_asignado_id,
+            lote.vendedor_asignado_nombre,
+            COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) AS ultimo_estado_gestion,
+            gestion.fecha_ultima_gestion
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN external_management_status ems
+            ON ems.documento = c.documento
+          LEFT JOIN LATERAL (
+            SELECT
+              lbc.batch_id,
+              lb.nombre AS nombre_lote,
+              lcs.assigned_to AS vendedor_asignado_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+            FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
+            LEFT JOIN lead_contact_status lcs
+              ON lcs.contact_id = lbc.client_contact_id
+             AND lcs.batch_id = lbc.batch_id
+            LEFT JOIN users u ON u.id = lcs.assigned_to
+            WHERE lbc.client_contact_id = c.id
+              AND lb.tipo = 'recupero'
+              AND lb.estado IN ('activo', 'asignado')
+            ORDER BY lb.created_at DESC
+            LIMIT 1
+          ) lote ON true
+          LEFT JOIN LATERAL (
+            SELECT
+              lmh.resultado AS ultimo_estado_gestion,
+              (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.contact_id = c.id
+              AND lb.tipo = 'recupero'
+            ORDER BY lmh.fecha_gestion DESC
+            LIMIT 1
+          ) gestion ON true
+          WHERE ${where}
+          ORDER BY c.telefono, ${orderBy}
+          LIMIT $${idx} OFFSET $${idx + 1}
+          `,
+          [...values, limit, offset]
+        );
+
+        const countRes = await client.query(
+          `
+          SELECT COUNT(DISTINCT c.telefono) AS total
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN external_management_status ems
+            ON ems.documento = c.documento
+          LEFT JOIN LATERAL (
+            SELECT
+              lmh.resultado AS ultimo_estado_gestion,
+              (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.contact_id = c.id
+              AND lb.tipo = 'recupero'
+            ORDER BY lmh.fecha_gestion DESC
+            LIMIT 1
+          ) gestion ON true
+          WHERE ${where}
+          `,
+          values
+        );
+
+        const metricsRes = await client.query(
+          `
+          SELECT
+            COUNT(DISTINCT c.telefono) FILTER (WHERE NOT EXISTS (
+              SELECT 1
+              FROM lead_batch_contacts lbc
+              JOIN lead_batches lb ON lb.id = lbc.batch_id
+              WHERE lbc.client_contact_id = c.id
+                AND lb.tipo = 'recupero'
+                AND lb.estado IN ('activo', 'asignado')
+            )) AS disponibles,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
+              SELECT 1
+              FROM lead_batch_contacts lbc
+              JOIN lead_batches lb ON lb.id = lbc.batch_id
+              WHERE lbc.client_contact_id = c.id
+                AND lb.tipo = 'recupero'
+            )) AS en_lote,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
+              SELECT 1
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lcs.contact_id = c.id
+                AND lb.tipo = 'recupero'
+                AND lcs.assigned_to IS NOT NULL
+            )) AS asignados,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE (
+              EXISTS (
+                SELECT 1
+                FROM lead_contact_status lcs
+                JOIN lead_batches lb ON lb.id = lcs.batch_id
+                WHERE lcs.contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                  AND lcs.intentos > 0
+              )
+              OR COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NOT NULL
+            )) AS gestionados,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('venta', 'alta')) AS recuperados,
+            COUNT(DISTINCT c.telefono) FILTER (WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'rechazo') AS rechazados
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          LEFT JOIN external_management_status ems
+            ON ems.documento = c.documento
+          LEFT JOIN LATERAL (
+            SELECT
+              lmh.resultado AS ultimo_estado_gestion,
+              (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.contact_id = c.id
+              AND lb.tipo = 'recupero'
+            ORDER BY lmh.fecha_gestion DESC
+            LIMIT 1
+          ) gestion ON true
+          WHERE ${baseWhere}
+          `,
+          values
+        );
+
+        const metricsRow = metricsRes.rows[0] || {};
+
+        return json(200, {
+          ok: true,
+          total: Number(countRes.rows[0]?.total || 0),
+          page,
+          limit,
+          items: itemsRes.rows,
+          metrics: {
+            total: Number(countRes.rows[0]?.total || 0),
+            disponibles: Number(metricsRow.disponibles || 0),
+            enLote: Number(metricsRow.en_lote || 0),
+            asignados: Number(metricsRow.asignados || 0),
+            gestionados: Number(metricsRow.gestionados || 0),
+            recuperados: Number(metricsRow.recuperados || 0),
+            rechazados: Number(metricsRow.rechazados || 0)
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to search recupero contacts",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "POST" && path.endsWith("/api/recupero/lotes")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -14554,8 +15028,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
-
 
 
 
