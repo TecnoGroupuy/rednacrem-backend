@@ -18,6 +18,38 @@ import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/c
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
 
+function getRequestId(event) {
+  const headerId =
+    event?.headers?.["x-request-id"] ||
+    event?.headers?.["X-Request-Id"] ||
+    event?.headers?.["x-amzn-trace-id"] ||
+    event?.headers?.["X-Amzn-Trace-Id"];
+  return headerId || event?.requestContext?.requestId || crypto.randomUUID();
+}
+
+function safeResponse({ data, emptyCondition, warnings, meta, message }) {
+  const warningsList = Array.isArray(warnings) ? warnings : [];
+  const isEmpty = Boolean(emptyCondition);
+  const status = isEmpty ? "empty" : warningsList.length ? "partial" : "success";
+  const response = {
+    ok: true,
+    success: true,
+    status,
+    message: message || (isEmpty ? "Sin datos" : "OK"),
+    data: data ?? null,
+    meta: meta || null,
+    warnings: warningsList
+  };
+  if (data && typeof data === "object") {
+    if (Object.prototype.hasOwnProperty.call(data, "items")) response.items = data.items;
+    if (Object.prototype.hasOwnProperty.call(data, "total")) response.total = data.total;
+    if (Object.prototype.hasOwnProperty.call(data, "metrics")) response.metrics = data.metrics;
+    if (Object.prototype.hasOwnProperty.call(data, "page")) response.page = data.page;
+    if (Object.prototype.hasOwnProperty.call(data, "limit")) response.limit = data.limit;
+  }
+  return json(200, response);
+}
+
 function loadEnvFile(filePath) {
   try {
     if (!fs.existsSync(filePath)) {
@@ -7678,8 +7710,13 @@ const items = result.rows.map((row) => ({
   }
 
   if (method === "GET" && path.endsWith("/api/recupero/contactos")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
     try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      const authContext = await getCurrentDbUserFromEvent(event);
+      const authUser = authContext.authUser;
+      dbUser = authContext.dbUser;
 
       let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
@@ -8008,14 +8045,14 @@ const items = result.rows.map((row) => ({
         );
         const metricsRow = metricsRes.rows[0] || {};
 
-        return json(200, {
-          ok: true,
-          total: Number(countRes.rows[0]?.total || 0),
+        const total = Number(countRes.rows[0]?.total || 0);
+        const data = {
+          items: itemsRes.rows,
+          total,
           page,
           limit,
-          items: itemsRes.rows,
           metrics: {
-            total: Number(countRes.rows[0]?.total || 0),
+            total,
             disponibles: Number(metricsRow.disponibles || 0),
             enLote: Number(metricsRow.en_lote || 0),
             asignados: Number(metricsRow.asignados || 0),
@@ -8023,6 +8060,11 @@ const items = result.rows.map((row) => ({
             recuperados: Number(metricsRow.recuperados || 0),
             rechazados: Number(metricsRow.rechazados || 0)
           }
+        };
+        return safeResponse({
+          data,
+          emptyCondition: total === 0,
+          meta: { source: "recupero-contactos", request_id: requestId }
         });
       } finally {
         await client.end();
@@ -8030,15 +8072,28 @@ const items = result.rows.map((row) => ({
     } catch (error) {
       return json(500, {
         ok: false,
+        status: "error",
         message: "Failed to list recupero contacts",
-        error: error.message
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[recupero/contactos]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        duration_ms: Date.now() - startedAt
       });
     }
   }
 
   if (method === "POST" && path.endsWith("/api/recupero/contactos/search")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
     try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      const authContext = await getCurrentDbUserFromEvent(event);
+      const authUser = authContext.authUser;
+      dbUser = authContext.dbUser;
 
       let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
@@ -8482,14 +8537,14 @@ const items = result.rows.map((row) => ({
 
         const metricsRow = metricsRes.rows[0] || {};
 
-        return json(200, {
-          ok: true,
-          total: Number(countRes.rows[0]?.total || 0),
+        const total = Number(countRes.rows[0]?.total || 0);
+        const data = {
+          items: itemsRes.rows,
+          total,
           page,
           limit,
-          items: itemsRes.rows,
           metrics: {
-            total: Number(countRes.rows[0]?.total || 0),
+            total,
             disponibles: Number(metricsRow.disponibles || 0),
             enLote: Number(metricsRow.en_lote || 0),
             asignados: Number(metricsRow.asignados || 0),
@@ -8497,6 +8552,11 @@ const items = result.rows.map((row) => ({
             recuperados: Number(metricsRow.recuperados || 0),
             rechazados: Number(metricsRow.rechazados || 0)
           }
+        };
+        return safeResponse({
+          data,
+          emptyCondition: total === 0,
+          meta: { source: "recupero-contactos-search", request_id: requestId }
         });
       } finally {
         await client.end();
@@ -8504,8 +8564,16 @@ const items = result.rows.map((row) => ({
     } catch (error) {
       return json(500, {
         ok: false,
+        status: "error",
         message: "Failed to search recupero contacts",
-        error: error.message
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[recupero/contactos/search]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        duration_ms: Date.now() - startedAt
       });
     }
   }
@@ -9147,8 +9215,15 @@ const items = result.rows.map((row) => ({
   }
 
   if (method === "GET" && path.endsWith("/leads/daily-stats")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
+    let fecha = null;
+    let batchTipo = null;
     try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      const authContext = await getCurrentDbUserFromEvent(event);
+      const authUser = authContext.authUser;
+      dbUser = authContext.dbUser;
 
       let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
@@ -9163,11 +9238,11 @@ const items = result.rows.map((row) => ({
       if (roleError) return roleError;
 
       const sellerId = dbUser?.id || null;
-      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
       const hasTipo = tipo === "recupero" || tipo === "captacion";
-      const batchTipo = hasTipo ? tipo : null;
+      batchTipo = hasTipo ? tipo : null;
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
       const client = createDbClient();
@@ -9241,29 +9316,33 @@ const items = result.rows.map((row) => ({
         const contactoPct = totalGestionado > 0 ? Math.round((utiles / totalGestionado) * 100) : 0;
         const efectividadPct = utiles > 0 ? Math.round((ventasTotal / utiles) * 100) : 0;
 
-        return json(200, {
-          ok: true,
-          success: true,
-          data: {
-            total_asignados: parseInt(l.total_asignados || "0", 10),
-            nuevos: parseInt(l.nuevos || "0", 10),
-            no_contesta: noContestaTotal,
-            seguimiento: seguimientoTotal,
-            rechazos: rechazosTotal,
-            ventas: ventasTotal,
-            tocados: totalGestionado,
-            contactos_reales: utiles,
-            pct_contacto: contactoPct,
-            pct_efectividad: efectividadPct,
-            gestiones_hoy: totalGestionado,
-            ventas_hoy: ventasTotal,
-            no_contesta_hoy: noContestaTotal,
-            tipificados_seguimiento_hoy: seguimientoTotal,
-            rechazos_hoy: rechazosTotal,
-            rellamar_hoy: rellamarTotal,
-            pct_contacto_hoy: contactoPct,
-            pct_efectividad_hoy: efectividadPct
-          }
+        const totalAsignados = parseInt(l.total_asignados || "0", 10);
+        const data = {
+          total_asignados: totalAsignados,
+          nuevos: parseInt(l.nuevos || "0", 10),
+          no_contesta: noContestaTotal,
+          seguimiento: seguimientoTotal,
+          rechazos: rechazosTotal,
+          ventas: ventasTotal,
+          tocados: totalGestionado,
+          contactos_reales: utiles,
+          pct_contacto: contactoPct,
+          pct_efectividad: efectividadPct,
+          gestiones_hoy: totalGestionado,
+          ventas_hoy: ventasTotal,
+          no_contesta_hoy: noContestaTotal,
+          tipificados_seguimiento_hoy: seguimientoTotal,
+          rechazos_hoy: rechazosTotal,
+          rellamar_hoy: rellamarTotal,
+          pct_contacto_hoy: contactoPct,
+          pct_efectividad_hoy: efectividadPct
+        };
+        const emptyCondition = totalAsignados === 0 && totalGestionado === 0;
+        return safeResponse({
+          data,
+          emptyCondition,
+          message: emptyCondition ? "Sin actividad para la fecha" : undefined,
+          meta: { fecha, tipo: batchTipo || "all", source: "daily-stats", request_id: requestId }
         });
       } finally {
         await client.end();
@@ -9271,8 +9350,18 @@ const items = result.rows.map((row) => ({
     } catch (error) {
       return json(500, {
         ok: false,
+        status: "error",
         message: "Failed to load daily stats",
-        error: error.message
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[daily-stats]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        fecha,
+        tipo: batchTipo || "all",
+        duration_ms: Date.now() - startedAt
       });
     }
   }
@@ -12062,7 +12151,7 @@ const items = result.rows.map((row) => ({
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      const batchTipo = (tipo === "recupero" || tipo === "captacion") ? tipo : "";
+      const batchTipo = (tipo === "recupero" || tipo === "captacion") ? tipo : null;
       const client = createDbClient();
       await client.connect();
       try {
@@ -13116,8 +13205,15 @@ const items = result.rows.map((row) => ({
   }
 
   if (method === "GET" && path.endsWith("/api/supervisor/sellers-summary")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
+    let fecha = null;
+    let batchTipo = "";
     try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      const authContext = await getCurrentDbUserFromEvent(event);
+      const authUser = authContext.authUser;
+      dbUser = authContext.dbUser;
       let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
       let dbError = requireDbUser(event, dbUser);
@@ -13127,7 +13223,10 @@ const items = result.rows.map((row) => ({
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const tipoRaw = getQueryParam(event, "tipo");
+      const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
+      batchTipo = (tipo === "recupero" || tipo === "captacion") ? tipo : "";
       const client = createDbClient();
       await client.connect();
       try {
@@ -13143,7 +13242,12 @@ const items = result.rows.map((row) => ({
         const sellers = sellersRes.rows || [];
         const sellerIds = sellers.map((row) => row.id);
         if (!sellerIds.length) {
-          return json(200, { ok: true, fecha, items: [] });
+          return safeResponse({
+            data: { items: [] },
+            emptyCondition: true,
+            message: "No hay vendedores asignados",
+            meta: { fecha, tipo: batchTipo || "all", source: "sellers-summary", request_id: requestId }
+          });
         }
 
         const columnsInfo = await getLeadContactColumns(client);
@@ -13158,7 +13262,7 @@ const items = result.rows.map((row) => ({
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = ANY($1::uuid[])
             AND lb.estado IN ('activo', 'asignado')
-            AND ($2 = '' OR lb.tipo = $2)
+            AND ($2::text IS NULL OR lb.tipo = $2)
           GROUP BY lcs.assigned_to
           `,
           [sellerIds, batchTipo]
@@ -13176,7 +13280,7 @@ const items = result.rows.map((row) => ({
             JOIN lead_batches lb ON lb.id = lmh.batch_id
             WHERE lmh.user_id = ANY($1::uuid[])
               AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-              AND ($3 = '' OR lb.tipo = $3)
+              AND ($3::text IS NULL OR lb.tipo = $3)
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
               user_id,
@@ -13200,6 +13304,7 @@ const items = result.rows.map((row) => ({
         );
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
+        const warnings = [];
         const manualJoin = hasDptContactId
           ? `
             LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
@@ -13213,20 +13318,25 @@ const items = result.rows.map((row) => ({
             LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
           `;
 
-        const manualSalesRes = await client.query(
-          `
-          SELECT s.seller_user_id AS user_id,
-                 COUNT(*)::int AS manual_ventas
-          FROM sales s
-          ${manualJoin}
-          WHERE s.seller_user_id = ANY($1::uuid[])
-            AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-            AND ($3 = '' OR lb.tipo = $3 OR lb.id IS NULL)
-          GROUP BY s.seller_user_id
-          `,
-          [sellerIds, fecha, batchTipo]
-        );
-        const manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
+        let manualSalesMap = new Map();
+        try {
+          const manualSalesRes = await client.query(
+            `
+            SELECT s.seller_user_id AS user_id,
+                   COUNT(*)::int AS manual_ventas
+            FROM sales s
+            ${manualJoin}
+            WHERE s.seller_user_id = ANY($1::uuid[])
+              AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
+              AND ($3::text IS NULL OR lb.tipo = $3 OR lb.id IS NULL)
+            GROUP BY s.seller_user_id
+            `,
+            [sellerIds, fecha, batchTipo]
+          );
+          manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
+        } catch (error) {
+          warnings.push({ code: "MANUAL_SALES_FAILED", message: "No se pudieron calcular ventas manuales" });
+        }
 
         const items = sellers.map((seller) => {
           const daily = dailyMap.get(seller.id) || {};
@@ -13269,15 +13379,30 @@ const items = result.rows.map((row) => ({
           };
         });
 
-        return json(200, { ok: true, fecha, tipo: batchTipo || "all", items });
+        return safeResponse({
+          data: { items },
+          emptyCondition: items.length === 0,
+          warnings,
+          meta: { fecha, tipo: batchTipo || "all", source: "sellers-summary", request_id: requestId }
+        });
       } finally {
         await client.end();
       }
     } catch (error) {
       return json(500, {
         ok: false,
+        status: "error",
         message: "Failed to load sellers summary",
-        error: error.message
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[sellers-summary]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        fecha,
+        tipo: batchTipo || "all",
+        duration_ms: Date.now() - startedAt
       });
     }
   }
@@ -15065,19 +15190,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
