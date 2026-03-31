@@ -8843,10 +8843,12 @@ const items = result.rows.map((row) => ({
             estado: row.estado,
             created_at: row.created_at,
             cantidad: Number(row.cantidad || 0),
+            cantidad_datos: Number(row.cantidad || 0),
             configuracion: row.criterios,
             criterios: row.criterios,
             vendedor_asignado_id: row.seller_id || row.asignado_a || null,
-            vendedor_asignado_nombre: row.vendedor_asignado_nombre
+            vendedor_asignado_nombre: row.vendedor_asignado_nombre,
+            vendedor_asignado: row.vendedor_asignado_nombre
           })),
           total,
           page,
