@@ -2758,7 +2758,7 @@ export async function processRecuperoImportJob(jobId) {
   try {
     const jobRes = await client.query(
       `
-      SELECT id, csv_text, status, total_rows, processed_rows, updated_rows, error_rows, delimiter
+      SELECT id, csv_text, status, total_rows, processed_rows, updated_rows, error_rows, delimiter, created_by
       FROM recupero_import_jobs
       WHERE id = $1
       LIMIT 1
@@ -2768,6 +2768,7 @@ export async function processRecuperoImportJob(jobId) {
 
     if (!jobRes.rows.length) return;
     const job = jobRes.rows[0];
+    const createdBy = job.created_by || null;
     const csvText = job.csv_text || "";
     const totalRows = Math.max(0, countCsvRows(csvText) - 1);
 
@@ -3054,6 +3055,99 @@ export async function processRecuperoImportJob(jobId) {
         `,
         [contactIds, documentosChunk, motivos, chunk.map((row) => row.motivo_baja_raw), estadosRaw, estadosNorm]
       );
+
+      await client.query(
+        `
+        WITH src AS (
+          SELECT * FROM UNNEST(
+            $1::uuid[],
+            $2::text[]
+          ) AS t(contact_id, estado_norm)
+        ),
+        latest_batch AS (
+          SELECT DISTINCT ON (s.contact_id)
+            s.contact_id,
+            lbc.batch_id,
+            lbc.client_contact_id,
+            d.id AS dpt_id
+          FROM src s
+          JOIN lead_batch_contacts lbc ON lbc.client_contact_id = s.contact_id
+          JOIN lead_batches lb ON lb.id = lbc.batch_id
+          LEFT JOIN datos_para_trabajar d ON d.contact_id = lbc.client_contact_id
+          WHERE lb.tipo = 'recupero'
+          ORDER BY s.contact_id, lb.created_at DESC
+        ),
+        allowed AS (
+          SELECT * FROM src
+          WHERE estado_norm = ANY(ARRAY['no_contesta','rechazo','rellamar','seguimiento','venta','dato_erroneo'])
+        )
+        UPDATE lead_contact_status lcs
+        SET estado_venta = allowed.estado_norm,
+            intentos = GREATEST(COALESCE(lcs.intentos, 0), 1),
+            ultimo_intento_at = now(),
+            updated_at = now()
+        FROM latest_batch lb
+        JOIN allowed ON allowed.contact_id = lb.contact_id
+        WHERE lcs.batch_id = lb.batch_id
+          AND (
+            lcs.contact_id = lb.client_contact_id
+            OR (lb.dpt_id IS NOT NULL AND lcs.contact_id = lb.dpt_id)
+          )
+        `,
+        [contactIds, estadosNorm]
+      );
+
+      if (createdBy) {
+        await client.query(
+          `
+          WITH src AS (
+            SELECT * FROM UNNEST(
+              $1::uuid[],
+              $2::text[]
+            ) AS t(contact_id, estado_norm)
+          ),
+          latest_batch AS (
+            SELECT DISTINCT ON (s.contact_id)
+              s.contact_id,
+              lbc.batch_id,
+              d.id AS dpt_id
+            FROM src s
+            JOIN lead_batch_contacts lbc ON lbc.client_contact_id = s.contact_id
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
+            LEFT JOIN datos_para_trabajar d ON d.contact_id = lbc.client_contact_id
+            WHERE lb.tipo = 'recupero'
+            ORDER BY s.contact_id, lb.created_at DESC
+          ),
+          allowed AS (
+            SELECT * FROM src
+            WHERE estado_norm = ANY(ARRAY['no_contesta','rechazo','rellamar','seguimiento','venta','dato_erroneo'])
+          ),
+          target AS (
+            SELECT lb.dpt_id AS contact_id, lb.batch_id, a.estado_norm
+            FROM latest_batch lb
+            JOIN allowed a ON a.contact_id = lb.contact_id
+            WHERE lb.dpt_id IS NOT NULL
+          )
+          INSERT INTO lead_management_history (
+            contact_id,
+            batch_id,
+            user_id,
+            resultado,
+            fecha_gestion,
+            created_at
+          )
+          SELECT
+            contact_id,
+            batch_id,
+            $3::uuid,
+            estado_norm,
+            now(),
+            now()
+          FROM target
+          `,
+          [contactIds, estadosNorm, createdBy]
+        );
+      }
     }
 
     await client.query(
