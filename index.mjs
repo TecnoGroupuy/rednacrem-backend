@@ -12059,6 +12059,9 @@ const items = result.rows.map((row) => ({
       if (roleError) return roleError;
 
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const tipoRaw = getQueryParam(event, "tipo");
+      const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
+      const batchTipo = (tipo === "recupero" || tipo === "captacion") ? tipo : "";
       const client = createDbClient();
       await client.connect();
       try {
@@ -15053,7 +15056,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
 
 
 
