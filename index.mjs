@@ -6139,6 +6139,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
 }
 
 export const handler = async (event) => {
+  try {
   const preflightMethod =
     event?.requestContext?.http?.method || event?.httpMethod || "";
   const hasPreflightHeader =
@@ -15034,6 +15035,14 @@ const items = result.rows.map((row) => ({
     path,
     method
   });
+  } catch (error) {
+    console.error("Unhandled error in handler", error);
+    return json(500, {
+      ok: false,
+      message: "Unhandled error",
+      error: error?.message || String(error)
+    });
+  }
 };
 
 export const __testables = {
@@ -15056,7 +15065,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
 
 
 
