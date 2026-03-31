@@ -8974,6 +8974,7 @@ const items = result.rows.map((row) => ({
     }
   }
   if (method === "GET" && path.endsWith("/api/recupero/filtros")) {
+    const requestId = getRequestId(event);
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -8992,44 +8993,191 @@ const items = result.rows.map((row) => ({
       const client = createDbClient();
       await client.connect();
       try {
-        const [productosRes, departamentosRes, motivosRes] = await Promise.all([
+        const [
+          motivosRes,
+          estadosRes,
+          productosRes,
+          departamentosRes,
+          vendedoresRes,
+          lotesRes,
+          hasMotivoNullRes,
+          hasEstadoNullRes
+        ] = await Promise.all([
           client.query(
             `
-            SELECT DISTINCT cp.nombre_producto
+            SELECT LOWER(TRIM(val)) AS value, MAX(TRIM(val)) AS label
+            FROM (
+              SELECT cp.motivo_baja AS val
+              FROM contact_products cp
+              WHERE cp.estado = 'baja'
+                AND cp.motivo_baja IS NOT NULL
+                AND cp.motivo_baja <> ''
+              UNION ALL
+              SELECT ems.motivo_baja AS val
+              FROM external_management_status ems
+              WHERE ems.motivo_baja IS NOT NULL
+                AND ems.motivo_baja <> ''
+            ) s
+            GROUP BY LOWER(TRIM(val))
+            ORDER BY label
+            `
+          ),
+          client.query(
+            `
+            SELECT LOWER(TRIM(val)) AS value, MAX(TRIM(val)) AS label
+            FROM (
+              SELECT ems.estado_normalizado AS val
+              FROM external_management_status ems
+              WHERE ems.estado_normalizado IS NOT NULL
+                AND ems.estado_normalizado <> ''
+              UNION ALL
+              SELECT lmh.resultado AS val
+              FROM lead_management_history lmh
+              JOIN lead_batches lb ON lb.id = lmh.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lmh.resultado IS NOT NULL
+                AND lmh.resultado <> ''
+            ) s
+            GROUP BY LOWER(TRIM(val))
+            ORDER BY label
+            `
+          ),
+          client.query(
+            `
+            SELECT LOWER(TRIM(cp.nombre_producto)) AS value, MAX(TRIM(cp.nombre_producto)) AS label
             FROM contact_products cp
             JOIN contacts c ON c.id = cp.contact_id
             WHERE cp.estado = 'baja'
               AND cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'
-            ORDER BY cp.nombre_producto
+              AND cp.nombre_producto IS NOT NULL
+              AND cp.nombre_producto <> ''
+            GROUP BY LOWER(TRIM(cp.nombre_producto))
+            ORDER BY label
             `
           ),
           client.query(
             `
-            SELECT DISTINCT c.departamento
+            SELECT LOWER(TRIM(c.departamento)) AS value, MAX(TRIM(c.departamento)) AS label
             FROM contacts c
             JOIN contact_products cp ON cp.contact_id = c.id
             WHERE cp.estado = 'baja'
               AND c.departamento IS NOT NULL
-              AND c.departamento != ''
-            ORDER BY c.departamento
+              AND c.departamento <> ''
+            GROUP BY LOWER(TRIM(c.departamento))
+            ORDER BY label
             `
           ),
           client.query(
             `
-            SELECT DISTINCT motivo_baja
-            FROM external_management_status
-            WHERE motivo_baja IS NOT NULL
-              AND motivo_baja <> ''
-            ORDER BY motivo_baja
+            SELECT LOWER(TRIM(COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre))) AS value,
+                   COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS label
+            FROM lead_contact_status lcs
+            JOIN lead_batches lb ON lb.id = lcs.batch_id
+            JOIN users u ON u.id = lcs.assigned_to
+            WHERE lb.tipo = 'recupero'
+              AND lcs.assigned_to IS NOT NULL
+            GROUP BY value, label
+            ORDER BY label
+            `
+          ),
+          client.query(
+            `
+            SELECT LOWER(TRIM(nombre)) AS value, MAX(TRIM(nombre)) AS label
+            FROM lead_batches
+            WHERE tipo = 'recupero'
+              AND nombre IS NOT NULL
+              AND nombre <> ''
+            GROUP BY LOWER(TRIM(nombre))
+            ORDER BY label
+            `
+          ),
+          client.query(
+            `
+            SELECT EXISTS(
+              SELECT 1
+              FROM contact_products cp
+              WHERE cp.estado = 'baja'
+                AND (cp.motivo_baja IS NULL OR cp.motivo_baja = '')
+            ) AS has_null
+            `
+          ),
+          client.query(
+            `
+            SELECT EXISTS(
+              SELECT 1
+              FROM contact_products cp
+              JOIN contacts c ON c.id = cp.contact_id
+              LEFT JOIN external_management_status ems ON ems.documento = c.documento
+              LEFT JOIN LATERAL (
+                SELECT lmh.resultado AS ultimo_estado_gestion
+                FROM lead_management_history lmh
+                JOIN lead_batches lb ON lb.id = lmh.batch_id
+                WHERE lmh.contact_id = c.id
+                  AND lb.tipo = 'recupero'
+                ORDER BY lmh.fecha_gestion DESC
+                LIMIT 1
+              ) gestion ON true
+              WHERE cp.estado = 'baja'
+                AND COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL
+            ) AS has_null
             `
           )
         ]);
 
-        return json(200, {
-          ok: true,
-          productos: productosRes.rows.map((r) => r.nombre_producto),
-          departamentos: departamentosRes.rows.map((r) => r.departamento),
-          motivos_baja: motivosRes.rows.map((r) => r.motivo_baja)
+        const toLabel = (value, label) => {
+          if (label && label.trim()) return label;
+          return normalizeTextValue(value)
+            .replace(/_/g, " ")
+            .replace(/\b\w/g, (c) => c.toUpperCase());
+        };
+
+        const motivos = motivosRes.rows.map((row) => ({
+          value: row.value,
+          label: toLabel(row.value, row.label)
+        }));
+        if (hasMotivoNullRes.rows[0]?.has_null) {
+          motivos.unshift({ value: "sin motivo", label: "Sin motivo" });
+        }
+
+        const estados = estadosRes.rows.map((row) => ({
+          value: row.value,
+          label: toLabel(row.value, row.label)
+        }));
+        if (hasEstadoNullRes.rows[0]?.has_null) {
+          estados.unshift({ value: "sin estado", label: "Sin estado" });
+        }
+
+        const data = {
+          motivo_baja: motivos,
+          ultimo_estado: estados,
+          producto: productosRes.rows.map((row) => ({
+            value: row.value,
+            label: toLabel(row.value, row.label)
+          })),
+          departamento: departamentosRes.rows.map((row) => ({
+            value: row.value,
+            label: toLabel(row.value, row.label)
+          })),
+          vendedor_asignado: vendedoresRes.rows.map((row) => ({
+            value: row.value,
+            label: toLabel(row.value, row.label)
+          })),
+          lote: lotesRes.rows.map((row) => ({
+            value: row.value,
+            label: toLabel(row.value, row.label)
+          }))
+        };
+
+        return safeResponse({
+          data,
+          emptyCondition:
+            data.motivo_baja.length === 0 &&
+            data.ultimo_estado.length === 0 &&
+            data.producto.length === 0 &&
+            data.departamento.length === 0 &&
+            data.vendedor_asignado.length === 0 &&
+            data.lote.length === 0,
+          meta: { source: "recupero-filtros", request_id: requestId }
         });
       } finally {
         await client.end();
@@ -9037,8 +9185,10 @@ const items = result.rows.map((row) => ({
     } catch (error) {
       return json(500, {
         ok: false,
+        status: "error",
         message: "Failed to load recupero filters",
-        error: error.message
+        error: error.message,
+        meta: { request_id: requestId }
       });
     }
   }
