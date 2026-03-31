@@ -580,11 +580,31 @@ function hashPayload(payload) {
 
 function countFilterRules(node) {
   if (!node || typeof node !== "object") return 0;
+  if (!isAdvancedFilterPayload(node)) return 0;
   if (Array.isArray(node.rules)) {
     return node.rules.reduce((acc, rule) => acc + countFilterRules(rule), 0);
   }
   if (node.type === "rule" || node.field) return 1;
   return 0;
+}
+
+function isAdvancedFilterPayload(filters) {
+  if (!filters || typeof filters !== "object") return false;
+  return Array.isArray(filters.rules) || Boolean(filters.combinator) || filters.type === "group";
+}
+
+function hasSimpleFilters(filters) {
+  if (!filters || typeof filters !== "object") return false;
+  if (isAdvancedFilterPayload(filters)) return false;
+  const entries = Object.entries(filters);
+  return entries.some(([key, value]) => {
+    if (value === null || value === undefined) return false;
+    if (Array.isArray(value)) return value.filter((v) => String(v).trim() !== "").length > 0;
+    if (typeof value === "number") return !Number.isNaN(value);
+    if (typeof value === "string") return value.trim() !== "";
+    if (typeof value === "object") return Object.values(value).some((v) => String(v || "").trim() !== "");
+    return false;
+  });
 }
 
 function isEmptySearchPayload(payload) {
@@ -595,7 +615,8 @@ function isEmptySearchPayload(payload) {
   const departamento = String(payload.departamento || "").trim();
   const motivoBaja = String(payload.motivo_baja || "").trim();
   const rulesCount = countFilterRules(payload.filters);
-  return !search && !tab && !producto && !departamento && !motivoBaja && rulesCount === 0;
+  const simpleFilters = hasSimpleFilters(payload.filters);
+  return !search && !tab && !producto && !departamento && !motivoBaja && rulesCount === 0 && !simpleFilters;
 }
 
 const RECUPERO_FILTER_FIELD_TYPES = {
@@ -624,6 +645,9 @@ const RECUPERO_FILTER_OPERATORS = {
 
 function validateFilterTree(node) {
   if (!node) return { valid: true };
+  if (!isAdvancedFilterPayload(node)) {
+    return { valid: true };
+  }
   if (Array.isArray(node.rules)) {
     for (const child of node.rules) {
       const result = validateFilterTree(child);
@@ -641,6 +665,91 @@ function validateFilterTree(node) {
   if (!type) return { valid: false, message: "Campo de filtro invalido" };
   const allowed = RECUPERO_FILTER_OPERATORS[type] || [];
   if (!allowed.includes(operator)) return { valid: false, message: "Operador de filtro invalido" };
+  return { valid: true };
+}
+
+function normalizeTextValue(value) {
+  return String(value || "").trim();
+}
+
+function normalizeLowerValue(value) {
+  return normalizeTextValue(value).toLowerCase();
+}
+
+function normalizeArrayValue(value, mapper = normalizeTextValue) {
+  const list = Array.isArray(value) ? value : [value];
+  return list.map((v) => mapper(v)).filter((v) => v !== "");
+}
+
+function normalizeEstadoValue(value) {
+  const raw = normalizeLowerValue(value);
+  if (!raw) return "";
+  if (raw.includes("no contesta")) return "no_contesta";
+  if (raw.includes("rechazo")) return "rechazo";
+  if (raw.includes("rellamar")) return "rellamar";
+  if (raw.includes("seguimiento")) return "seguimiento";
+  if (raw.includes("venta")) return "venta";
+  if (raw.includes("dato")) return "dato_erroneo";
+  if (raw.includes("alta")) return "alta";
+  return raw.replace(/\s+/g, "_");
+}
+
+const RECUPERO_SIMPLE_FILTER_FIELDS = new Set([
+  "contacto",
+  "documento",
+  "telefono",
+  "edad_min",
+  "edad_max",
+  "fecha_baja_desde",
+  "fecha_baja_hasta",
+  "motivo_baja",
+  "ultimo_estado",
+  "producto",
+  "departamento",
+  "vendedor_asignado",
+  "precio_min",
+  "precio_max",
+  "lote"
+]);
+
+function validateSimpleFilters(filters) {
+  if (!filters || typeof filters !== "object") return { valid: true };
+  if (isAdvancedFilterPayload(filters)) return { valid: true };
+
+  const unknown = Object.keys(filters).filter((key) => !RECUPERO_SIMPLE_FILTER_FIELDS.has(key));
+  if (unknown.length) {
+    return { valid: false, message: "Campo de filtro no soportado" };
+  }
+
+  const edadMin = filters.edad_min !== undefined && filters.edad_min !== null ? Number(filters.edad_min) : null;
+  const edadMax = filters.edad_max !== undefined && filters.edad_max !== null ? Number(filters.edad_max) : null;
+  if ((edadMin !== null && Number.isNaN(edadMin)) || (edadMax !== null && Number.isNaN(edadMax))) {
+    return { valid: false, message: "Rango de edad invalido" };
+  }
+  if (edadMin !== null && edadMax !== null && edadMin > edadMax) {
+    return { valid: false, message: "Rango de edad invalido" };
+  }
+
+  const precioMin = filters.precio_min !== undefined && filters.precio_min !== null ? Number(filters.precio_min) : null;
+  const precioMax = filters.precio_max !== undefined && filters.precio_max !== null ? Number(filters.precio_max) : null;
+  if ((precioMin !== null && Number.isNaN(precioMin)) || (precioMax !== null && Number.isNaN(precioMax))) {
+    return { valid: false, message: "Rango de precio invalido" };
+  }
+  if (precioMin !== null && precioMax !== null && precioMin > precioMax) {
+    return { valid: false, message: "Rango de precio invalido" };
+  }
+
+  const fechaDesde = normalizeTextValue(filters.fecha_baja_desde);
+  const fechaHasta = normalizeTextValue(filters.fecha_baja_hasta);
+  const desdeTs = fechaDesde ? Date.parse(fechaDesde) : null;
+  const hastaTs = fechaHasta ? Date.parse(fechaHasta) : null;
+  if ((fechaDesde && Number.isNaN(desdeTs)) || (fechaHasta && Number.isNaN(hastaTs))) {
+    return { valid: false, message: "Rango de fecha invalido" };
+  }
+  if (desdeTs !== null && hastaTs !== null && desdeTs > hastaTs) {
+    return { valid: false, message: "Rango de fecha invalido" };
+  }
+
   return { valid: true };
 }
 
@@ -715,6 +824,151 @@ async function fetchRecuperoContactos({
     } else {
       conditions.push(`COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) = $${idx}`);
       values.push(motivoBaja);
+      idx += 1;
+    }
+  }
+
+  const simpleFilters = !isAdvancedFilterPayload(filters) ? filters : null;
+  if (simpleFilters) {
+    const contactoVal = normalizeTextValue(simpleFilters.contacto);
+    if (contactoVal) {
+      conditions.push(`COALESCE(NULLIF(TRIM(CONCAT(c.nombre, ' ', c.apellido)), ''), c.nombre) ILIKE $${idx}`);
+      values.push(`%${contactoVal}%`);
+      idx += 1;
+    }
+
+    const documentoVal = normalizeTextValue(simpleFilters.documento);
+    if (documentoVal) {
+      conditions.push(`c.documento ILIKE $${idx}`);
+      values.push(`%${documentoVal}%`);
+      idx += 1;
+    }
+
+    const telefonoVal = normalizeTextValue(simpleFilters.telefono);
+    if (telefonoVal) {
+      const telefonoDigits = normalizePhoneDigits(telefonoVal);
+      if (telefonoDigits) {
+        const telefonoExpr = buildNormalizedPhoneSql("c.telefono");
+        const celularExpr = buildNormalizedPhoneSql("c.celular");
+        conditions.push(`(${telefonoExpr} ILIKE $${idx} OR ${celularExpr} ILIKE $${idx})`);
+        values.push(`%${telefonoDigits}%`);
+      } else {
+        conditions.push(`(c.telefono ILIKE $${idx} OR c.celular ILIKE $${idx})`);
+        values.push(`%${telefonoVal}%`);
+      }
+      idx += 1;
+    }
+
+    const edadExpr = "DATE_PART('year', AGE(c.fecha_nacimiento))";
+    const edadMin = simpleFilters.edad_min !== undefined && simpleFilters.edad_min !== null
+      ? Number(simpleFilters.edad_min)
+      : null;
+    const edadMax = simpleFilters.edad_max !== undefined && simpleFilters.edad_max !== null
+      ? Number(simpleFilters.edad_max)
+      : null;
+    if (edadMin !== null && !Number.isNaN(edadMin)) {
+      conditions.push(`${edadExpr} >= $${idx}`);
+      values.push(edadMin);
+      idx += 1;
+    }
+    if (edadMax !== null && !Number.isNaN(edadMax)) {
+      conditions.push(`${edadExpr} <= $${idx}`);
+      values.push(edadMax);
+      idx += 1;
+    }
+
+    const fechaDesde = normalizeTextValue(simpleFilters.fecha_baja_desde);
+    const fechaHasta = normalizeTextValue(simpleFilters.fecha_baja_hasta);
+    if (fechaDesde && fechaHasta) {
+      conditions.push(`cp.fecha_baja BETWEEN $${idx}::date AND $${idx + 1}::date`);
+      values.push(fechaDesde, fechaHasta);
+      idx += 2;
+    } else if (fechaDesde) {
+      conditions.push(`cp.fecha_baja >= $${idx}::date`);
+      values.push(fechaDesde);
+      idx += 1;
+    } else if (fechaHasta) {
+      conditions.push(`cp.fecha_baja <= $${idx}::date`);
+      values.push(fechaHasta);
+      idx += 1;
+    }
+
+    const precioMin = simpleFilters.precio_min !== undefined && simpleFilters.precio_min !== null
+      ? Number(simpleFilters.precio_min)
+      : null;
+    const precioMax = simpleFilters.precio_max !== undefined && simpleFilters.precio_max !== null
+      ? Number(simpleFilters.precio_max)
+      : null;
+    if (precioMin !== null && !Number.isNaN(precioMin)) {
+      conditions.push(`cp.precio >= $${idx}`);
+      values.push(precioMin);
+      idx += 1;
+    }
+    if (precioMax !== null && !Number.isNaN(precioMax)) {
+      conditions.push(`cp.precio <= $${idx}`);
+      values.push(precioMax);
+      idx += 1;
+    }
+
+    const motivosRaw = normalizeArrayValue(simpleFilters.motivo_baja, normalizeLowerValue);
+    if (motivosRaw.length) {
+      const sinMotivo = motivosRaw.some((v) => ["sin motivo", "sin_motivo", "sin-motivo"].includes(v));
+      const motivos = motivosRaw.filter((v) => !["sin motivo", "sin_motivo", "sin-motivo"].includes(v));
+      if (sinMotivo && motivos.length) {
+        conditions.push(`(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL OR LOWER(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[]))`);
+        values.push(motivos);
+        idx += 1;
+      } else if (sinMotivo) {
+        conditions.push(`COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL`);
+      } else if (motivos.length) {
+        conditions.push(`LOWER(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[])`);
+        values.push(motivos);
+        idx += 1;
+      }
+    }
+
+    const estadosRaw = normalizeArrayValue(simpleFilters.ultimo_estado, normalizeEstadoValue);
+    if (estadosRaw.length) {
+      const sinEstado = estadosRaw.some((v) => ["sin estado", "sin_estado", "sin-estado"].includes(v));
+      const estados = estadosRaw.filter((v) => !["sin estado", "sin_estado", "sin-estado"].includes(v));
+      if (sinEstado && estados.length) {
+        conditions.push(`(COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL OR LOWER(COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)) = ANY($${idx}::text[]))`);
+        values.push(estados);
+        idx += 1;
+      } else if (sinEstado) {
+        conditions.push(`COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL`);
+      } else if (estados.length) {
+        conditions.push(`LOWER(COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)) = ANY($${idx}::text[])`);
+        values.push(estados);
+        idx += 1;
+      }
+    }
+
+    const productos = normalizeArrayValue(simpleFilters.producto, normalizeLowerValue);
+    if (productos.length) {
+      conditions.push(`LOWER(cp.nombre_producto) = ANY($${idx}::text[])`);
+      values.push(productos);
+      idx += 1;
+    }
+
+    const departamentos = normalizeArrayValue(simpleFilters.departamento, normalizeLowerValue);
+    if (departamentos.length) {
+      conditions.push(`LOWER(c.departamento) = ANY($${idx}::text[])`);
+      values.push(departamentos);
+      idx += 1;
+    }
+
+    const vendedores = normalizeArrayValue(simpleFilters.vendedor_asignado, normalizeLowerValue);
+    if (vendedores.length) {
+      conditions.push(`LOWER(lote.vendedor_asignado_nombre) = ANY($${idx}::text[])`);
+      values.push(vendedores);
+      idx += 1;
+    }
+
+    const lotes = normalizeArrayValue(simpleFilters.lote, normalizeLowerValue);
+    if (lotes.length) {
+      conditions.push(`LOWER(lote.nombre_lote) = ANY($${idx}::text[])`);
+      values.push(lotes);
       idx += 1;
     }
   }
@@ -845,7 +1099,8 @@ async function fetchRecuperoContactos({
     return buildRuleClause(node);
   };
 
-  const advancedClause = buildFilterClause(filters);
+  const advancedFilters = isAdvancedFilterPayload(filters) ? filters : null;
+  const advancedClause = buildFilterClause(advancedFilters);
   if (advancedClause) conditions.push(advancedClause);
 
   const baseConditions = [...conditions];
@@ -984,6 +1239,24 @@ async function fetchRecuperoContactos({
       ON ems.documento = c.documento
     LEFT JOIN LATERAL (
       SELECT
+        lbc.batch_id,
+        lb.nombre AS nombre_lote,
+        lcs.assigned_to AS vendedor_asignado_id,
+        COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+      FROM lead_batch_contacts lbc
+      JOIN lead_batches lb ON lb.id = lbc.batch_id
+      LEFT JOIN lead_contact_status lcs
+        ON lcs.contact_id = lbc.client_contact_id
+       AND lcs.batch_id = lbc.batch_id
+      LEFT JOIN users u ON u.id = lcs.assigned_to
+      WHERE lbc.client_contact_id = c.id
+        AND lb.tipo = 'recupero'
+        AND lb.estado IN ('activo', 'asignado')
+      ORDER BY lb.created_at DESC
+      LIMIT 1
+    ) lote ON true
+    LEFT JOIN LATERAL (
+      SELECT
         lmh.resultado AS ultimo_estado_gestion,
         (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
       FROM lead_management_history lmh
@@ -1041,6 +1314,24 @@ async function fetchRecuperoContactos({
     JOIN contact_products cp ON cp.contact_id = c.id
     LEFT JOIN external_management_status ems
       ON ems.documento = c.documento
+    LEFT JOIN LATERAL (
+      SELECT
+        lbc.batch_id,
+        lb.nombre AS nombre_lote,
+        lcs.assigned_to AS vendedor_asignado_id,
+        COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+      FROM lead_batch_contacts lbc
+      JOIN lead_batches lb ON lb.id = lbc.batch_id
+      LEFT JOIN lead_contact_status lcs
+        ON lcs.contact_id = lbc.client_contact_id
+       AND lcs.batch_id = lbc.batch_id
+      LEFT JOIN users u ON u.id = lcs.assigned_to
+      WHERE lbc.client_contact_id = c.id
+        AND lb.tipo = 'recupero'
+        AND lb.estado IN ('activo', 'asignado')
+      ORDER BY lb.created_at DESC
+      LIMIT 1
+    ) lote ON true
     LEFT JOIN LATERAL (
       SELECT
         lmh.resultado AS ultimo_estado_gestion,
@@ -8356,6 +8647,15 @@ const items = result.rows.map((row) => ({
           ok: false,
           status: "error",
           message: validation.message || "Filtros invalidos",
+          meta: { request_id: requestId }
+        });
+      }
+      const simpleValidation = validateSimpleFilters(filters);
+      if (!simpleValidation.valid) {
+        return json(400, {
+          ok: false,
+          status: "error",
+          message: simpleValidation.message || "Filtros invalidos",
           meta: { request_id: requestId }
         });
       }
