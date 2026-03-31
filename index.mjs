@@ -13142,6 +13142,10 @@ const items = result.rows.map((row) => ({
           return json(200, { ok: true, fecha, items: [] });
         }
 
+        const columnsInfo = await getLeadContactColumns(client);
+        const dCols = columnsInfo?.d || new Set();
+        const hasDptContactId = dCols.has("contact_id");
+
         const assignedRes = await client.query(
           `
           SELECT lcs.assigned_to AS user_id,
@@ -13192,14 +13196,25 @@ const items = result.rows.map((row) => ({
         );
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
+        const manualJoin = hasDptContactId
+          ? `
+            LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
+            LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
+            LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+          `
+          : `
+            LEFT JOIN contacts c ON c.id = s.contact_id
+            LEFT JOIN datos_para_trabajar d ON d.documento = c.documento
+            LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
+            LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+          `;
+
         const manualSalesRes = await client.query(
           `
           SELECT s.seller_user_id AS user_id,
                  COUNT(*)::int AS manual_ventas
           FROM sales s
-          LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
-          LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
-          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+          ${manualJoin}
           WHERE s.seller_user_id = ANY($1::uuid[])
             AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
             AND ($3 = '' OR lb.tipo = $3 OR lb.id IS NULL)
@@ -15038,7 +15053,6 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
 
 
 
