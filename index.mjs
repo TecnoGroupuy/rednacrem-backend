@@ -8090,7 +8090,7 @@ const items = result.rows.map((row) => ({
         const contactsRes = await client.query(
           `
           SELECT id, nombre, apellido, documento, fecha_nacimiento, telefono, celular,
-                 direccion, departamento, localidad, email
+                 direccion, departamento, email
           FROM contacts
           WHERE id = ANY($1::uuid[])
           `,
@@ -8142,7 +8142,7 @@ const items = result.rows.map((row) => ({
             pushCol("celular", contact.celular);
             pushCol("direccion", contact.direccion);
             pushCol("departamento", contact.departamento);
-            if (hasLocalidadCol) pushCol("localidad", contact.localidad);
+            if (hasLocalidadCol) pushCol("localidad", null);
             if (hasCorreoCol) pushCol("correo_electronico", contact.email);
             if (hasOrigenCol) pushCol("origen_dato", "recupero");
             if (hasEstadoCol) pushCol("estado", "nuevo");
