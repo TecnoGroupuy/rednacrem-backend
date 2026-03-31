@@ -5325,6 +5325,7 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
         rp.plan,
         rp.precio,
         rp.estado AS producto_estado,
+        rp.fecha_alta,
         rp.cuotas_pagas,
         rp.carencia_cuotas
       FROM summary s
