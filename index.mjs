@@ -8776,6 +8776,108 @@ const items = result.rows.map((row) => ({
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/recupero/lotes")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
+    try {
+      const { authUser, dbUser: currentUser } = await getCurrentDbUserFromEvent(event);
+      dbUser = currentUser;
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const offset = (page - 1) * limit;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const [itemsRes, totalRes] = await Promise.all([
+          client.query(
+            `
+            SELECT
+              lb.id,
+              lb.nombre,
+              lb.estado,
+              lb.created_at,
+              lb.criterios,
+              lb.seller_id,
+              lb.asignado_a,
+              COUNT(lbc.id) AS cantidad,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+            FROM lead_batches lb
+            LEFT JOIN lead_batch_contacts lbc ON lbc.batch_id = lb.id
+            LEFT JOIN users u ON u.id = COALESCE(lb.seller_id, lb.asignado_a)
+            WHERE lb.tipo = 'recupero'
+            GROUP BY lb.id, u.nombre, u.apellido, u.id
+            ORDER BY lb.created_at DESC
+            LIMIT $1 OFFSET $2
+            `,
+            [limit, offset]
+          ),
+          client.query(
+            `
+            SELECT COUNT(*) AS total
+            FROM lead_batches
+            WHERE tipo = 'recupero'
+            `
+          )
+        ]);
+
+        const total = Number(totalRes.rows[0]?.total || 0);
+        const data = {
+          items: itemsRes.rows.map((row) => ({
+            id: row.id,
+            nombre: row.nombre,
+            estado: row.estado,
+            created_at: row.created_at,
+            cantidad: Number(row.cantidad || 0),
+            configuracion: row.criterios,
+            criterios: row.criterios,
+            vendedor_asignado_id: row.seller_id || row.asignado_a || null,
+            vendedor_asignado_nombre: row.vendedor_asignado_nombre
+          })),
+          total,
+          page,
+          limit
+        };
+
+        return safeResponse({
+          data,
+          emptyCondition: total === 0,
+          meta: { source: "recupero-lotes", request_id: requestId }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        status: "error",
+        message: "Failed to load recupero lots",
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[recupero/lotes]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        duration_ms: Date.now() - startedAt
+      });
+    }
+  }
+
   if (method === "POST" && path.endsWith("/api/recupero/lotes")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
