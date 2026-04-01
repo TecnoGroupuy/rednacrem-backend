@@ -5259,11 +5259,21 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
     const values = [];
 
     if (searchText) {
-      values.push(`%${searchText}%`);
-      const idx = values.length;
-      whereParts.push(
-        `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.telefono, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx})`
-      );
+      const digits = searchText.replace(/[^\d]/g, "");
+      if (digits) {
+        values.push(`%${digits}%`);
+        const idx = values.length;
+        const phoneClause = `(REPLACE(REPLACE(REPLACE(coalesce(s.telefono, ''), ' ', ''), '-', ''), '+', '') ILIKE $${idx} OR REPLACE(REPLACE(REPLACE(coalesce(s.celular, ''), ' ', ''), '-', ''), '+', '') ILIKE $${idx})`;
+        whereParts.push(
+          `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx} OR ${phoneClause})`
+        );
+      } else {
+        values.push(`%${searchText}%`);
+        const idx = values.length;
+        whereParts.push(
+          `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.telefono, '')) LIKE $${idx} OR lower(coalesce(s.celular, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx})`
+        );
+      }
     }
 
     const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
