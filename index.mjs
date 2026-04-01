@@ -9955,10 +9955,14 @@ const items = result.rows.map((row) => ({
           `
           SELECT COUNT(*)::int AS manual_sales
           FROM sales s
+          LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
+          LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
+          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
           WHERE s.seller_user_id = $1
             AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
+            AND ($3::text IS NULL OR lb.tipo = $3)
           `,
-          [sellerId, fecha]
+          [sellerId, fecha, batchTipo]
         );
 
         const ventasLead = parseInt(s.ventas || "0", 10);
@@ -13989,7 +13993,7 @@ const items = result.rows.map((row) => ({
             ${manualJoin}
             WHERE s.seller_user_id = ANY($1::uuid[])
               AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-              AND ($3::text IS NULL OR lb.tipo = $3 OR lb.id IS NULL)
+              AND ($3::text IS NULL OR lb.tipo = $3)
             GROUP BY s.seller_user_id
             `,
             [sellerIds, fecha, batchTipo]
