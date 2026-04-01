@@ -986,7 +986,7 @@ async function fetchRecuperoContactos({
     lote: { expr: "lote.nombre_lote", type: "text" },
     vendedor_asignado: { expr: "lote.vendedor_asignado_nombre", type: "text" },
     ultimo_estado: { expr: "COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)", type: "text" },
-    ultima_gestion: { expr: "gestion.fecha_ultima_gestion", type: "date" }
+    ultima_gestion: { expr: "COALESCE(gestion.fecha_ultima_gestion, gestion.fecha_ultima_gestion_ts)", type: "date" }
   };
 
   const buildRuleClause = (rule) => {
@@ -1188,8 +1188,10 @@ async function fetchRecuperoContactos({
       lote.nombre_lote,
       lote.vendedor_asignado_id,
       lote.vendedor_asignado_nombre,
+      lote.vendedor_asignado_nombre AS vendedor_asignado,
       COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) AS ultimo_estado_gestion,
-      gestion.fecha_ultima_gestion
+      gestion.fecha_ultima_gestion,
+      COALESCE(gestion.fecha_ultima_gestion, gestion.fecha_ultima_gestion_ts) AS ultima_gestion
     FROM contacts c
     JOIN contact_products cp ON cp.contact_id = c.id
     LEFT JOIN external_management_status ems
@@ -1215,7 +1217,8 @@ async function fetchRecuperoContactos({
     LEFT JOIN LATERAL (
       SELECT
         lmh.resultado AS ultimo_estado_gestion,
-        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
+        lmh.created_at AS fecha_ultima_gestion_ts
       FROM lead_management_history lmh
       JOIN lead_batches lb ON lb.id = lmh.batch_id
       WHERE lmh.contact_id = c.id
@@ -1258,7 +1261,8 @@ async function fetchRecuperoContactos({
     LEFT JOIN LATERAL (
       SELECT
         lmh.resultado AS ultimo_estado_gestion,
-        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
+        lmh.created_at AS fecha_ultima_gestion_ts
       FROM lead_management_history lmh
       JOIN lead_batches lb ON lb.id = lmh.batch_id
       WHERE lmh.contact_id = c.id
@@ -1335,7 +1339,8 @@ async function fetchRecuperoContactos({
     LEFT JOIN LATERAL (
       SELECT
         lmh.resultado AS ultimo_estado_gestion,
-        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion
+        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
+        lmh.created_at AS fecha_ultima_gestion_ts
       FROM lead_management_history lmh
       JOIN lead_batches lb ON lb.id = lmh.batch_id
       WHERE lmh.contact_id = c.id
