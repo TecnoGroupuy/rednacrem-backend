@@ -778,13 +778,13 @@ async function fetchRecuperoContactos({
   const offset = (page - 1) * limit;
   const conditions = [
     "cp.estado = 'baja'",
-    "c.telefono IS NOT NULL",
-    "c.telefono != ''",
-    `c.telefono NOT IN (
-      SELECT c2.telefono FROM contacts c2
+    "(COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) IS NOT NULL)",
+    `COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) NOT IN (
+      SELECT COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, ''))
+      FROM contacts c2
       JOIN contact_products cp2 ON cp2.contact_id = c2.id
       WHERE cp2.estado = 'alta'
-        AND c2.telefono IS NOT NULL AND c2.telefono != ''
+        AND COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, '')) IS NOT NULL
     )`,
     "cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'"
   ];
