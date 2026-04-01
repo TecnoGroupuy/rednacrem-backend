@@ -1131,9 +1131,10 @@ async function fetchRecuperoContactos({
       conditions.push(`
         EXISTS (
           SELECT 1
-          FROM lead_contact_status lcs
+          FROM datos_para_trabajar d2
+          JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
           JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE lcs.contact_id = c.id
+          WHERE d2.contact_id = c.id
             AND lb.tipo = 'recupero'
             AND lcs.assigned_to IS NOT NULL
         )
@@ -1143,9 +1144,10 @@ async function fetchRecuperoContactos({
         (
           EXISTS (
             SELECT 1
-            FROM lead_contact_status lcs
+            FROM datos_para_trabajar d2
+            JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
             JOIN lead_batches lb ON lb.id = lcs.batch_id
-            WHERE lcs.contact_id = c.id
+            WHERE d2.contact_id = c.id
               AND lb.tipo = 'recupero'
               AND lcs.intentos > 0
           )
@@ -1196,6 +1198,8 @@ async function fetchRecuperoContactos({
     JOIN contact_products cp ON cp.contact_id = c.id
     LEFT JOIN external_management_status ems
       ON ems.documento = c.documento
+    LEFT JOIN datos_para_trabajar d
+      ON d.contact_id = c.id
     LEFT JOIN LATERAL (
       SELECT
         lbc.batch_id,
@@ -1205,7 +1209,7 @@ async function fetchRecuperoContactos({
       FROM lead_batch_contacts lbc
       JOIN lead_batches lb ON lb.id = lbc.batch_id
       LEFT JOIN lead_contact_status lcs
-        ON lcs.contact_id = lbc.client_contact_id
+        ON lcs.contact_id = d.id
        AND lcs.batch_id = lbc.batch_id
       LEFT JOIN users u ON u.id = lcs.assigned_to
       WHERE lbc.client_contact_id = c.id
@@ -1221,7 +1225,7 @@ async function fetchRecuperoContactos({
         lmh.created_at AS fecha_ultima_gestion_ts
       FROM lead_management_history lmh
       JOIN lead_batches lb ON lb.id = lmh.batch_id
-      WHERE lmh.contact_id = c.id
+      WHERE lmh.contact_id = d.id
         AND lb.tipo = 'recupero'
       ORDER BY lmh.fecha_gestion DESC
       LIMIT 1
@@ -1240,6 +1244,8 @@ async function fetchRecuperoContactos({
     JOIN contact_products cp ON cp.contact_id = c.id
     LEFT JOIN external_management_status ems
       ON ems.documento = c.documento
+    LEFT JOIN datos_para_trabajar d
+      ON d.contact_id = c.id
     LEFT JOIN LATERAL (
       SELECT
         lbc.batch_id,
@@ -1249,7 +1255,7 @@ async function fetchRecuperoContactos({
       FROM lead_batch_contacts lbc
       JOIN lead_batches lb ON lb.id = lbc.batch_id
       LEFT JOIN lead_contact_status lcs
-        ON lcs.contact_id = lbc.client_contact_id
+        ON lcs.contact_id = d.id
        AND lcs.batch_id = lbc.batch_id
       LEFT JOIN users u ON u.id = lcs.assigned_to
       WHERE lbc.client_contact_id = c.id
@@ -1265,7 +1271,7 @@ async function fetchRecuperoContactos({
         lmh.created_at AS fecha_ultima_gestion_ts
       FROM lead_management_history lmh
       JOIN lead_batches lb ON lb.id = lmh.batch_id
-      WHERE lmh.contact_id = c.id
+      WHERE lmh.contact_id = d.id
         AND lb.tipo = 'recupero'
       ORDER BY lmh.fecha_gestion DESC
       LIMIT 1
@@ -1295,18 +1301,20 @@ async function fetchRecuperoContactos({
       )) AS en_lote,
       COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
         SELECT 1
-        FROM lead_contact_status lcs
+        FROM datos_para_trabajar d2
+        JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
         JOIN lead_batches lb ON lb.id = lcs.batch_id
-        WHERE lcs.contact_id = c.id
+        WHERE d2.contact_id = c.id
           AND lb.tipo = 'recupero'
           AND lcs.assigned_to IS NOT NULL
       )) AS asignados,
       COUNT(DISTINCT c.telefono) FILTER (WHERE (
         EXISTS (
           SELECT 1
-          FROM lead_contact_status lcs
+          FROM datos_para_trabajar d2
+          JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
           JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE lcs.contact_id = c.id
+          WHERE d2.contact_id = c.id
             AND lb.tipo = 'recupero'
             AND lcs.intentos > 0
         )
@@ -1318,6 +1326,8 @@ async function fetchRecuperoContactos({
     JOIN contact_products cp ON cp.contact_id = c.id
     LEFT JOIN external_management_status ems
       ON ems.documento = c.documento
+    LEFT JOIN datos_para_trabajar d
+      ON d.contact_id = c.id
     LEFT JOIN LATERAL (
       SELECT
         lbc.batch_id,
@@ -1327,7 +1337,7 @@ async function fetchRecuperoContactos({
       FROM lead_batch_contacts lbc
       JOIN lead_batches lb ON lb.id = lbc.batch_id
       LEFT JOIN lead_contact_status lcs
-        ON lcs.contact_id = lbc.client_contact_id
+        ON lcs.contact_id = d.id
        AND lcs.batch_id = lbc.batch_id
       LEFT JOIN users u ON u.id = lcs.assigned_to
       WHERE lbc.client_contact_id = c.id
@@ -1343,7 +1353,7 @@ async function fetchRecuperoContactos({
         lmh.created_at AS fecha_ultima_gestion_ts
       FROM lead_management_history lmh
       JOIN lead_batches lb ON lb.id = lmh.batch_id
-      WHERE lmh.contact_id = c.id
+      WHERE lmh.contact_id = d.id
         AND lb.tipo = 'recupero'
       ORDER BY lmh.fecha_gestion DESC
       LIMIT 1
