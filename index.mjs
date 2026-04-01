@@ -7053,6 +7053,7 @@ export const handler = async (event) => {
   const clientDocumentSentMatch = path.match(/\/clients\/([^/]+)\/document\/sent$/);
   const productMatch = path.match(/\/products\/([^/]+)$/);
   const clientDetailMatch = path.match(/\/clients\/([^/]+)$/);
+  const contactDetailMatch = path.match(/\/contacts\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
@@ -7507,6 +7508,164 @@ export const handler = async (event) => {
         message: "Failed to create contact",
         error: error.message
       });
+    }
+  }
+
+  if (method === "PUT" && (contactDetailMatch || clientDetailMatch)) {
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const contactId = (contactDetailMatch || clientDetailMatch)[1];
+      const contactPayload = body?.contact && typeof body.contact === "object"
+        ? body.contact
+        : body;
+
+      const hasField = (key) => Object.prototype.hasOwnProperty.call(contactPayload || {}, key);
+      const getField = (key, normalizeFn) => (hasField(key) ? normalizeFn(contactPayload?.[key]) : undefined);
+
+      const nombre = getField("nombre", normalizeText);
+      const apellido = getField("apellido", normalizeText);
+      const documento = getField("documento", normalizeText);
+      const telefono = getField("telefono", (v) => normalizeText(v) || null);
+      const celular = getField("celular", (v) => normalizeText(v) || null);
+      const direccion = getField("direccion", (v) => normalizeText(v) || null);
+      const departamento = getField("departamento", (v) => normalizeText(v) || null);
+      const pais = getField("pais", (v) => normalizeText(v) || null);
+      const status = getField("estado", (v) => normalizeText(v) || null) ??
+        getField("status", (v) => normalizeText(v) || null);
+
+      let email = undefined;
+      if (hasField("correo_electronico") || hasField("email")) {
+        const correo = normalizeEmail(contactPayload?.correo_electronico || contactPayload?.email);
+        email = correo || null;
+      }
+
+      let fechaNacimiento = undefined;
+      if (hasField("fecha_nacimiento") || hasField("fechaNacimiento")) {
+        fechaNacimiento = parseDate(contactPayload?.fecha_nacimiento || contactPayload?.fechaNacimiento || null);
+      }
+
+      const updates = [];
+      const values = [];
+      let idx = 1;
+      const push = (col, val) => {
+        if (val === undefined) return;
+        updates.push(`${col} = $${idx}`);
+        values.push(val);
+        idx += 1;
+      };
+
+      push("nombre", nombre);
+      push("apellido", apellido);
+      push("documento", documento);
+      push("fecha_nacimiento", fechaNacimiento);
+      push("telefono", telefono);
+      push("celular", celular);
+      push("email", email);
+      push("direccion", direccion);
+      push("departamento", departamento);
+      push("pais", pais);
+      push("status", status);
+
+      if (!updates.length) {
+        return json(400, { ok: false, message: "No fields to update" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const contactRes = await client.query(
+          `
+          UPDATE contacts
+          SET ${updates.join(", ")}, updated_at = now()
+          WHERE id = $${idx}
+          RETURNING *
+          `,
+          [...values, contactId]
+        );
+
+        const updated = contactRes.rows[0];
+        if (!updated) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Contact not found" });
+        }
+
+        const leadCols = await getLeadContactColumns(client);
+        const dCols = leadCols?.d || new Set();
+        const dUpdates = [];
+        const dValues = [];
+        let dIdx = 1;
+        const dPush = (col, val) => {
+          if (val === undefined) return;
+          if (!dCols.has(col)) return;
+          dUpdates.push(`${col} = $${dIdx}`);
+          dValues.push(val);
+          dIdx += 1;
+        };
+
+        dPush("nombre", nombre);
+        dPush("apellido", apellido);
+        dPush("documento", documento);
+        dPush("fecha_nacimiento", fechaNacimiento);
+        dPush("telefono", telefono);
+        dPush("celular", celular);
+        dPush("direccion", direccion);
+        dPush("departamento", departamento);
+        dPush("correo_electronico", email);
+        dPush("estado", status);
+
+        if (dUpdates.length) {
+          let dWhere = "";
+          if (dCols.has("contact_id")) {
+            dWhere = `contact_id = $${dIdx}`;
+            dValues.push(contactId);
+            dIdx += 1;
+          } else if (documento) {
+            dWhere = `documento = $${dIdx}`;
+            dValues.push(documento);
+            dIdx += 1;
+          }
+
+          if (dWhere) {
+            await client.query(
+              `
+              UPDATE datos_para_trabajar
+              SET ${dUpdates.join(", ")}, updated_at = now()
+              WHERE ${dWhere}
+              `,
+              dValues
+            );
+          }
+        }
+
+        await client.query("COMMIT");
+        return json(200, { ok: true, item: updated });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: "Failed to update contact", error: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update contact", error: error.message });
     }
   }
 
