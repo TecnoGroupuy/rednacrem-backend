@@ -9154,16 +9154,22 @@ const items = result.rows.map((row) => ({
             `
             SELECT LOWER(TRIM(val)) AS value, MAX(TRIM(val)) AS label
             FROM (
-              SELECT cp.motivo_baja AS val
+              SELECT cp.motivo_baja_detalle AS val
               FROM contact_products cp
               WHERE cp.estado = 'baja'
-                AND cp.motivo_baja IS NOT NULL
-                AND cp.motivo_baja <> ''
+                AND cp.motivo_baja_detalle IS NOT NULL
+                AND cp.motivo_baja_detalle <> ''
               UNION ALL
               SELECT ems.motivo_baja AS val
               FROM external_management_status ems
               WHERE ems.motivo_baja IS NOT NULL
                 AND ems.motivo_baja <> ''
+              UNION ALL
+              SELECT cp.motivo_baja AS val
+              FROM contact_products cp
+              WHERE cp.estado = 'baja'
+                AND cp.motivo_baja IS NOT NULL
+                AND cp.motivo_baja <> ''
             ) s
             GROUP BY LOWER(TRIM(val))
             ORDER BY label
@@ -9244,6 +9250,7 @@ const items = result.rows.map((row) => ({
               SELECT 1
               FROM contact_products cp
               WHERE cp.estado = 'baja'
+                AND (cp.motivo_baja_detalle IS NULL OR cp.motivo_baja_detalle = '')
                 AND (cp.motivo_baja IS NULL OR cp.motivo_baja = '')
             ) AS has_null
             `
