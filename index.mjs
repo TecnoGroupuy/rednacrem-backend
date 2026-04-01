@@ -817,16 +817,16 @@ async function fetchRecuperoContactos({
     values.push(`%${search}%`);
     idx += 1;
   }
-  if (motivoBaja) {
-    const normalizedMotivo = motivoBaja.toLowerCase();
-    if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
-      conditions.push(`(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL)`);
-    } else {
-      conditions.push(`COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) = $${idx}`);
-      values.push(motivoBaja);
-      idx += 1;
+    if (motivoBaja) {
+      const normalizedMotivo = motivoBaja.toLowerCase();
+      if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
+      conditions.push(`(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL)`);
+      } else {
+      conditions.push(`COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) = $${idx}`);
+        values.push(motivoBaja);
+        idx += 1;
+      }
     }
-  }
 
   const simpleFilters = !isAdvancedFilterPayload(filters) ? filters : null;
   if (simpleFilters) {
@@ -915,13 +915,13 @@ async function fetchRecuperoContactos({
       const sinMotivo = motivosRaw.some((v) => ["sin motivo", "sin_motivo", "sin-motivo"].includes(v));
       const motivos = motivosRaw.filter((v) => !["sin motivo", "sin_motivo", "sin-motivo"].includes(v));
       if (sinMotivo && motivos.length) {
-        conditions.push(`(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL OR LOWER(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[]))`);
+        conditions.push(`(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL OR LOWER(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[]))`);
         values.push(motivos);
         idx += 1;
       } else if (sinMotivo) {
-        conditions.push(`COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL`);
+        conditions.push(`COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL`);
       } else if (motivos.length) {
-        conditions.push(`LOWER(COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[])`);
+        conditions.push(`LOWER(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[])`);
         values.push(motivos);
         idx += 1;
       }
@@ -982,7 +982,7 @@ async function fetchRecuperoContactos({
     producto: { expr: "cp.nombre_producto", type: "text" },
     precio: { expr: "cp.precio", type: "number" },
     fecha_baja: { expr: "cp.fecha_baja", type: "date" },
-    motivo_baja: { expr: "COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))", type: "text" },
+    motivo_baja: { expr: "COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))", type: "text" },
     lote: { expr: "lote.nombre_lote", type: "text" },
     vendedor_asignado: { expr: "lote.vendedor_asignado_nombre", type: "text" },
     ultimo_estado: { expr: "COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)", type: "text" },
@@ -1185,7 +1185,8 @@ async function fetchRecuperoContactos({
       cp.nombre_producto,
       cp.precio,
       cp.fecha_baja,
-      COALESCE(NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
+      COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
+      COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja_detalle,
       lote.batch_id,
       lote.nombre_lote,
       lote.vendedor_asignado_id,
