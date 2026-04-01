@@ -9029,6 +9029,7 @@ const items = result.rows.map((row) => ({
           if (existingId) {
             dptIdsByContact.set(contactId, existingId);
           }
+
         }
 
         for (const sellerId of sellerIds) {
@@ -9056,10 +9057,10 @@ const items = result.rows.map((row) => ({
         }
 
         const assignedSellerId = sellerIds[0] || null;
-        if (assignedSellerId) {
-          const dptIds = contactIds
-            .map((id) => dptIdsByContact.get(id))
-            .filter(Boolean);
+        const dptIds = contactIds
+          .map((id) => dptIdsByContact.get(id))
+          .filter(Boolean);
+        if (dptIds.length) {
           await client.query(
             `
             INSERT INTO lead_contact_status (
@@ -9068,7 +9069,9 @@ const items = result.rows.map((row) => ({
               assigned_to,
               estado_venta,
               intentos,
-              ultimo_intento_at
+              ultimo_intento_at,
+              created_at,
+              updated_at
             )
             SELECT
               UNNEST($1::uuid[]),
@@ -9076,8 +9079,15 @@ const items = result.rows.map((row) => ({
               $3,
               'nuevo',
               0,
-              NULL
-            ON CONFLICT (contact_id, batch_id) DO NOTHING
+              NULL,
+              now(),
+              now()
+            ON CONFLICT (contact_id, batch_id) DO UPDATE
+            SET
+              assigned_to = COALESCE(EXCLUDED.assigned_to, lead_contact_status.assigned_to),
+              estado_venta = COALESCE(lead_contact_status.estado_venta, 'nuevo'),
+              intentos = COALESCE(lead_contact_status.intentos, 0),
+              updated_at = now()
             `,
             [dptIds, batchId, assignedSellerId]
           );
