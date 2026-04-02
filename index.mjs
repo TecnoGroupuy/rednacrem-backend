@@ -7609,6 +7609,43 @@ export const handler = async (event) => {
         let principalPhoneFallback = null;
         let principalBatchCache = null;
 
+        const getFallbackBatch = async () => {
+          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          if (!safeSellerId) return null;
+
+          const existingRes = await client.query(
+            `
+            SELECT id, tipo
+            FROM lead_batches
+            WHERE estado IN ('activo', 'asignado')
+              AND (seller_id = $1 OR asignado_a = $1)
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [safeSellerId]
+          );
+          if (existingRes.rows.length) {
+            const row = existingRes.rows[0];
+            return { batchId: row.id, batchTipo: row.tipo || "captacion" };
+          }
+
+          const fecha = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
+          const nombre = `Ventas manuales ${fecha}`;
+          const createdBy = isValidUuid(dbUser?.id) ? dbUser.id : safeSellerId;
+          const insertRes = await client.query(
+            `
+            INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a)
+            VALUES ($1, 'asignado', $2, 'captacion', $3, $3)
+            RETURNING id, tipo
+            `,
+            [nombre, createdBy, safeSellerId]
+          );
+          return {
+            batchId: insertRes.rows[0]?.id || null,
+            batchTipo: insertRes.rows[0]?.tipo || "captacion"
+          };
+        };
+
         const resolvePrincipalBatch = async () => {
           if (!sellerId) return null;
           if (principalBatchCache) return principalBatchCache;
@@ -7662,7 +7699,12 @@ export const handler = async (event) => {
             principalLeadId = leadRes.rows[0]?.lead_id || null;
           }
 
-          if (!principalLeadId) return null;
+          if (!principalLeadId) {
+            const fallback = await getFallbackBatch();
+            if (!fallback?.batchId || !isValidUuid(fallback.batchId)) return null;
+            principalBatchCache = { principalLeadId: null, batchId: fallback.batchId, batchTipo: fallback.batchTipo, fallback: true };
+            return principalBatchCache;
+          }
 
           let batchId = null;
           let batchRes = null;
@@ -7693,7 +7735,12 @@ export const handler = async (event) => {
             );
             batchId = batchRes.rows[0]?.batch_id || null;
           }
-          if (!batchId || !isValidUuid(batchId)) return null;
+          if (!batchId || !isValidUuid(batchId)) {
+            const fallback = await getFallbackBatch();
+            if (!fallback?.batchId || !isValidUuid(fallback.batchId)) return null;
+            principalBatchCache = { principalLeadId, batchId: fallback.batchId, batchTipo: fallback.batchTipo, fallback: true };
+            return principalBatchCache;
+          }
 
           const batchInfoRes = await client.query(
             `SELECT tipo FROM lead_batches WHERE id = $1 LIMIT 1`,
