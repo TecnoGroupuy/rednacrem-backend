@@ -500,6 +500,21 @@ function sanitizeUuidFields(input) {
   return out;
 }
 
+function normalizeEmptyStringsToNull(input) {
+  if (Array.isArray(input)) {
+    return input.map(normalizeEmptyStringsToNull);
+  }
+  if (!input || typeof input !== "object") {
+    if (typeof input === "string" && input.trim() === "") return null;
+    return input;
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    out[key] = normalizeEmptyStringsToNull(value);
+  }
+  return out;
+}
+
 function splitFullName(value) {
   const text = normalizeText(value);
   if (!text) return { nombre: "", apellido: "" };
@@ -7350,7 +7365,7 @@ export const handler = async (event) => {
 
   if (method === "POST" && path.endsWith("/contacts")) {
     const bodyRaw = safeParseBody(event);
-    const body = sanitizeUuidFields(bodyRaw);
+    const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
     if (body === null) {
       return json(400, { ok: false, message: "Invalid JSON body" });
     }
