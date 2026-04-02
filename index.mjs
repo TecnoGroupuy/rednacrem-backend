@@ -7798,7 +7798,7 @@ export const handler = async (event) => {
               `
               UPDATE datos_para_trabajar
               SET contact_id = $2, updated_at = now()
-              WHERE id = $1 AND (contact_id IS NULL OR contact_id = '')
+              WHERE id = $1 AND contact_id IS NULL
               `,
               [leadId, safeContactId]
             );
@@ -7927,7 +7927,7 @@ export const handler = async (event) => {
               `
               UPDATE datos_para_trabajar
               SET contact_id = $2, updated_at = now()
-              WHERE id = $1 AND (contact_id IS NULL OR contact_id = '')
+              WHERE id = $1 AND contact_id IS NULL
               `,
               [leadId, safeContactId]
             );
