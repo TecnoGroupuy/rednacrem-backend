@@ -7529,7 +7529,7 @@ export const handler = async (event) => {
         const saleGroupId = hasSaleGroupId ? crypto.randomUUID() : null;
         let mainSaleId = null;
 
-        let principalContactId = normalizeText(
+        const principalContactRaw = normalizeText(
           body?.principal_contact_id ||
           body?.principalContactId ||
           body?.main_contact_id ||
@@ -7539,7 +7539,8 @@ export const handler = async (event) => {
           body?.contacto_principal_id ||
           body?.contactIdPrincipal ||
           body?.contacto_principal
-        ) || null;
+        );
+        let principalContactId = isValidUuid(principalContactRaw) ? principalContactRaw : null;
         let principalDocumentoFallback = null;
         let principalPhoneFallback = null;
         let principalBatchCache = null;
