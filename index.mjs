@@ -7751,6 +7751,8 @@ export const handler = async (event) => {
           return principalBatchCache;
         };
 
+        const managementLog = [];
+
         const main = await upsertContact(contactPayload);
         if (!main.id) {
           await client.query("ROLLBACK");
@@ -7830,12 +7832,18 @@ export const handler = async (event) => {
         const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId }) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
-          if (!safeContactId || !safeSellerId) return false;
+          if (!safeContactId || !safeSellerId) {
+            return { ok: false, reason: "missing_ids", contactId: safeContactId };
+          }
           const principal = await resolvePrincipalBatch();
-          if (!principal?.batchId) return false;
+          if (!principal?.batchId) {
+            return { ok: false, reason: "missing_batch", contactId: safeContactId };
+          }
 
           let leadId = null;
-          if (!leadIdColumn) return false;
+          if (!leadIdColumn) {
+            return { ok: false, reason: "missing_lead_column", contactId: safeContactId };
+          }
           if (hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
@@ -7866,7 +7874,9 @@ export const handler = async (event) => {
             });
           }
 
-          if (!leadId) return false;
+          if (!leadId) {
+            return { ok: false, reason: "lead_not_created", contactId: safeContactId };
+          }
 
           if (hasContactIdCol) {
             const docValue = normalizeText(fields?.documento || "") || null;
@@ -7966,8 +7976,10 @@ export const handler = async (event) => {
               `,
               [leadId, hoy]
             );
-            if (alreadyToday.rows.length) return true;
-            await client.query(
+            if (alreadyToday.rows.length) {
+              return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId: principal.batchId };
+            }
+            const insertMgmt = await client.query(
               `
               INSERT INTO lead_management_history (
                 contact_id,
@@ -7979,9 +7991,18 @@ export const handler = async (event) => {
                 proxima_accion
               )
               VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
+              RETURNING id
               `,
               [leadId, principal.batchId, safeSellerId, "Venta vinculada a contacto principal"]
             );
+            return {
+              ok: true,
+              created: true,
+              contactId: safeContactId,
+              leadId,
+              batchId: principal.batchId,
+              managementId: insertMgmt.rows[0]?.id || null
+            };
           }
 
           if (hasLeadEstadoCol && leadIdColumn) {
@@ -7995,16 +8016,20 @@ export const handler = async (event) => {
             );
           }
 
-          return true;
+          return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId: principal.batchId };
         };
 
         const linkLeadSaleIfPossible = async ({ contactId, documento, sellerId }) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
-          if (!safeContactId || !safeSellerId) return;
+          if (!safeContactId || !safeSellerId) {
+            return { ok: false, reason: "missing_ids", contactId: safeContactId };
+          }
 
           let leadId = null;
-          if (!leadIdColumn) return;
+          if (!leadIdColumn) {
+            return { ok: false, reason: "missing_lead_column", contactId: safeContactId };
+          }
           if (hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
@@ -8027,7 +8052,9 @@ export const handler = async (event) => {
             leadId = leadRes.rows[0]?.lead_id || null;
           }
 
-          if (!leadId) return;
+          if (!leadId) {
+            return { ok: false, reason: "lead_not_found", contactId: safeContactId };
+          }
 
           if (hasContactIdCol) {
             const docValue = normalizeText(documento || "") || null;
@@ -8068,7 +8095,9 @@ export const handler = async (event) => {
             [leadId, safeSellerId]
           );
           const batchId = statusRes.rows[0]?.batch_id || null;
-          if (!batchId || !isValidUuid(batchId)) return;
+          if (!batchId || !isValidUuid(batchId)) {
+            return { ok: false, reason: "missing_batch", contactId: safeContactId, leadId };
+          }
 
           const lastVentaRes = await client.query(
             `
@@ -8085,7 +8114,7 @@ export const handler = async (event) => {
           );
           const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
           const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
-          if (lastVentaDate === hoy) return;
+          if (lastVentaDate === hoy) return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId };
           const alreadyToday = await client.query(
             `
             SELECT 1
@@ -8097,9 +8126,9 @@ export const handler = async (event) => {
             `,
             [leadId, hoy]
           );
-          if (alreadyToday.rows.length) return;
+          if (alreadyToday.rows.length) return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId };
 
-          await client.query(
+          const insertMgmt = await client.query(
             `
             INSERT INTO lead_management_history (
               contact_id,
@@ -8111,9 +8140,18 @@ export const handler = async (event) => {
               proxima_accion
             )
             VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
+            RETURNING id
             `,
             [leadId, batchId, safeSellerId, "Venta registrada desde contacto nuevo"]
           );
+          return {
+            ok: true,
+            created: true,
+            contactId: safeContactId,
+            leadId,
+            batchId,
+            managementId: insertMgmt.rows[0]?.id || null
+          };
 
           await client.query(
             `
@@ -8288,11 +8326,12 @@ export const handler = async (event) => {
               parentSaleId: mainSaleId || null
             });
           }
-          await linkLeadSaleFromPrincipal({
+          const familyMgmt = await linkLeadSaleFromPrincipal({
             contactId: famContact.id,
             fields: famContact.fields,
             sellerId
           });
+          if (familyMgmt) managementLog.push({ scope: "family", ...familyMgmt });
         }
 
         const linkedToPrincipal = await linkLeadSaleFromPrincipal({
@@ -8300,12 +8339,14 @@ export const handler = async (event) => {
           fields: main.fields,
           sellerId
         });
-        if (!linkedToPrincipal) {
-          await linkLeadSaleIfPossible({
+        if (linkedToPrincipal) managementLog.push({ scope: "main", ...linkedToPrincipal });
+        if (!linkedToPrincipal?.ok) {
+          const fallbackMgmt = await linkLeadSaleIfPossible({
             contactId: main.id,
             documento: main.fields?.documento || null,
             sellerId
           });
+          if (fallbackMgmt) managementLog.push({ scope: "main_fallback", ...fallbackMgmt });
         }
 
         await client.query("COMMIT");
@@ -8313,7 +8354,7 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
-          data: { id: main.id }
+          data: { id: main.id, management: managementLog }
         });
       } catch (error) {
         await client.query("ROLLBACK");
