@@ -7520,7 +7520,8 @@ export const handler = async (event) => {
         };
 
         const products = Array.isArray(body?.products) ? body.products : [];
-        const sellerId = body?.vendedor_id || dbUser?.id || null;
+        const rawSellerId = normalizeText(body?.vendedor_id || "");
+        const sellerId = isValidUuid(rawSellerId) ? rawSellerId : (dbUser?.id || null);
         const sellerNameSnapshot = normalizeText(
           products[0]?.sellerName ||
           products[0]?.seller_name ||
@@ -7603,17 +7604,22 @@ export const handler = async (event) => {
 
           if (!principalLeadId) return null;
 
-          let batchRes = await client.query(
-            `
-            SELECT batch_id
-            FROM lead_contact_status
-            WHERE contact_id = $1 AND assigned_to = $2
-            ORDER BY updated_at DESC
-            LIMIT 1
-            `,
-            [principalLeadId, sellerId]
-          );
-          let batchId = batchRes.rows[0]?.batch_id || null;
+          let batchId = null;
+          let batchRes = null;
+          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          if (safeSellerId) {
+            batchRes = await client.query(
+              `
+              SELECT batch_id
+              FROM lead_contact_status
+              WHERE contact_id = $1 AND assigned_to = $2
+              ORDER BY updated_at DESC
+              LIMIT 1
+              `,
+              [principalLeadId, safeSellerId]
+            );
+            batchId = batchRes.rows[0]?.batch_id || null;
+          }
           if (!batchId) {
             batchRes = await client.query(
               `
