@@ -8206,7 +8206,19 @@ export const handler = async (event) => {
           if (!mainSaleId && saleId) mainSaleId = saleId;
         }
 
+        const hasAnyContactSignal = (contact = {}) => {
+          const nombre = normalizeText(contact?.nombre);
+          const apellido = normalizeText(contact?.apellido);
+          const documento = normalizeText(contact?.documento);
+          const telefono = normalizeText(contact?.telefono);
+          const celular = normalizeText(contact?.celular);
+          return Boolean(nombre || apellido || documento || telefono || celular);
+        };
+
         for (const familySale of familySales) {
+          if (!familySale?.contact || !hasAnyContactSignal(familySale.contact)) {
+            continue;
+          }
           const famContact = await upsertContact(familySale?.contact || {});
           if (!famContact.id) continue;
           const famProducts = Array.isArray(familySale?.products) ? familySale.products : [];
