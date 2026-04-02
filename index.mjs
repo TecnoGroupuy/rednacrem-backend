@@ -11449,6 +11449,9 @@ const items = result.rows.map((row) => ({
           params.push(origenes);
           i += 1;
         }
+      } else {
+        // Por defecto, excluir datos de recupero en creación de lotes (solo CSV / guía telefónica)
+        conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
       }
 
       const edadDesde = getQueryParam(event, "edad_desde");
@@ -11567,6 +11570,9 @@ const items = result.rows.map((row) => ({
           params.push(origenes);
           i += 1;
         }
+      } else {
+        // Por defecto, excluir datos de recupero en creación de lotes (solo CSV / guía telefónica)
+        conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
       }
 
       const edadDesde = getQueryParam(event, "edad_desde");
