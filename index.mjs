@@ -7535,6 +7535,262 @@ export const handler = async (event) => {
         const saleGroupId = hasSaleGroupId ? crypto.randomUUID() : null;
         let mainSaleId = null;
 
+        const principalContactId = normalizeText(
+          body?.principal_contact_id ||
+          body?.principalContactId ||
+          body?.main_contact_id ||
+          body?.mainContactId ||
+          body?.parent_contact_id ||
+          body?.parentContactId ||
+          body?.contacto_principal_id ||
+          body?.contactIdPrincipal ||
+          body?.contacto_principal
+        ) || null;
+        let principalBatchCache = null;
+
+        const resolvePrincipalBatch = async () => {
+          if (!principalContactId || !sellerId) return null;
+          if (principalBatchCache) return principalBatchCache;
+
+          let principalLeadId = null;
+          if (hasContactIdCol) {
+            const leadRes = await client.query(
+              `SELECT id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              [principalContactId]
+            );
+            principalLeadId = leadRes.rows[0]?.id || null;
+          }
+
+          let principalDocumento = null;
+          if (!principalLeadId) {
+            const principalContactRes = await client.query(
+              `SELECT documento FROM contacts WHERE id = $1 LIMIT 1`,
+              [principalContactId]
+            );
+            principalDocumento = principalContactRes.rows[0]?.documento || null;
+            if (principalDocumento) {
+              const leadRes = await client.query(
+                `SELECT id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
+                [principalDocumento]
+              );
+              principalLeadId = leadRes.rows[0]?.id || null;
+            }
+          }
+
+          if (!principalLeadId) return null;
+
+          let batchRes = await client.query(
+            `
+            SELECT batch_id
+            FROM lead_contact_status
+            WHERE contact_id = $1 AND assigned_to = $2
+            ORDER BY updated_at DESC
+            LIMIT 1
+            `,
+            [principalLeadId, sellerId]
+          );
+          let batchId = batchRes.rows[0]?.batch_id || null;
+          if (!batchId) {
+            batchRes = await client.query(
+              `
+              SELECT batch_id
+              FROM lead_contact_status
+              WHERE contact_id = $1
+              ORDER BY updated_at DESC
+              LIMIT 1
+              `,
+              [principalLeadId]
+            );
+            batchId = batchRes.rows[0]?.batch_id || null;
+          }
+          if (!batchId) return null;
+
+          const batchInfoRes = await client.query(
+            `SELECT tipo FROM lead_batches WHERE id = $1 LIMIT 1`,
+            [batchId]
+          );
+          const batchTipo = batchInfoRes.rows[0]?.tipo || null;
+          principalBatchCache = { principalLeadId, batchId, batchTipo };
+          return principalBatchCache;
+        };
+
+        const insertLeadFromFields = async ({ fields, contactId, batchTipo }) => {
+          const columns = [];
+          const values = [];
+          const params = [];
+          let p = 1;
+          const pushCol = (name, value) => {
+            if (!dCols.has(name)) return;
+            columns.push(name);
+            values.push(value ?? null);
+            params.push(`$${p}`);
+            p += 1;
+          };
+
+          pushCol("nombre", fields?.nombre || null);
+          pushCol("apellido", fields?.apellido || null);
+          pushCol("documento", fields?.documento || null);
+          pushCol("fecha_nacimiento", fields?.fechaNacimiento || null);
+          pushCol("telefono", fields?.telefono || null);
+          pushCol("celular", fields?.celular || null);
+          pushCol("direccion", fields?.direccion || null);
+          pushCol("departamento", fields?.departamento || null);
+          if (dCols.has("localidad")) pushCol("localidad", null);
+          if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields?.email || null);
+          if (dCols.has("origen_dato")) pushCol("origen_dato", batchTipo || "captacion");
+          if (dCols.has("estado")) pushCol("estado", "nuevo");
+          if (hasContactIdCol) pushCol("contact_id", contactId);
+
+          if (!columns.length) return null;
+
+          const insertRes = await client.query(
+            `
+            INSERT INTO datos_para_trabajar (${columns.join(", ")})
+            VALUES (${params.join(", ")})
+            RETURNING id
+            `,
+            values
+          );
+          return insertRes.rows[0]?.id || null;
+        };
+
+        const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId }) => {
+          if (!contactId || !sellerId) return false;
+          const principal = await resolvePrincipalBatch();
+          if (!principal?.batchId) return false;
+
+          let leadId = null;
+          if (hasContactIdCol) {
+            const leadRes = await client.query(
+              `SELECT id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              [contactId]
+            );
+            leadId = leadRes.rows[0]?.id || null;
+          }
+
+          if (!leadId && fields?.documento) {
+            const leadRes = await client.query(
+              `
+              SELECT id, contact_id
+              FROM datos_para_trabajar
+              WHERE documento = $1
+              ORDER BY updated_at DESC NULLS LAST, created_at DESC
+              LIMIT 1
+              `,
+              [fields.documento]
+            );
+            leadId = leadRes.rows[0]?.id || null;
+          }
+
+          if (!leadId) {
+            leadId = await insertLeadFromFields({
+              fields,
+              contactId,
+              batchTipo: principal.batchTipo
+            });
+          }
+
+          if (!leadId) return false;
+
+          if (hasContactIdCol) {
+            await client.query(
+              `
+              UPDATE datos_para_trabajar
+              SET contact_id = $2, updated_at = now()
+              WHERE id = $1 AND (contact_id IS NULL OR contact_id = '')
+              `,
+              [leadId, contactId]
+            );
+          }
+
+          const statusRes = await client.query(
+            `
+            SELECT id
+            FROM lead_contact_status
+            WHERE contact_id = $1 AND batch_id = $2
+            LIMIT 1
+            `,
+            [leadId, principal.batchId]
+          );
+          if (statusRes.rows.length) {
+            await client.query(
+              `
+              UPDATE lead_contact_status
+              SET estado_venta = 'venta',
+                  intentos = COALESCE(intentos, 0) + 1,
+                  assigned_to = $3,
+                  ultimo_intento_at = now(),
+                  updated_at = now()
+              WHERE contact_id = $1 AND batch_id = $2
+              `,
+              [leadId, principal.batchId, sellerId]
+            );
+          } else {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                proxima_accion,
+                batch_id,
+                assigned_to,
+                ola_actual,
+                ultimo_intento_at
+              )
+              VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
+              `,
+              [leadId, principal.batchId, sellerId]
+            );
+          }
+
+          const lastVentaRes = await client.query(
+            `
+            SELECT (fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
+            FROM lead_management_history
+            WHERE contact_id = $1
+              AND batch_id = $2
+              AND user_id = $3
+              AND resultado = 'venta'
+            ORDER BY fecha_gestion DESC
+            LIMIT 1
+            `,
+            [leadId, principal.batchId, sellerId]
+          );
+          const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
+          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
+          if (lastVentaDate !== hoy) {
+            await client.query(
+              `
+              INSERT INTO lead_management_history (
+                contact_id,
+                batch_id,
+                user_id,
+                resultado,
+                nota,
+                fecha_gestion,
+                proxima_accion
+              )
+              VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
+              `,
+              [leadId, principal.batchId, sellerId, "Venta vinculada a contacto principal"]
+            );
+          }
+
+          if (hasLeadEstadoCol) {
+            await client.query(
+              `
+              UPDATE datos_para_trabajar
+              SET estado = 'trabajado', updated_at = now()
+              WHERE id = $1 AND estado <> 'bloqueado'
+              `,
+              [leadId]
+            );
+          }
+
+          return true;
+        };
+
         const linkLeadSaleIfPossible = async ({ contactId, documento, sellerId }) => {
           if (!contactId || !sellerId) return;
 
@@ -7778,13 +8034,25 @@ export const handler = async (event) => {
               parentSaleId: mainSaleId || null
             });
           }
+          await linkLeadSaleFromPrincipal({
+            contactId: famContact.id,
+            fields: famContact.fields,
+            sellerId
+          });
         }
 
-        await linkLeadSaleIfPossible({
+        const linkedToPrincipal = await linkLeadSaleFromPrincipal({
           contactId: main.id,
-          documento: main.fields?.documento || null,
+          fields: main.fields,
           sellerId
         });
+        if (!linkedToPrincipal) {
+          await linkLeadSaleIfPossible({
+            contactId: main.id,
+            documento: main.fields?.documento || null,
+            sellerId
+          });
+        }
 
         await client.query("COMMIT");
 
