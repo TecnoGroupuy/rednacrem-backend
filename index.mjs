@@ -7480,11 +7480,15 @@ export const handler = async (event) => {
           saleGroupId,
           parentSaleId
         }) => {
+          const safeContactId = isValidUuid(contactId) ? contactId : null;
+          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          const safeSaleGroupId = isValidUuid(saleGroupId) ? saleGroupId : null;
+          const safeParentSaleId = isValidUuid(parentSaleId) ? parentSaleId : null;
           const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
-          const vals = [contactId, medioPago, sellerNameSnapshot, sellerOrigin];
+          const vals = [safeContactId, medioPago, sellerNameSnapshot, sellerOrigin];
           if (sellerUserCol) {
             cols.push(sellerUserCol);
-            vals.push(sellerId || null);
+            vals.push(safeSellerId);
           }
           if (fechaVentaCol) {
             cols.push(fechaVentaCol);
@@ -7496,11 +7500,11 @@ export const handler = async (event) => {
           }
           if (hasSaleGroupId) {
             cols.push("sale_group_id");
-            vals.push(saleGroupId || null);
+            vals.push(safeSaleGroupId);
           }
           if (hasParentSaleId) {
             cols.push("parent_sale_id");
-            vals.push(parentSaleId || null);
+            vals.push(safeParentSaleId);
           }
 
           const placeholders = vals.map((_, idx) => `$${idx + 1}`);
@@ -8004,6 +8008,9 @@ export const handler = async (event) => {
             );
           }
 
+          const safeContactId = isValidUuid(contactId) ? contactId : null;
+          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          const safeSaleId = isValidUuid(saleId) ? saleId : null;
           await client.query(
             `
             INSERT INTO contact_products (
@@ -8026,7 +8033,7 @@ export const handler = async (event) => {
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             `,
             [
-              contactId,
+              safeContactId,
               productName,
               plan,
               precio || 0,
@@ -8037,10 +8044,10 @@ export const handler = async (event) => {
               motivoBaja,
               motivoBajaDetalle,
               fechaBaja,
-              sellerId,
+              safeSellerId,
               sellerNameSnapshot,
               sellerOrigin,
-              saleId
+              safeSaleId
             ]
           );
 
