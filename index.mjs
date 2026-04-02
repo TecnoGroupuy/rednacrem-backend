@@ -7515,17 +7515,6 @@ export const handler = async (event) => {
           return saleInsert.rows[0]?.id || null;
         };
 
-        const main = await upsertContact(contactPayload);
-        if (!main.id) {
-          await client.query("ROLLBACK");
-          return json(422, { ok: false, message: "Nombre y apellido son requeridos" });
-        }
-        if (!principalContactId && main?.id) {
-          principalContactId = main.id;
-          principalDocumentoFallback = main.fields?.documento || null;
-          principalPhoneFallback = normalizePhoneDigits(main.fields?.telefono || main.fields?.celular || "");
-        }
-
         const products = Array.isArray(body?.products) ? body.products : [];
         const sellerId = body?.vendedor_id || dbUser?.id || null;
         const sellerNameSnapshot = normalizeText(
@@ -7643,6 +7632,17 @@ export const handler = async (event) => {
           principalBatchCache = { principalLeadId, batchId, batchTipo };
           return principalBatchCache;
         };
+
+        const main = await upsertContact(contactPayload);
+        if (!main.id) {
+          await client.query("ROLLBACK");
+          return json(422, { ok: false, message: "Nombre y apellido son requeridos" });
+        }
+        if (!principalContactId && main?.id) {
+          principalContactId = main.id;
+          principalDocumentoFallback = main.fields?.documento || null;
+          principalPhoneFallback = normalizePhoneDigits(main.fields?.telefono || main.fields?.celular || "");
+        }
 
         const insertLeadFromFields = async ({ fields, contactId, batchTipo }) => {
           const columns = [];
