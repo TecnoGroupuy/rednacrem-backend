@@ -7523,6 +7523,7 @@ export const handler = async (event) => {
         if (!principalContactId && main?.id) {
           principalContactId = main.id;
           principalDocumentoFallback = main.fields?.documento || null;
+          principalPhoneFallback = normalizePhoneDigits(main.fields?.telefono || main.fields?.celular || "");
         }
 
         const products = Array.isArray(body?.products) ? body.products : [];
@@ -7551,6 +7552,7 @@ export const handler = async (event) => {
           body?.contacto_principal
         ) || null;
         let principalDocumentoFallback = null;
+        let principalPhoneFallback = null;
         let principalBatchCache = null;
 
         const resolvePrincipalBatch = async () => {
@@ -7589,6 +7591,20 @@ export const handler = async (event) => {
             );
             principalLeadId = leadRes.rows[0]?.id || null;
             principalDocumento = principalDocumentoFallback;
+          }
+
+          if (!principalLeadId && principalPhoneFallback) {
+            const leadRes = await client.query(
+              `
+              SELECT id
+              FROM datos_para_trabajar
+              WHERE regexp_replace(telefono, '\\D', '', 'g') = $1
+                 OR regexp_replace(celular, '\\D', '', 'g') = $1
+              LIMIT 1
+              `,
+              [principalPhoneFallback]
+            );
+            principalLeadId = leadRes.rows[0]?.id || null;
           }
 
           if (!principalLeadId) return null;
