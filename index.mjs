@@ -11597,9 +11597,6 @@ const items = result.rows.map((row) => ({
       const pagina = Math.max(1, parseInt(getQueryParam(event, "pagina") || "1", 10));
       const offset = (pagina - 1) * limite;
       const where = conditions.join(" AND ");
-        const orderBy = sort && sortableColumns[sort]
-          ? `${sortableColumns[sort]} ${dir}`
-          : "cp.fecha_baja DESC";
 
       const client = createDbClient();
       await client.connect();
