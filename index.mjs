@@ -7778,9 +7778,31 @@ export const handler = async (event) => {
             p += 1;
           };
 
+          const docValue = normalizeText(fields?.documento || "") || null;
+          const telValue = normalizePhoneDigits(fields?.telefono || "");
+          const celValue = normalizePhoneDigits(fields?.celular || "");
+
+          // Try to reuse an existing lead row by documento/telefono/celular to avoid duplicates.
+          if (docValue || telValue || celValue) {
+            const existingLeadRes = await client.query(
+              `
+              SELECT ${leadIdColumn} AS lead_id
+              FROM datos_para_trabajar
+              WHERE ($1::text IS NOT NULL AND documento = $1)
+                 OR ($2::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $2)
+                 OR ($3::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $3)
+              ORDER BY updated_at DESC NULLS LAST, created_at DESC
+              LIMIT 1
+              `,
+              [docValue, telValue, celValue]
+            );
+            const existingLeadId = existingLeadRes.rows[0]?.lead_id || null;
+            if (existingLeadId) return existingLeadId;
+          }
+
           pushCol("nombre", fields?.nombre || null);
           pushCol("apellido", fields?.apellido || null);
-          pushCol("documento", fields?.documento || null);
+          pushCol("documento", docValue);
           pushCol("fecha_nacimiento", fields?.fechaNacimiento || null);
           pushCol("telefono", fields?.telefono || null);
           pushCol("celular", fields?.celular || null);
@@ -7846,7 +7868,11 @@ export const handler = async (event) => {
 
           if (!leadId) return false;
 
-          if (hasContactIdCol && leadIdColumn === "id") {
+          if (hasContactIdCol) {
+            const docValue = normalizeText(fields?.documento || "") || null;
+            const telValue = normalizePhoneDigits(fields?.telefono || "");
+            const celValue = normalizePhoneDigits(fields?.celular || "");
+            if (leadIdColumn === "id") {
             await client.query(
               `
               UPDATE datos_para_trabajar
@@ -7855,6 +7881,21 @@ export const handler = async (event) => {
               `,
               [leadId, safeContactId]
             );
+            } else if (docValue || telValue || celValue) {
+              await client.query(
+                `
+                UPDATE datos_para_trabajar
+                SET contact_id = $2, updated_at = now()
+                WHERE contact_id IS NULL
+                  AND (
+                    ($3::text IS NOT NULL AND documento = $3)
+                    OR ($4::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $4)
+                    OR ($5::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $5)
+                  )
+                `,
+                [leadId, safeContactId, docValue, telValue, celValue]
+              );
+            }
           }
 
           const statusRes = await client.query(
@@ -7988,7 +8029,11 @@ export const handler = async (event) => {
 
           if (!leadId) return;
 
-          if (hasContactIdCol && leadIdColumn === "id") {
+          if (hasContactIdCol) {
+            const docValue = normalizeText(documento || "") || null;
+            const telValue = "";
+            const celValue = "";
+            if (leadIdColumn === "id") {
             await client.query(
               `
               UPDATE datos_para_trabajar
@@ -7997,6 +8042,19 @@ export const handler = async (event) => {
               `,
               [leadId, safeContactId]
             );
+            } else if (docValue) {
+              await client.query(
+                `
+                UPDATE datos_para_trabajar
+                SET contact_id = $2, updated_at = now()
+                WHERE contact_id IS NULL
+                  AND (
+                    ($3::text IS NOT NULL AND documento = $3)
+                  )
+                `,
+                [leadId, safeContactId, docValue, telValue, celValue]
+              );
+            }
           }
 
           const statusRes = await client.query(
