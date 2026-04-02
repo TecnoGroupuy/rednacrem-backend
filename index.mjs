@@ -7627,7 +7627,7 @@ export const handler = async (event) => {
             );
             batchId = batchRes.rows[0]?.batch_id || null;
           }
-          if (!batchId) return null;
+          if (!batchId || !isValidUuid(batchId)) return null;
 
           const batchInfoRes = await client.query(
             `SELECT tipo FROM lead_batches WHERE id = $1 LIMIT 1`,
@@ -7880,7 +7880,7 @@ export const handler = async (event) => {
             [leadId, safeSellerId]
           );
           const batchId = statusRes.rows[0]?.batch_id || null;
-          if (!batchId) return;
+          if (!batchId || !isValidUuid(batchId)) return;
 
           const lastVentaRes = await client.query(
             `
