@@ -7423,6 +7423,7 @@ export const handler = async (event) => {
       try {
         await client.query("BEGIN");
         const salesCols = await getTableColumns(client, "sales");
+        leadContactColumnsCache = null;
         const leadCols = await getLeadContactColumns(client);
         const dCols = leadCols?.d || new Set();
         const hasContactIdCol = dCols.has("contact_id");
