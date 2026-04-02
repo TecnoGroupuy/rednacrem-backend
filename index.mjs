@@ -7859,7 +7859,7 @@ export const handler = async (event) => {
 
           const statusRes = await client.query(
             `
-            SELECT id
+            SELECT 1
             FROM lead_contact_status
             WHERE contact_id = $1 AND batch_id = $2
             LIMIT 1
@@ -7931,12 +7931,12 @@ export const handler = async (event) => {
             );
           }
 
-          if (hasLeadEstadoCol) {
+          if (hasLeadEstadoCol && leadIdColumn) {
             await client.query(
               `
               UPDATE datos_para_trabajar
               SET estado = 'trabajado', updated_at = now()
-              WHERE id = $1 AND estado <> 'bloqueado'
+              WHERE ${leadIdColumn} = $1 AND estado <> 'bloqueado'
               `,
               [leadId]
             );
@@ -8046,12 +8046,12 @@ export const handler = async (event) => {
             [leadId, batchId]
           );
 
-          if (hasLeadEstadoCol) {
+          if (hasLeadEstadoCol && leadIdColumn) {
             await client.query(
               `
               UPDATE datos_para_trabajar
               SET estado = 'trabajado', updated_at = now()
-              WHERE id = $1 AND estado <> 'bloqueado'
+              WHERE ${leadIdColumn} = $1 AND estado <> 'bloqueado'
               `,
               [leadId]
             );
