@@ -7381,7 +7381,10 @@ export const handler = async (event) => {
             return { id: null, fields };
           }
 
-          let existingId = payload?.id || null;
+          const isValidUuid = (value) =>
+            typeof value === "string" &&
+            /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(value);
+          let existingId = isValidUuid(payload?.id) ? payload.id : null;
           if (!existingId && fields.documento) {
             const existingRes = await client.query(
               `SELECT id FROM contacts WHERE documento = $1 LIMIT 1`,
