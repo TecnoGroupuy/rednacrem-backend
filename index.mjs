@@ -4973,6 +4973,23 @@ async function getUsersTableMetadata(client) {
   };
 }
 
+const tableColumnsCache = new Map();
+async function getTableColumns(client, tableName) {
+  if (tableColumnsCache.has(tableName)) return tableColumnsCache.get(tableName);
+  const res = await client.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = $1
+    `,
+    [tableName]
+  );
+  const cols = new Set(res.rows.map((row) => row.column_name));
+  tableColumnsCache.set(tableName, cols);
+  return cols;
+}
+
 function buildUserSelect(metadata) {
   return `
     SELECT
@@ -7312,180 +7329,337 @@ export const handler = async (event) => {
       const contactPayload = body?.contact && typeof body.contact === "object"
         ? body.contact
         : body;
+      const familySales = Array.isArray(body?.familySales) ? body.familySales : [];
+      const cobranzaDocumento = normalizeText(body?.cobranza_documento || body?.documento_cobranza) || null;
 
-      const nombre = normalizeText(contactPayload?.nombre);
-      const apellido = normalizeText(contactPayload?.apellido);
-
-      if (!nombre || !apellido) {
-        return json(422, {
-          ok: false,
-          message: "Nombre y apellido son requeridos"
-        });
-      }
-
-      const documento = normalizeText(contactPayload?.documento) || null;
-      const fechaNacimiento = parseDate(contactPayload?.fecha_nacimiento || contactPayload?.fechaNacimiento || null);
-      const telefono = normalizeText(contactPayload?.telefono) || null;
-      const celular = normalizeText(contactPayload?.celular) || null;
-      const correo = normalizeEmail(contactPayload?.correo_electronico || contactPayload?.email);
-      const email = correo ? correo : null;
-      const direccion = normalizeText(contactPayload?.direccion) || null;
-      const departamento = normalizeText(contactPayload?.departamento) || null;
-      const pais = normalizeText(contactPayload?.pais) || "Uruguay";
-      const status = normalizeText(contactPayload?.estado || contactPayload?.status || "activo") || "activo";
+      const buildContactFields = (payload) => {
+        const nombre = normalizeText(payload?.nombre);
+        const apellido = normalizeText(payload?.apellido);
+        const documento = normalizeText(payload?.documento) || null;
+        const fechaNacimiento = parseDate(payload?.fecha_nacimiento || payload?.fechaNacimiento || null);
+        const telefono = normalizeText(payload?.telefono) || null;
+        const celular = normalizeText(payload?.celular) || null;
+        const correo = normalizeEmail(payload?.correo_electronico || payload?.email);
+        const email = correo ? correo : null;
+        const direccion = normalizeText(payload?.direccion) || null;
+        const departamento = normalizeText(payload?.departamento) || null;
+        const pais = normalizeText(payload?.pais) || "Uruguay";
+        const status = normalizeText(payload?.estado || payload?.status || "activo") || "activo";
+        return {
+          nombre,
+          apellido,
+          documento,
+          fechaNacimiento,
+          telefono,
+          celular,
+          email,
+          direccion,
+          departamento,
+          pais,
+          status
+        };
+      };
 
       const client = createDbClient();
       await client.connect();
       try {
         await client.query("BEGIN");
-        const result = await client.query(
-          `
-          INSERT INTO contacts (
-            nombre,
-            apellido,
-            documento,
-            fecha_nacimiento,
-            telefono,
-            celular,
-            email,
-            direccion,
-            departamento,
-            pais,
-            status,
-            created_at,
-            updated_at
-          )
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now(), now())
-          RETURNING id
-          `,
-          [
-            nombre,
-            apellido,
-            documento,
-            fechaNacimiento,
-            telefono,
-            celular,
-            email,
-            direccion,
-            departamento,
-            pais,
-            status
-          ]
-        );
+        const salesCols = await getTableColumns(client, "sales");
+        const sellerUserCol = salesCols.has("seller_user_id")
+          ? "seller_user_id"
+          : (salesCols.has("seller_id") ? "seller_id" : null);
+        const fechaVentaCol = salesCols.has("fecha_venta")
+          ? "fecha_venta"
+          : (salesCols.has("fecha") ? "fecha" : null);
+        const hasDocumentoCobranza = salesCols.has("documento_cobranza");
+        const hasSaleGroupId = salesCols.has("sale_group_id");
+        const hasParentSaleId = salesCols.has("parent_sale_id");
 
-        const contactId = result.rows[0]?.id;
-        const products = Array.isArray(body?.products) ? body.products : [];
-        if (contactId && products.length) {
-          const sellerId = body?.vendedor_id || dbUser?.id || null;
-          const sellerNameSnapshot = normalizeText(
-            products[0]?.sellerName ||
-            products[0]?.seller_name ||
-            [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() ||
-            dbUser?.email ||
-            ""
-          ) || null;
-          const sellerOrigin = sellerId ? "interno" : "externo";
+        const upsertContact = async (payload) => {
+          const fields = buildContactFields(payload || {});
+          if (!fields.nombre || !fields.apellido) {
+            return { id: null, fields };
+          }
 
-          for (const product of products) {
-            const productName = normalizeText(
-              product?.nombre_producto || product?.nombreProducto || product?.nombre
-            ) || "Producto";
-            const plan = normalizeText(product?.plan) || null;
-            const precio = parseNumber(product?.precio) ?? 0;
-            const fechaAlta = parseDate(product?.fecha_alta || product?.fechaAlta) || new Date().toISOString().slice(0, 10);
-            const estadoRaw = normalizeText(product?.estado || product?.producto_estado || "alta");
-            const estadoNorm = estadoRaw.toLowerCase();
-            const isAlta = estadoNorm === "alta" || estadoNorm === "activo";
-            const fechaBaja = isAlta ? null : (parseDate(product?.fecha_baja || product?.fechaBaja) || fechaAlta);
-            const motivoBaja = isAlta ? null : "otro";
-            const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
-            const medioPago = normalizeText(product?.medio_pago || product?.medioPago) || null;
-            const fechaVenta = fechaAlta;
-
-            let productId = null;
-            if (productName) {
-              const productRes = await client.query(
-                `SELECT id FROM products WHERE lower(nombre) = lower($1) LIMIT 1`,
-                [productName]
-              );
-              productId = productRes.rows[0]?.id || null;
-              if (!productId) {
-                const productInsert = await client.query(
-                  `
-                  INSERT INTO products (nombre, categoria, precio, activo)
-                  VALUES ($1, 'General', $2, true)
-                  RETURNING id
-                  `,
-                  [productName, precio || 0]
-                );
-                productId = productInsert.rows[0]?.id || null;
-              }
-            }
-
-            const saleInsert = await client.query(
-              `
-              INSERT INTO sales (contact_id, seller_user_id, medio_pago, seller_name_snapshot, seller_origin, fecha_venta)
-              VALUES ($1, $2, $3, $4, $5, $6)
-              RETURNING id
-              `,
-              [contactId, sellerId || null, medioPago, sellerNameSnapshot, sellerOrigin, fechaVenta]
+          let existingId = payload?.id || null;
+          if (!existingId && fields.documento) {
+            const existingRes = await client.query(
+              `SELECT id FROM contacts WHERE documento = $1 LIMIT 1`,
+              [fields.documento]
             );
-            const saleId = saleInsert.rows[0]?.id;
+            existingId = existingRes.rows[0]?.id || null;
+          }
 
-            if (saleId && productId) {
+          if (existingId) {
+            const updates = [];
+            const values = [];
+            let idx = 1;
+            const push = (col, val) => {
+              if (val === undefined || val === null) return;
+              updates.push(`${col} = $${idx}`);
+              values.push(val);
+              idx += 1;
+            };
+            push("nombre", fields.nombre);
+            push("apellido", fields.apellido);
+            push("documento", fields.documento);
+            push("fecha_nacimiento", fields.fechaNacimiento);
+            push("telefono", fields.telefono);
+            push("celular", fields.celular);
+            push("email", fields.email);
+            push("direccion", fields.direccion);
+            push("departamento", fields.departamento);
+            push("pais", fields.pais);
+            push("status", fields.status);
+
+            if (updates.length) {
               await client.query(
                 `
-                INSERT INTO sale_items (
-                  sale_id,
-                  product_id,
-                  product_name_snapshot,
-                  price
-                )
-                VALUES ($1,$2,$3,$4)
+                UPDATE contacts
+                SET ${updates.join(", ")}, updated_at = now()
+                WHERE id = $${idx}
                 `,
-                [saleId, productId, productName || "Producto", precio || 0]
+                [...values, existingId]
               );
             }
+            return { id: existingId, fields };
+          }
 
+          const insertRes = await client.query(
+            `
+            INSERT INTO contacts (
+              nombre,
+              apellido,
+              documento,
+              fecha_nacimiento,
+              telefono,
+              celular,
+              email,
+              direccion,
+              departamento,
+              pais,
+              status,
+              created_at,
+              updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now(), now())
+            RETURNING id
+            `,
+            [
+              fields.nombre,
+              fields.apellido,
+              fields.documento,
+              fields.fechaNacimiento,
+              fields.telefono,
+              fields.celular,
+              fields.email,
+              fields.direccion,
+              fields.departamento,
+              fields.pais,
+              fields.status
+            ]
+          );
+          return { id: insertRes.rows[0]?.id || null, fields };
+        };
+
+        const insertSale = async ({
+          contactId,
+          sellerId,
+          medioPago,
+          sellerNameSnapshot,
+          sellerOrigin,
+          fechaVenta,
+          documentoCobranza,
+          saleGroupId,
+          parentSaleId
+        }) => {
+          const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
+          const vals = [contactId, medioPago, sellerNameSnapshot, sellerOrigin];
+          if (sellerUserCol) {
+            cols.push(sellerUserCol);
+            vals.push(sellerId || null);
+          }
+          if (fechaVentaCol) {
+            cols.push(fechaVentaCol);
+            vals.push(fechaVenta);
+          }
+          if (hasDocumentoCobranza) {
+            cols.push("documento_cobranza");
+            vals.push(documentoCobranza || null);
+          }
+          if (hasSaleGroupId) {
+            cols.push("sale_group_id");
+            vals.push(saleGroupId || null);
+          }
+          if (hasParentSaleId) {
+            cols.push("parent_sale_id");
+            vals.push(parentSaleId || null);
+          }
+
+          const placeholders = vals.map((_, idx) => `$${idx + 1}`);
+          const saleInsert = await client.query(
+            `
+            INSERT INTO sales (${cols.join(", ")})
+            VALUES (${placeholders.join(", ")})
+            RETURNING id
+            `,
+            vals
+          );
+          return saleInsert.rows[0]?.id || null;
+        };
+
+        const main = await upsertContact(contactPayload);
+        if (!main.id) {
+          await client.query("ROLLBACK");
+          return json(422, { ok: false, message: "Nombre y apellido son requeridos" });
+        }
+
+        const products = Array.isArray(body?.products) ? body.products : [];
+        const sellerId = body?.vendedor_id || dbUser?.id || null;
+        const sellerNameSnapshot = normalizeText(
+          products[0]?.sellerName ||
+          products[0]?.seller_name ||
+          [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() ||
+          dbUser?.email ||
+          ""
+        ) || null;
+        const sellerOrigin = sellerId ? "interno" : "externo";
+
+        const saleGroupId = hasSaleGroupId ? crypto.randomUUID() : null;
+        let mainSaleId = null;
+
+        const createProductAndSale = async ({
+          contactId,
+          product,
+          medioPagoOverride,
+          parentSaleId
+        }) => {
+          const productName = normalizeText(
+            product?.nombre_producto || product?.nombreProducto || product?.nombre
+          ) || "Producto";
+          const plan = normalizeText(product?.plan) || null;
+          const precio = parseNumber(product?.precio) ?? 0;
+          const fechaAlta = parseDate(product?.fecha_alta || product?.fechaAlta) || new Date().toISOString().slice(0, 10);
+          const estadoRaw = normalizeText(product?.estado || product?.producto_estado || "alta");
+          const estadoNorm = estadoRaw.toLowerCase();
+          const isAlta = estadoNorm === "alta" || estadoNorm === "activo";
+          const fechaBaja = isAlta ? null : (parseDate(product?.fecha_baja || product?.fechaBaja) || fechaAlta);
+          const motivoBaja = isAlta ? null : "otro";
+          const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
+          const medioPago = normalizeText(product?.medio_pago || product?.medioPago || medioPagoOverride) || null;
+          const fechaVenta = fechaAlta;
+
+          let productId = null;
+          if (productName) {
+            const productRes = await client.query(
+              `SELECT id FROM products WHERE lower(nombre) = lower($1) LIMIT 1`,
+              [productName]
+            );
+            productId = productRes.rows[0]?.id || null;
+            if (!productId) {
+              const productInsert = await client.query(
+                `
+                INSERT INTO products (nombre, categoria, precio, activo)
+                VALUES ($1, 'General', $2, true)
+                RETURNING id
+                `,
+                [productName, precio || 0]
+              );
+              productId = productInsert.rows[0]?.id || null;
+            }
+          }
+
+          const saleId = await insertSale({
+            contactId,
+            sellerId,
+            medioPago,
+            sellerNameSnapshot,
+            sellerOrigin,
+            fechaVenta,
+            documentoCobranza: cobranzaDocumento,
+            saleGroupId,
+            parentSaleId
+          });
+
+          if (saleId && productId) {
             await client.query(
               `
-              INSERT INTO contact_products (
-                contact_id,
-                nombre_producto,
-                plan,
-                precio,
-                fecha_alta,
-                cuotas_pagas,
-                carencia_cuotas,
-                estado,
-                motivo_baja,
-                motivo_baja_detalle,
-                fecha_baja,
-                seller_user_id,
-                seller_name_snapshot,
-                seller_origin,
-                sale_id
+              INSERT INTO sale_items (
+                sale_id,
+                product_id,
+                product_name_snapshot,
+                price
               )
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              VALUES ($1,$2,$3,$4)
               `,
-              [
-                contactId,
-                productName,
-                plan,
-                precio || 0,
-                fechaAlta,
-                0,
-                0,
-                isAlta ? "alta" : "baja",
-                motivoBaja,
-                motivoBajaDetalle,
-                fechaBaja,
-                sellerId,
-                sellerNameSnapshot,
-                sellerOrigin,
-                saleId
-              ]
+              [saleId, productId, productName || "Producto", precio || 0]
             );
+          }
+
+          await client.query(
+            `
+            INSERT INTO contact_products (
+              contact_id,
+              nombre_producto,
+              plan,
+              precio,
+              fecha_alta,
+              cuotas_pagas,
+              carencia_cuotas,
+              estado,
+              motivo_baja,
+              motivo_baja_detalle,
+              fecha_baja,
+              seller_user_id,
+              seller_name_snapshot,
+              seller_origin,
+              sale_id
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            `,
+            [
+              contactId,
+              productName,
+              plan,
+              precio || 0,
+              fechaAlta,
+              0,
+              0,
+              isAlta ? "alta" : "baja",
+              motivoBaja,
+              motivoBajaDetalle,
+              fechaBaja,
+              sellerId,
+              sellerNameSnapshot,
+              sellerOrigin,
+              saleId
+            ]
+          );
+
+          return saleId;
+        };
+
+        for (const product of products) {
+          const saleId = await createProductAndSale({
+            contactId: main.id,
+            product,
+            medioPagoOverride: body?.medioPago || null,
+            parentSaleId: mainSaleId || null
+          });
+          if (!mainSaleId && saleId) mainSaleId = saleId;
+        }
+
+        for (const familySale of familySales) {
+          const famContact = await upsertContact(familySale?.contact || {});
+          if (!famContact.id) continue;
+          const famProducts = Array.isArray(familySale?.products) ? familySale.products : [];
+          for (const product of famProducts) {
+            await createProductAndSale({
+              contactId: famContact.id,
+              product,
+              medioPagoOverride: familySale?.medioPago || null,
+              parentSaleId: mainSaleId || null
+            });
           }
         }
 
@@ -7494,7 +7668,7 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
-          data: { id: contactId }
+          data: { id: main.id }
         });
       } catch (error) {
         await client.query("ROLLBACK");
@@ -7980,7 +8154,14 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-              const result = await client.query(
+        const salesCols = await getTableColumns(client, "sales");
+        const extraSelect = [];
+        if (salesCols.has("sale_group_id")) extraSelect.push("s.sale_group_id");
+        if (salesCols.has("parent_sale_id")) extraSelect.push("s.parent_sale_id");
+        if (salesCols.has("documento_cobranza")) extraSelect.push("s.documento_cobranza");
+        const extraSelectSql = extraSelect.length ? `, ${extraSelect.join(", ")}` : "";
+
+        const result = await client.query(
           `
           SELECT
             s.id AS sale_id,
@@ -7998,6 +8179,7 @@ export const handler = async (event) => {
             c.documento,
             c.email,
             c.direccion
+            ${extraSelectSql}
           FROM sales s
           JOIN contact_products cp ON cp.sale_id = s.id
           JOIN contacts c ON c.id = s.contact_id
@@ -8006,7 +8188,8 @@ export const handler = async (event) => {
           `,
           [sellerId]
         );
-const items = result.rows.map((row) => ({
+
+        const toItem = (row) => ({
           id: row.sale_id,
           sale_id: row.sale_id,
           medio_pago: row.medio_pago || null,
@@ -8024,8 +8207,38 @@ const items = result.rows.map((row) => ({
           ubicacion: row.departamento || row.direccion || null,
           documento: row.documento || null,
           email: row.email || null,
-          direccion: row.direccion || null
-        }));
+          direccion: row.direccion || null,
+          sale_group_id: row.sale_group_id || null,
+          parent_sale_id: row.parent_sale_id || null,
+          documento_cobranza: row.documento_cobranza || null
+        });
+
+        const rawItems = result.rows.map((row) => toItem(row));
+        const hasGrouping = salesCols.has("sale_group_id") || salesCols.has("parent_sale_id");
+        let items = rawItems;
+
+        if (hasGrouping) {
+          const groups = new Map();
+          for (const item of rawItems) {
+            const groupKey = item.sale_group_id || item.parent_sale_id || item.sale_id;
+            if (!groups.has(groupKey)) groups.set(groupKey, []);
+            groups.get(groupKey).push(item);
+          }
+
+          items = [];
+          for (const [groupKey, groupItems] of groups.entries()) {
+            let primary = groupItems.find((i) => !i.parent_sale_id) || groupItems[0];
+            if (primary.sale_id !== groupKey) {
+              const direct = groupItems.find((i) => i.sale_id === groupKey);
+              if (direct) primary = direct;
+            }
+            const related = groupItems.filter((i) => i.sale_id !== primary.sale_id);
+            items.push({
+              ...primary,
+              related_sales: related
+            });
+          }
+        }
 
         return json(200, {
           ok: true,
