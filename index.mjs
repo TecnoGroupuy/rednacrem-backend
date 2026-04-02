@@ -7613,12 +7613,13 @@ export const handler = async (event) => {
           if (principalBatchCache) return principalBatchCache;
 
           let principalLeadId = null;
+          if (!leadIdColumn) return null;
           if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
               [principalContactId]
             );
-            principalLeadId = leadRes.rows[0]?.id || null;
+            principalLeadId = leadRes.rows[0]?.lead_id || null;
           }
 
           let principalDocumento = null;
@@ -7630,26 +7631,26 @@ export const handler = async (event) => {
             principalDocumento = principalContactRes.rows[0]?.documento || null;
             if (principalDocumento) {
               const leadRes = await client.query(
-                `SELECT id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
+                `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
                 [principalDocumento]
               );
-              principalLeadId = leadRes.rows[0]?.id || null;
+              principalLeadId = leadRes.rows[0]?.lead_id || null;
             }
           }
 
           if (!principalLeadId && principalDocumentoFallback) {
             const leadRes = await client.query(
-              `SELECT id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
               [principalDocumentoFallback]
             );
-            principalLeadId = leadRes.rows[0]?.id || null;
+            principalLeadId = leadRes.rows[0]?.lead_id || null;
             principalDocumento = principalDocumentoFallback;
           }
 
           if (!principalLeadId && principalPhoneFallback) {
             const leadRes = await client.query(
               `
-              SELECT id
+              SELECT ${leadIdColumn} AS lead_id
               FROM datos_para_trabajar
               WHERE regexp_replace(telefono, '\\D', '', 'g') = $1
                  OR regexp_replace(celular, '\\D', '', 'g') = $1
@@ -7657,7 +7658,7 @@ export const handler = async (event) => {
               `,
               [principalPhoneFallback]
             );
-            principalLeadId = leadRes.rows[0]?.id || null;
+            principalLeadId = leadRes.rows[0]?.lead_id || null;
           }
 
           if (!principalLeadId) return null;
@@ -7713,7 +7714,10 @@ export const handler = async (event) => {
           principalPhoneFallback = normalizePhoneDigits(main.fields?.telefono || main.fields?.celular || "");
         }
 
+        const leadIdColumn = dCols.has("id") ? "id" : (dCols.has("contact_id") ? "contact_id" : null);
+
         const insertLeadFromFields = async ({ fields, contactId, batchTipo }) => {
+          if (!leadIdColumn) return null;
           const columns = [];
           const values = [];
           const params = [];
@@ -7746,11 +7750,11 @@ export const handler = async (event) => {
             `
             INSERT INTO datos_para_trabajar (${columns.join(", ")})
             VALUES (${params.join(", ")})
-            RETURNING id
+            RETURNING ${leadIdColumn} AS lead_id
             `,
             values
           );
-          return insertRes.rows[0]?.id || null;
+          return insertRes.rows[0]?.lead_id || null;
         };
 
         const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId }) => {
@@ -7761,18 +7765,19 @@ export const handler = async (event) => {
           if (!principal?.batchId) return false;
 
           let leadId = null;
+          if (!leadIdColumn) return false;
           if (hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
               [safeContactId]
             );
-            leadId = leadRes.rows[0]?.id || null;
+            leadId = leadRes.rows[0]?.lead_id || null;
           }
 
           if (!leadId && fields?.documento) {
             const leadRes = await client.query(
               `
-              SELECT id, contact_id
+              SELECT ${leadIdColumn} AS lead_id, contact_id
               FROM datos_para_trabajar
               WHERE documento = $1
               ORDER BY updated_at DESC NULLS LAST, created_at DESC
@@ -7780,7 +7785,7 @@ export const handler = async (event) => {
               `,
               [fields.documento]
             );
-            leadId = leadRes.rows[0]?.id || null;
+            leadId = leadRes.rows[0]?.lead_id || null;
           }
 
           if (!leadId) {
@@ -7793,7 +7798,7 @@ export const handler = async (event) => {
 
           if (!leadId) return false;
 
-          if (hasContactIdCol) {
+          if (hasContactIdCol && leadIdColumn === "id") {
             await client.query(
               `
               UPDATE datos_para_trabajar
@@ -7898,18 +7903,19 @@ export const handler = async (event) => {
           if (!safeContactId || !safeSellerId) return;
 
           let leadId = null;
+          if (!leadIdColumn) return;
           if (hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
               [safeContactId]
             );
-            leadId = leadRes.rows[0]?.id || null;
+            leadId = leadRes.rows[0]?.lead_id || null;
           }
 
           if (!leadId && documento) {
             const leadRes = await client.query(
               `
-              SELECT id, contact_id
+              SELECT ${leadIdColumn} AS lead_id, contact_id
               FROM datos_para_trabajar
               WHERE documento = $1
               ORDER BY updated_at DESC NULLS LAST, created_at DESC
@@ -7917,12 +7923,12 @@ export const handler = async (event) => {
               `,
               [documento]
             );
-            leadId = leadRes.rows[0]?.id || null;
+            leadId = leadRes.rows[0]?.lead_id || null;
           }
 
           if (!leadId) return;
 
-          if (hasContactIdCol) {
+          if (hasContactIdCol && leadIdColumn === "id") {
             await client.query(
               `
               UPDATE datos_para_trabajar
