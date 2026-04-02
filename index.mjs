@@ -8718,6 +8718,7 @@ export const handler = async (event) => {
             s.id AS sale_id,
             s.medio_pago,
             s.fecha_venta,
+            s.created_at AS sale_created_at,
             s.seller_name_snapshot,
             cp.nombre_producto,
             cp.plan,
@@ -8740,11 +8741,23 @@ export const handler = async (event) => {
           [sellerId]
         );
 
-        const toItem = (row) => ({
+        const toItem = (row) => {
+          const fechaVentaRaw = row.fecha_venta || null;
+          const createdAtRaw = row.sale_created_at || null;
+          let fechaVenta = fechaVentaRaw;
+          // If fecha_venta is date-only (midnight), fall back to created_at to preserve time.
+          if (fechaVentaRaw && createdAtRaw) {
+            const fv = new Date(fechaVentaRaw);
+            if (!Number.isNaN(fv.getTime())) {
+              const hasTime = fv.getUTCHours() !== 0 || fv.getUTCMinutes() !== 0 || fv.getUTCSeconds() !== 0;
+              if (!hasTime) fechaVenta = createdAtRaw;
+            }
+          }
+          return ({
           id: row.sale_id,
           sale_id: row.sale_id,
           medio_pago: row.medio_pago || null,
-          fecha_venta: row.fecha_venta || null,
+          fecha_venta: fechaVenta,
           seller_name_snapshot: row.seller_name_snapshot || null,
           nombre_producto: row.nombre_producto || null,
           plan: row.plan || null,
@@ -8762,7 +8775,8 @@ export const handler = async (event) => {
           sale_group_id: row.sale_group_id || null,
           parent_sale_id: row.parent_sale_id || null,
           documento_cobranza: row.documento_cobranza || null
-        });
+          });
+        };
 
         const rawItems = result.rows.map((row) => toItem(row));
         const hasGrouping = salesCols.has("sale_group_id") || salesCols.has("parent_sale_id");
