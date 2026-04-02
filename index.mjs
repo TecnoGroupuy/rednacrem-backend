@@ -11476,9 +11476,6 @@ const items = result.rows.map((row) => ({
       }
 
       const where = conditions.join(" AND ");
-        const orderBy = sort && sortableColumns[sort]
-          ? `${sortableColumns[sort]} ${dir}`
-          : "cp.fecha_baja DESC";
 
       const client = createDbClient();
       await client.connect();
