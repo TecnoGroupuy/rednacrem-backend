@@ -10242,51 +10242,121 @@ const items = result.rows.map((row) => ({
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const updates = [];
-      const values = [];
-      let idx = 1;
-
-      const fields = {
-        nombre: normalizeText(body?.nombre),
-        apellido: normalizeText(body?.apellido),
-        telefono: normalizeText(body?.telefono),
-        celular: normalizeText(body?.celular),
-        documento: normalizeText(body?.documento),
-        direccion: normalizeText(body?.direccion),
-        departamento: normalizeText(body?.departamento),
-        localidad: normalizeText(body?.localidad)
-      };
-
-      for (const [key, value] of Object.entries(fields)) {
-        if (!value) continue;
-        updates.push(`${key} = $${idx}`);
-      }
-
-      if (!updates.length) {
-        return json(200, { ok: true, success: true, data: null, error: null });
-      }
-
       const client = createDbClient();
       await client.connect();
       try {
+        const leadCols = await getLeadContactColumns(client);
+        const dCols = leadCols?.d || new Set();
+        const hasContactIdCol = dCols.has("contact_id");
+
+        const leadRes = await client.query(
+          `SELECT * FROM datos_para_trabajar WHERE id = $1 LIMIT 1`,
+          [leadId]
+        );
+        const existing = leadRes.rows[0];
+        if (!existing) {
+          return json(404, { ok: false, message: "Lead not found" });
+        }
+
+        const hasField = (key) => Object.prototype.hasOwnProperty.call(body || {}, key);
+        const normTextOrNull = (val) => {
+          const t = normalizeText(val);
+          return t ? t : null;
+        };
+
+        const updates = [];
+        const values = [];
+        let idx = 1;
+        const push = (col, val) => {
+          if (val === undefined) return;
+          updates.push(`${col} = $${idx}`);
+          values.push(val);
+          idx += 1;
+        };
+
+        push("nombre", hasField("nombre") ? normTextOrNull(body?.nombre) : undefined);
+        push("apellido", hasField("apellido") ? normTextOrNull(body?.apellido) : undefined);
+        push("telefono", hasField("telefono") ? normTextOrNull(body?.telefono) : undefined);
+        push("celular", hasField("celular") ? normTextOrNull(body?.celular) : undefined);
+        push("documento", hasField("documento") ? normTextOrNull(body?.documento) : undefined);
+        push("direccion", hasField("direccion") ? normTextOrNull(body?.direccion) : undefined);
+        push("departamento", hasField("departamento") ? normTextOrNull(body?.departamento) : undefined);
+        push("localidad", hasField("localidad") ? normTextOrNull(body?.localidad) : undefined);
+
+        if (!updates.length) {
+          return json(200, { ok: true, success: true, lead: existing, data: { lead: existing }, error: null });
+        }
+
         await client.query(
           `
           UPDATE datos_para_trabajar
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
           `,
-          values
+          [...values, leadId]
         );
+
+        // Sync celular (and other contact fields if provided) to contacts when possible
+        const shouldSyncContact =
+          hasField("celular") || hasField("telefono") || hasField("nombre") || hasField("apellido") || hasField("documento");
+        if (shouldSyncContact) {
+          let contactWhere = null;
+          let contactValues = [];
+          let cIdx = 1;
+          if (hasContactIdCol && existing.contact_id) {
+            contactWhere = `id = $${cIdx}`;
+            contactValues.push(existing.contact_id);
+            cIdx += 1;
+          } else if ((hasField("documento") ? normTextOrNull(body?.documento) : existing.documento)) {
+            contactWhere = `documento = $${cIdx}`;
+            contactValues.push(hasField("documento") ? normTextOrNull(body?.documento) : existing.documento);
+            cIdx += 1;
+          }
+
+          if (contactWhere) {
+            const contactUpdates = [];
+            const contactSetValues = [];
+            let sIdx = cIdx;
+            const pushContact = (col, val) => {
+              if (val === undefined) return;
+              contactUpdates.push(`${col} = $${sIdx}`);
+              contactSetValues.push(val);
+              sIdx += 1;
+            };
+            pushContact("celular", hasField("celular") ? normTextOrNull(body?.celular) : undefined);
+            pushContact("telefono", hasField("telefono") ? normTextOrNull(body?.telefono) : undefined);
+            pushContact("nombre", hasField("nombre") ? normTextOrNull(body?.nombre) : undefined);
+            pushContact("apellido", hasField("apellido") ? normTextOrNull(body?.apellido) : undefined);
+            pushContact("documento", hasField("documento") ? normTextOrNull(body?.documento) : undefined);
+            if (contactUpdates.length) {
+              await client.query(
+                `
+                UPDATE contacts
+                SET ${contactUpdates.join(", ")}, updated_at = now()
+                WHERE ${contactWhere}
+                `,
+                [...contactValues, ...contactSetValues]
+              );
+            }
+          }
+        }
+
+        const refreshed = await client.query(
+          `SELECT * FROM datos_para_trabajar WHERE id = $1 LIMIT 1`,
+          [leadId]
+        );
+        const updatedLead = refreshed.rows[0] || existing;
+
+        return json(200, {
+          ok: true,
+          success: true,
+          lead: updatedLead,
+          data: { lead: updatedLead },
+          error: null
+        });
       } finally {
         await client.end();
       }
-
-      return json(200, {
-        ok: true,
-        success: true,
-        data: { batchId, sellerId: resolvedSellerId },
-        error: null
-      });
     } catch (error) {
       return json(500, {
         ok: false,
