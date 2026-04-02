@@ -10263,15 +10263,28 @@ const items = result.rows.map((row) => ({
         const telefono = normalizeText(lead.telefono || "");
         const celular = normalizeText(lead.celular || "");
         const contactId = lead.contact_id || null;
-        if (!telefono && !celular) {
+
+        const normalizeDigits = (value) => String(value || "").replace(/\D/g, "");
+        const isDummyNumber = (value) => {
+          const digits = normalizeDigits(value);
+          if (!digits || digits.length < 8) return true;
+          if (/^0+$/.test(digits)) return true;
+          if (/^(0?9)+$/.test(digits)) return true; // common dummy 099999999, 09999999
+          if (/^(\d)\1+$/.test(digits)) return true;
+          return false;
+        };
+
+        const basePhones = [telefono, celular].filter(Boolean).filter((v) => !isDummyNumber(v));
+        if (!basePhones.length) {
           return json(200, { ok: true, success: true, data: { items: [] }, items: [] });
         }
 
         const params = [];
         let idx = 1;
         const phoneVals = [];
-        if (telefono) phoneVals.push(telefono);
-        if (celular && celular !== telefono) phoneVals.push(celular);
+        for (const val of basePhones) {
+          if (!phoneVals.includes(val)) phoneVals.push(val);
+        }
         const phonePlaceholders = phoneVals.map((val) => {
           params.push(val);
           return `$${idx++}`;
@@ -10306,6 +10319,7 @@ const items = result.rows.map((row) => ({
         const items = [];
         const seen = new Set();
         const pushUnique = (row) => {
+          if (isDummyNumber(row.telefono) && isDummyNumber(row.celular)) return;
           const key = [
             row.nombre || "",
             row.apellido || "",
