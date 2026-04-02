@@ -7365,6 +7365,10 @@ export const handler = async (event) => {
       try {
         await client.query("BEGIN");
         const salesCols = await getTableColumns(client, "sales");
+        const leadCols = await getLeadContactColumns(client);
+        const dCols = leadCols?.d || new Set();
+        const hasContactIdCol = dCols.has("contact_id");
+        const hasLeadEstadoCol = dCols.has("estado");
         const sellerUserCol = salesCols.has("seller_user_id")
           ? "seller_user_id"
           : (salesCols.has("seller_id") ? "seller_id" : null);
@@ -7531,6 +7535,116 @@ export const handler = async (event) => {
         const saleGroupId = hasSaleGroupId ? crypto.randomUUID() : null;
         let mainSaleId = null;
 
+        const linkLeadSaleIfPossible = async ({ contactId, documento, sellerId }) => {
+          if (!contactId || !sellerId) return;
+
+          let leadId = null;
+          if (hasContactIdCol) {
+            const leadRes = await client.query(
+              `SELECT id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              [contactId]
+            );
+            leadId = leadRes.rows[0]?.id || null;
+          }
+
+          if (!leadId && documento) {
+            const leadRes = await client.query(
+              `
+              SELECT id, contact_id
+              FROM datos_para_trabajar
+              WHERE documento = $1
+              ORDER BY updated_at DESC NULLS LAST, created_at DESC
+              LIMIT 1
+              `,
+              [documento]
+            );
+            leadId = leadRes.rows[0]?.id || null;
+          }
+
+          if (!leadId) return;
+
+          if (hasContactIdCol) {
+            await client.query(
+              `
+              UPDATE datos_para_trabajar
+              SET contact_id = $2, updated_at = now()
+              WHERE id = $1 AND (contact_id IS NULL OR contact_id = '')
+              `,
+              [leadId, contactId]
+            );
+          }
+
+          const statusRes = await client.query(
+            `
+            SELECT batch_id, intentos
+            FROM lead_contact_status
+            WHERE contact_id = $1 AND assigned_to = $2
+            ORDER BY updated_at DESC
+            LIMIT 1
+            `,
+            [leadId, sellerId]
+          );
+          const batchId = statusRes.rows[0]?.batch_id || null;
+          if (!batchId) return;
+
+          const lastVentaRes = await client.query(
+            `
+            SELECT id, (fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
+            FROM lead_management_history
+            WHERE contact_id = $1
+              AND batch_id = $2
+              AND user_id = $3
+              AND resultado = 'venta'
+            ORDER BY fecha_gestion DESC
+            LIMIT 1
+            `,
+            [leadId, batchId, sellerId]
+          );
+          const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
+          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
+          if (lastVentaDate === hoy) return;
+
+          await client.query(
+            `
+            INSERT INTO lead_management_history (
+              contact_id,
+              batch_id,
+              user_id,
+              resultado,
+              nota,
+              fecha_gestion,
+              proxima_accion
+            )
+            VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
+            `,
+            [leadId, batchId, sellerId, "Venta registrada desde contacto nuevo"]
+          );
+
+          await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'venta',
+                intentos = COALESCE(intentos, 0) + 1,
+                proxima_accion = NULL,
+                ultimo_intento_at = now(),
+                updated_at = now()
+            WHERE contact_id = $1 AND batch_id = $2
+            `,
+            [leadId, batchId]
+          );
+
+          if (hasLeadEstadoCol) {
+            await client.query(
+              `
+              UPDATE datos_para_trabajar
+              SET estado = 'trabajado', updated_at = now()
+              WHERE id = $1 AND estado <> 'bloqueado'
+              `,
+              [leadId]
+            );
+          }
+        };
+
         const createProductAndSale = async ({
           contactId,
           product,
@@ -7665,6 +7779,12 @@ export const handler = async (event) => {
             });
           }
         }
+
+        await linkLeadSaleIfPossible({
+          contactId: main.id,
+          documento: main.fields?.documento || null,
+          sellerId
+        });
 
         await client.query("COMMIT");
 
