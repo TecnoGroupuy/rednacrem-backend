@@ -7438,6 +7438,8 @@ export const handler = async (event) => {
         const hasSaleGroupId = salesCols.has("sale_group_id");
         const hasParentSaleId = salesCols.has("parent_sale_id");
 
+        const createManagementInContacts = false;
+
         const upsertContact = async (payload) => {
           const fields = buildContactFields(payload || {});
           if (!fields.nombre || !fields.apellido) {
@@ -7949,59 +7951,14 @@ export const handler = async (event) => {
             );
           }
 
-          const lastVentaRes = await client.query(
-            `
-            SELECT (fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
-            FROM lead_management_history
-            WHERE contact_id = $1
-              AND batch_id = $2
-              AND user_id = $3
-              AND resultado = 'venta'
-            ORDER BY fecha_gestion DESC
-            LIMIT 1
-            `,
-            [leadId, principal.batchId, safeSellerId]
-          );
-          const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
-          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
-          if (lastVentaDate !== hoy) {
-            const alreadyToday = await client.query(
-              `
-              SELECT 1
-              FROM lead_management_history
-              WHERE contact_id = $1
-                AND resultado = 'venta'
-                AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-              LIMIT 1
-              `,
-              [leadId, hoy]
-            );
-            if (alreadyToday.rows.length) {
-              return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId: principal.batchId };
-            }
-            const insertMgmt = await client.query(
-              `
-              INSERT INTO lead_management_history (
-                contact_id,
-                batch_id,
-                user_id,
-                resultado,
-                nota,
-                fecha_gestion,
-                proxima_accion
-              )
-              VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
-              RETURNING id
-              `,
-              [leadId, principal.batchId, safeSellerId, "Venta vinculada a contacto principal"]
-            );
+          if (!createManagementInContacts) {
             return {
               ok: true,
-              created: true,
+              created: false,
+              reason: "management_disabled",
               contactId: safeContactId,
               leadId,
-              batchId: principal.batchId,
-              managementId: insertMgmt.rows[0]?.id || null
+              batchId: principal.batchId
             };
           }
 
@@ -8099,59 +8056,16 @@ export const handler = async (event) => {
             return { ok: false, reason: "missing_batch", contactId: safeContactId, leadId };
           }
 
-          const lastVentaRes = await client.query(
-            `
-            SELECT id, (fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
-            FROM lead_management_history
-            WHERE contact_id = $1
-              AND batch_id = $2
-              AND user_id = $3
-              AND resultado = 'venta'
-            ORDER BY fecha_gestion DESC
-            LIMIT 1
-            `,
-            [leadId, batchId, safeSellerId]
-          );
-          const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
-          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
-          if (lastVentaDate === hoy) return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId };
-          const alreadyToday = await client.query(
-            `
-            SELECT 1
-            FROM lead_management_history
-            WHERE contact_id = $1
-              AND resultado = 'venta'
-              AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-            LIMIT 1
-            `,
-            [leadId, hoy]
-          );
-          if (alreadyToday.rows.length) return { ok: true, created: false, reason: "already_today", contactId: safeContactId, leadId, batchId };
-
-          const insertMgmt = await client.query(
-            `
-            INSERT INTO lead_management_history (
-              contact_id,
-              batch_id,
-              user_id,
-              resultado,
-              nota,
-              fecha_gestion,
-              proxima_accion
-            )
-            VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
-            RETURNING id
-            `,
-            [leadId, batchId, safeSellerId, "Venta registrada desde contacto nuevo"]
-          );
-          return {
-            ok: true,
-            created: true,
-            contactId: safeContactId,
-            leadId,
-            batchId,
-            managementId: insertMgmt.rows[0]?.id || null
-          };
+          if (!createManagementInContacts) {
+            return {
+              ok: true,
+              created: false,
+              reason: "management_disabled",
+              contactId: safeContactId,
+              leadId,
+              batchId
+            };
+          }
 
           await client.query(
             `
