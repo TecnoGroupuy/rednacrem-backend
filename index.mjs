@@ -10217,6 +10217,133 @@ const items = result.rows.map((row) => ({
     }
   }
 
+  if (method === "GET" && path.match(/\/leads\/([^/]+)\/familiares$/)) {
+    const match = path.match(/\/leads\/([^/]+)\/familiares$/);
+    const leadId = match?.[1];
+    if (!leadId) {
+      return json(400, { ok: false, message: "Lead id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const leadCols = await getLeadContactColumns(client);
+        const dCols = leadCols?.d || new Set();
+        const hasContactIdCol = dCols.has("contact_id");
+
+        const leadRes = await client.query(
+          `
+          SELECT id, telefono, celular, ${hasContactIdCol ? "contact_id" : "NULL::uuid AS contact_id"}
+          FROM datos_para_trabajar
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [leadId]
+        );
+
+        const lead = leadRes.rows[0];
+        if (!lead) {
+          return json(404, { ok: false, message: "Lead not found" });
+        }
+
+        const telefono = normalizeText(lead.telefono || "");
+        const celular = normalizeText(lead.celular || "");
+        const contactId = lead.contact_id || null;
+        if (!telefono && !celular) {
+          return json(200, { ok: true, success: true, data: { items: [] }, items: [] });
+        }
+
+        const params = [];
+        let idx = 1;
+        const phoneVals = [];
+        if (telefono) phoneVals.push(telefono);
+        if (celular && celular !== telefono) phoneVals.push(celular);
+        const phonePlaceholders = phoneVals.map((val) => {
+          params.push(val);
+          return `$${idx++}`;
+        });
+
+        const dptRes = await client.query(
+          `
+          SELECT id, nombre, apellido, telefono, celular
+          FROM datos_para_trabajar
+          WHERE id <> $${idx}
+            AND (
+              telefono = ANY(ARRAY[${phonePlaceholders.join(", ")}]) OR
+              celular = ANY(ARRAY[${phonePlaceholders.join(", ")}])
+            )
+          `,
+          [...params, leadId]
+        );
+
+        const contactsRes = await client.query(
+          `
+          SELECT id, nombre, apellido, telefono, celular
+          FROM contacts
+          WHERE (
+            telefono = ANY(ARRAY[${phonePlaceholders.join(", ")}]) OR
+            celular = ANY(ARRAY[${phonePlaceholders.join(", ")}])
+          )
+          ${contactId ? `AND id <> $${idx}` : ""}
+          `,
+          contactId ? [...params, contactId] : params
+        );
+
+        const items = [];
+        const seen = new Set();
+        const pushUnique = (row) => {
+          const key = [
+            row.nombre || "",
+            row.apellido || "",
+            row.telefono || "",
+            row.celular || ""
+          ].join("|");
+          if (seen.has(key)) return;
+          seen.add(key);
+          items.push({
+            id: row.id,
+            nombre: row.nombre || null,
+            apellido: row.apellido || null,
+            telefono: row.telefono || null,
+            celular: row.celular || null
+          });
+        };
+
+        for (const row of dptRes.rows) pushUnique(row);
+        for (const row of contactsRes.rows) pushUnique(row);
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: { items },
+          items
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load familiares",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "PUT" && path.match(/\/leads\/([^/]+)$/)) {
     const match = path.match(/\/leads\/([^/]+)$/);
     const leadId = match?.[1];
