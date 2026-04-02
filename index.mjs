@@ -10715,23 +10715,8 @@ export const handler = async (event) => {
         );
         const s = statsResult.rows[0] || {};
         const l = lotesResult.rows[0] || {};
-        const manualSalesRes = await client.query(
-          `
-          SELECT COUNT(*)::int AS manual_sales
-          FROM sales s
-          LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
-          LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
-          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
-          WHERE s.seller_user_id = $1
-            AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-            AND ($3::text IS NULL OR lb.tipo = $3)
-          `,
-          [sellerId, fecha, batchTipo]
-        );
-
         const ventasLead = parseInt(s.ventas || "0", 10);
-        const manualSales = parseInt(manualSalesRes.rows[0]?.manual_sales || "0", 10);
-        const ventasTotal = ventasLead + manualSales;
+        const ventasTotal = ventasLead;
         const rechazosTotal = parseInt(s.rechazos || "0", 10);
         const seguimientoTotal = parseInt(s.seguimiento || "0", 10);
         const noContestaTotal = parseInt(s.no_contesta || "0", 10);
