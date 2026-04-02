@@ -7914,6 +7914,18 @@ export const handler = async (event) => {
           const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
           const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
           if (lastVentaDate !== hoy) {
+            const alreadyToday = await client.query(
+              `
+              SELECT 1
+              FROM lead_management_history
+              WHERE contact_id = $1
+                AND resultado = 'venta'
+                AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+              LIMIT 1
+              `,
+              [leadId, hoy]
+            );
+            if (alreadyToday.rows.length) return true;
             await client.query(
               `
               INSERT INTO lead_management_history (
@@ -8016,6 +8028,18 @@ export const handler = async (event) => {
           const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
           const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
           if (lastVentaDate === hoy) return;
+          const alreadyToday = await client.query(
+            `
+            SELECT 1
+            FROM lead_management_history
+            WHERE contact_id = $1
+              AND resultado = 'venta'
+              AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+            LIMIT 1
+            `,
+            [leadId, hoy]
+          );
+          if (alreadyToday.rows.length) return;
 
           await client.query(
             `
