@@ -7520,6 +7520,10 @@ export const handler = async (event) => {
           await client.query("ROLLBACK");
           return json(422, { ok: false, message: "Nombre y apellido son requeridos" });
         }
+        if (!principalContactId && main?.id) {
+          principalContactId = main.id;
+          principalDocumentoFallback = main.fields?.documento || null;
+        }
 
         const products = Array.isArray(body?.products) ? body.products : [];
         const sellerId = body?.vendedor_id || dbUser?.id || null;
@@ -7535,7 +7539,7 @@ export const handler = async (event) => {
         const saleGroupId = hasSaleGroupId ? crypto.randomUUID() : null;
         let mainSaleId = null;
 
-        const principalContactId = normalizeText(
+        let principalContactId = normalizeText(
           body?.principal_contact_id ||
           body?.principalContactId ||
           body?.main_contact_id ||
@@ -7546,14 +7550,15 @@ export const handler = async (event) => {
           body?.contactIdPrincipal ||
           body?.contacto_principal
         ) || null;
+        let principalDocumentoFallback = null;
         let principalBatchCache = null;
 
         const resolvePrincipalBatch = async () => {
-          if (!principalContactId || !sellerId) return null;
+          if (!sellerId) return null;
           if (principalBatchCache) return principalBatchCache;
 
           let principalLeadId = null;
-          if (hasContactIdCol) {
+          if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
               [principalContactId]
@@ -7562,7 +7567,7 @@ export const handler = async (event) => {
           }
 
           let principalDocumento = null;
-          if (!principalLeadId) {
+          if (!principalLeadId && principalContactId) {
             const principalContactRes = await client.query(
               `SELECT documento FROM contacts WHERE id = $1 LIMIT 1`,
               [principalContactId]
@@ -7575,6 +7580,15 @@ export const handler = async (event) => {
               );
               principalLeadId = leadRes.rows[0]?.id || null;
             }
+          }
+
+          if (!principalLeadId && principalDocumentoFallback) {
+            const leadRes = await client.query(
+              `SELECT id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
+              [principalDocumentoFallback]
+            );
+            principalLeadId = leadRes.rows[0]?.id || null;
+            principalDocumento = principalDocumentoFallback;
           }
 
           if (!principalLeadId) return null;
