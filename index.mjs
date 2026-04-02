@@ -458,6 +458,48 @@ function isValidUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
+function sanitizeUuidValue(value) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  if (isValidUuid(trimmed)) return trimmed;
+  return value;
+}
+
+function sanitizeUuidFields(input) {
+  if (Array.isArray(input)) {
+    return input
+      .map(sanitizeUuidFields)
+      .filter((value) => value !== undefined);
+  }
+  if (!input || typeof input !== "object") return input;
+
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    const cleaned = sanitizeUuidFields(value);
+    const isUuidKey =
+      key === "id" ||
+      key.endsWith("_id") ||
+      key.endsWith("Id") ||
+      key.endsWith("_ids") ||
+      key.endsWith("Ids");
+
+    if (isUuidKey) {
+      if (Array.isArray(cleaned)) {
+        out[key] = cleaned
+          .map((v) => sanitizeUuidValue(v))
+          .filter((v) => v !== null && v !== "");
+      } else {
+        out[key] = sanitizeUuidValue(cleaned);
+      }
+      continue;
+    }
+
+    out[key] = cleaned;
+  }
+  return out;
+}
+
 function splitFullName(value) {
   const text = normalizeText(value);
   if (!text) return { nombre: "", apellido: "" };
@@ -7307,7 +7349,8 @@ export const handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/contacts")) {
-    const body = safeParseBody(event);
+    const bodyRaw = safeParseBody(event);
+    const body = sanitizeUuidFields(bodyRaw);
     if (body === null) {
       return json(400, { ok: false, message: "Invalid JSON body" });
     }
