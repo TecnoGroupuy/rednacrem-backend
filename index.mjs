@@ -7686,7 +7686,9 @@ export const handler = async (event) => {
         };
 
         const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId }) => {
-          if (!contactId || !sellerId) return false;
+          const safeContactId = isValidUuid(contactId) ? contactId : null;
+          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          if (!safeContactId || !safeSellerId) return false;
           const principal = await resolvePrincipalBatch();
           if (!principal?.batchId) return false;
 
@@ -7694,7 +7696,7 @@ export const handler = async (event) => {
           if (hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
-              [contactId]
+              [safeContactId]
             );
             leadId = leadRes.rows[0]?.id || null;
           }
@@ -7716,7 +7718,7 @@ export const handler = async (event) => {
           if (!leadId) {
             leadId = await insertLeadFromFields({
               fields,
-              contactId,
+              contactId: safeContactId,
               batchTipo: principal.batchTipo
             });
           }
@@ -7730,7 +7732,7 @@ export const handler = async (event) => {
               SET contact_id = $2, updated_at = now()
               WHERE id = $1 AND (contact_id IS NULL OR contact_id = '')
               `,
-              [leadId, contactId]
+              [leadId, safeContactId]
             );
           }
 
@@ -7745,16 +7747,16 @@ export const handler = async (event) => {
           );
           if (statusRes.rows.length) {
             await client.query(
-              `
-              UPDATE lead_contact_status
-              SET estado_venta = 'venta',
-                  intentos = COALESCE(intentos, 0) + 1,
-                  assigned_to = $3,
-                  ultimo_intento_at = now(),
-                  updated_at = now()
-              WHERE contact_id = $1 AND batch_id = $2
-              `,
-              [leadId, principal.batchId, sellerId]
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'venta',
+                intentos = COALESCE(intentos, 0) + 1,
+                assigned_to = $3,
+                ultimo_intento_at = now(),
+                updated_at = now()
+            WHERE contact_id = $1 AND batch_id = $2
+            `,
+              [leadId, principal.batchId, safeSellerId]
             );
           } else {
             await client.query(
@@ -7771,7 +7773,7 @@ export const handler = async (event) => {
               )
               VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
               `,
-              [leadId, principal.batchId, sellerId]
+              [leadId, principal.batchId, safeSellerId]
             );
           }
 
@@ -7786,7 +7788,7 @@ export const handler = async (event) => {
             ORDER BY fecha_gestion DESC
             LIMIT 1
             `,
-            [leadId, principal.batchId, sellerId]
+            [leadId, principal.batchId, safeSellerId]
           );
           const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
           const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
@@ -7804,7 +7806,7 @@ export const handler = async (event) => {
               )
               VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
               `,
-              [leadId, principal.batchId, sellerId, "Venta vinculada a contacto principal"]
+              [leadId, principal.batchId, safeSellerId, "Venta vinculada a contacto principal"]
             );
           }
 
@@ -7823,13 +7825,15 @@ export const handler = async (event) => {
         };
 
         const linkLeadSaleIfPossible = async ({ contactId, documento, sellerId }) => {
-          if (!contactId || !sellerId) return;
+          const safeContactId = isValidUuid(contactId) ? contactId : null;
+          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          if (!safeContactId || !safeSellerId) return;
 
           let leadId = null;
           if (hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
-              [contactId]
+              [safeContactId]
             );
             leadId = leadRes.rows[0]?.id || null;
           }
@@ -7857,7 +7861,7 @@ export const handler = async (event) => {
               SET contact_id = $2, updated_at = now()
               WHERE id = $1 AND (contact_id IS NULL OR contact_id = '')
               `,
-              [leadId, contactId]
+              [leadId, safeContactId]
             );
           }
 
@@ -7869,7 +7873,7 @@ export const handler = async (event) => {
             ORDER BY updated_at DESC
             LIMIT 1
             `,
-            [leadId, sellerId]
+            [leadId, safeSellerId]
           );
           const batchId = statusRes.rows[0]?.batch_id || null;
           if (!batchId) return;
@@ -7885,7 +7889,7 @@ export const handler = async (event) => {
             ORDER BY fecha_gestion DESC
             LIMIT 1
             `,
-            [leadId, batchId, sellerId]
+            [leadId, batchId, safeSellerId]
           );
           const lastVentaDate = lastVentaRes.rows[0]?.fecha_uy?.toString() || null;
           const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
@@ -7904,7 +7908,7 @@ export const handler = async (event) => {
             )
             VALUES ($1, $2, $3, 'venta', $4, now(), NULL)
             `,
-            [leadId, batchId, sellerId, "Venta registrada desde contacto nuevo"]
+            [leadId, batchId, safeSellerId, "Venta registrada desde contacto nuevo"]
           );
 
           await client.query(
