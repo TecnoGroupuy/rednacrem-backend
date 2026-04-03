@@ -5047,6 +5047,11 @@ async function getTableColumns(client, tableName) {
   return cols;
 }
 
+async function columnExists(client, tableName, columnName) {
+  const cols = await getTableColumns(client, tableName);
+  return cols.has(columnName);
+}
+
 function buildUserSelect(metadata) {
   return `
     SELECT
@@ -7384,6 +7389,7 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      const gestId = body?.gestion_id ?? null;
       const contactPayload = body?.contact && typeof body.contact === "object"
         ? body.contact
         : body;
@@ -7437,6 +7443,9 @@ export const handler = async (event) => {
         const hasDocumentoCobranza = salesCols.has("documento_cobranza");
         const hasSaleGroupId = salesCols.has("sale_group_id");
         const hasParentSaleId = salesCols.has("parent_sale_id");
+        const hasGestionId = await columnExists(client, "sales", "gestion_id");
+        const hasTitularContactId = await columnExists(client, "sales", "titular_contact_id");
+        const hasRelation = await columnExists(client, "sales", "relation");
 
         const createManagementInContacts = false;
 
@@ -7539,12 +7548,17 @@ export const handler = async (event) => {
           fechaVenta,
           documentoCobranza,
           saleGroupId,
-          parentSaleId
+          parentSaleId,
+          gestionId,
+          titularContactId,
+          relation
         }) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
           const safeSaleGroupId = isValidUuid(saleGroupId) ? saleGroupId : null;
           const safeParentSaleId = isValidUuid(parentSaleId) ? parentSaleId : null;
+          const safeGestionId = isValidUuid(gestionId) ? gestionId : null;
+          const safeTitularContactId = isValidUuid(titularContactId) ? titularContactId : null;
           const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
           const vals = [safeContactId, medioPago, sellerNameSnapshot, sellerOrigin];
           if (sellerUserCol) {
@@ -7566,6 +7580,18 @@ export const handler = async (event) => {
           if (hasParentSaleId) {
             cols.push("parent_sale_id");
             vals.push(safeParentSaleId);
+          }
+          if (hasGestionId) {
+            cols.push("gestion_id");
+            vals.push(safeGestionId);
+          }
+          if (hasTitularContactId) {
+            cols.push("titular_contact_id");
+            vals.push(safeTitularContactId);
+          }
+          if (hasRelation) {
+            cols.push("relation");
+            vals.push(relation ?? null);
           }
 
           const placeholders = vals.map((_, idx) => `$${idx + 1}`);
@@ -8096,7 +8122,10 @@ export const handler = async (event) => {
           contactId,
           product,
           medioPagoOverride,
-          parentSaleId
+          parentSaleId,
+          gestionId = null,
+          titularContactId = null,
+          relation = null
         }) => {
           const productName = normalizeText(
             product?.nombre_producto || product?.nombreProducto || product?.nombre
@@ -8142,7 +8171,10 @@ export const handler = async (event) => {
             fechaVenta,
             documentoCobranza: cobranzaDocumento,
             saleGroupId,
-            parentSaleId
+            parentSaleId,
+            gestionId,
+            titularContactId,
+            relation
           });
 
           if (saleId && productId) {
@@ -8211,7 +8243,10 @@ export const handler = async (event) => {
             contactId: main.id,
             product,
             medioPagoOverride: body?.medioPago || null,
-            parentSaleId: mainSaleId || null
+            parentSaleId: mainSaleId || null,
+            gestionId: gestId,
+            titularContactId: main.id,
+            relation: "titular"
           });
           if (!mainSaleId && saleId) mainSaleId = saleId;
         }
@@ -8237,7 +8272,10 @@ export const handler = async (event) => {
               contactId: famContact.id,
               product,
               medioPagoOverride: familySale?.medioPago || null,
-              parentSaleId: mainSaleId || null
+              parentSaleId: mainSaleId || null,
+              gestionId: gestId,
+              titularContactId: famContact.id,
+              relation: familySale?.relation ?? "familiar"
             });
           }
           const familyMgmt = await linkLeadSaleFromPrincipal({
@@ -11745,7 +11783,7 @@ export const handler = async (event) => {
           nuevaOla = 2;
         }
 
-        await client.query(
+        const mgmtResult = await client.query(
           `
           INSERT INTO lead_management_history (
             contact_id,
@@ -11757,9 +11795,11 @@ export const handler = async (event) => {
             proxima_accion
           )
           VALUES ($1, $2, $3, $4, $5, now(), $6)
+          RETURNING id
           `,
           [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
+        const gestionId = mgmtResult.rows[0]?.id ?? null;
 
         const updateLeadStatus = await client.query(
           `
@@ -11875,7 +11915,7 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
-          data: { resultado: effectiveResultado, intentos: nextAttempts },
+          data: { resultado: effectiveResultado, intentos: nextAttempts, gestion_id: gestionId },
           error: null
         });
       } catch (error) {
