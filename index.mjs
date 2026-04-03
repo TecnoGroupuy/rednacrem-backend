@@ -10897,6 +10897,279 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "POST" && path.endsWith("/leads/new")) {
+    const bodyRaw = safeParseBody(event);
+    const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const contactPayload = body?.contact && typeof body.contact === "object"
+        ? body.contact
+        : body;
+
+      const buildContactFields = (payload) => {
+        const nombre = normalizeText(payload?.nombre);
+        const apellido = normalizeText(payload?.apellido);
+        const documento = normalizeText(payload?.documento) || null;
+        const fechaNacimiento = parseDate(payload?.fecha_nacimiento || payload?.fechaNacimiento || null);
+        const telefono = normalizeText(payload?.telefono) || null;
+        const celular = normalizeText(payload?.celular) || null;
+        const correo = normalizeEmail(payload?.correo_electronico || payload?.email);
+        const email = correo ? correo : null;
+        const direccion = normalizeText(payload?.direccion) || null;
+        const departamento = normalizeText(payload?.departamento) || null;
+        const localidad = normalizeText(payload?.localidad) || null;
+        const pais = normalizeText(payload?.pais) || "Uruguay";
+        return {
+          nombre,
+          apellido,
+          documento,
+          fechaNacimiento,
+          telefono,
+          celular,
+          email,
+          direccion,
+          departamento,
+          localidad,
+          pais
+        };
+      };
+
+      const fields = buildContactFields(contactPayload || {});
+      if (!fields.nombre || !fields.apellido) {
+        return json(422, { ok: false, message: "nombre y apellido requeridos" });
+      }
+
+      const isValidUuid = (value) =>
+        typeof value === "string" &&
+        /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(value);
+
+      const principalContactRaw = normalizeText(
+        body?.principal_contact_id ||
+        body?.principalContactId ||
+        body?.main_contact_id ||
+        body?.mainContactId ||
+        body?.parent_contact_id ||
+        body?.parentContactId ||
+        body?.contacto_principal_id ||
+        body?.contactIdPrincipal ||
+        body?.contacto_principal
+      );
+      const principalContactId = isValidUuid(principalContactRaw) ? principalContactRaw : null;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        leadContactColumnsCache = null;
+        const leadCols = await getLeadContactColumns(client);
+        const dCols = leadCols?.d || new Set();
+        const hasContactIdCol = dCols.has("contact_id");
+        const leadIdColumn = dCols.has("id") ? "id" : (dCols.has("contact_id") ? "contact_id" : null);
+        if (!leadIdColumn) {
+          await client.query("ROLLBACK");
+          return json(500, { ok: false, message: "No se puede resolver columna de lead" });
+        }
+
+        const resolveBatchId = async () => {
+          if (principalContactId && hasContactIdCol) {
+            const leadRes = await client.query(
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
+              [principalContactId]
+            );
+            const principalLeadId = leadRes.rows[0]?.lead_id || null;
+            if (principalLeadId) {
+              const statusRes = await client.query(
+                `
+                SELECT batch_id
+                FROM lead_contact_status
+                WHERE contact_id = $1
+                ORDER BY updated_at DESC
+                LIMIT 1
+                `,
+                [principalLeadId]
+              );
+              const batchId = statusRes.rows[0]?.batch_id || null;
+              if (batchId && isValidUuid(batchId)) return batchId;
+            }
+          }
+
+          const safeSellerId = isValidUuid(dbUser?.id) ? dbUser.id : null;
+          if (!safeSellerId) return null;
+          const batchRes = await client.query(
+            `
+            SELECT id
+            FROM lead_batches
+            WHERE estado IN ('activo','asignado')
+              AND (seller_id = $1 OR asignado_a = $1)
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [safeSellerId]
+          );
+          return batchRes.rows[0]?.id || null;
+        };
+
+        const batchId = await resolveBatchId();
+        if (!batchId) {
+          await client.query("ROLLBACK");
+          return json(409, { ok: false, message: "No hay lote activo para asignar" });
+        }
+
+        const docValue = normalizeText(fields.documento || "") || null;
+        const telValue = normalizePhoneDigits(fields.telefono || "");
+        const celValue = normalizePhoneDigits(fields.celular || "");
+        let existingLeadId = null;
+
+        if (docValue || telValue || celValue) {
+          const existingRes = await client.query(
+            `
+            SELECT ${leadIdColumn} AS lead_id
+            FROM datos_para_trabajar
+            WHERE ($1::text IS NOT NULL AND documento = $1)
+               OR ($2::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $2)
+               OR ($3::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $3)
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            `,
+            [docValue, telValue, celValue]
+          );
+          existingLeadId = existingRes.rows[0]?.lead_id || null;
+        }
+
+        let leadId = existingLeadId;
+        if (!leadId) {
+          const columns = [];
+          const values = [];
+          const params = [];
+          let p = 1;
+          const pushCol = (name, value) => {
+            if (!dCols.has(name)) return;
+            columns.push(name);
+            values.push(value ?? null);
+            params.push(`$${p}`);
+            p += 1;
+          };
+
+          pushCol("nombre", fields.nombre);
+          pushCol("apellido", fields.apellido);
+          pushCol("documento", docValue);
+          pushCol("fecha_nacimiento", fields.fechaNacimiento);
+          pushCol("telefono", fields.telefono);
+          pushCol("celular", fields.celular);
+          pushCol("direccion", fields.direccion);
+          pushCol("departamento", fields.departamento);
+          if (dCols.has("localidad")) pushCol("localidad", fields.localidad);
+          if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields.email);
+          if (dCols.has("email")) pushCol("email", fields.email);
+          if (dCols.has("pais")) pushCol("pais", fields.pais);
+          if (dCols.has("origen_dato")) pushCol("origen_dato", "captacion");
+          if (dCols.has("estado")) pushCol("estado", "nuevo");
+          if (hasContactIdCol && principalContactId) pushCol("contact_id", principalContactId);
+
+          if (!columns.length) {
+            await client.query("ROLLBACK");
+            return json(500, { ok: false, message: "No se pudieron mapear campos de lead" });
+          }
+
+          const insertRes = await client.query(
+            `
+            INSERT INTO datos_para_trabajar (${columns.join(", ")})
+            VALUES (${params.join(", ")})
+            RETURNING ${leadIdColumn} AS lead_id
+            `,
+            values
+          );
+          leadId = insertRes.rows[0]?.lead_id || null;
+        }
+
+        if (!leadId) {
+          await client.query("ROLLBACK");
+          return json(500, { ok: false, message: "No se pudo crear lead" });
+        }
+
+        const statusRes = await client.query(
+          `
+          SELECT 1
+          FROM lead_contact_status
+          WHERE contact_id = $1 AND batch_id = $2
+          LIMIT 1
+          `,
+          [leadId, batchId]
+        );
+        if (statusRes.rows.length) {
+          await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'nuevo',
+                intentos = COALESCE(intentos, 0),
+                assigned_to = $3,
+                ola_actual = COALESCE(ola_actual, 1),
+                ultimo_intento_at = now(),
+                updated_at = now()
+            WHERE contact_id = $1 AND batch_id = $2
+            `,
+            [leadId, batchId, dbUser?.id || null]
+          );
+        } else {
+          await client.query(
+            `
+            INSERT INTO lead_contact_status (
+              contact_id,
+              estado_venta,
+              intentos,
+              proxima_accion,
+              batch_id,
+              assigned_to,
+              ola_actual,
+              ultimo_intento_at
+            )
+            VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
+            `,
+            [leadId, batchId, dbUser?.id || null]
+          );
+        }
+
+        await client.query("COMMIT");
+
+        return json(200, {
+          ok: true,
+          success: true,
+          lead_id: leadId,
+          batch_id: batchId,
+          status: "nuevo"
+        });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to create lead",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.match(/\/leads\/([^/]+)$/)) {
     const match = path.match(/\/leads\/([^/]+)$/);
     const leadId = match?.[1];
