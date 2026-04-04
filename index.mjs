@@ -7910,14 +7910,22 @@ export const handler = async (event) => {
             const docValue = normalizeText(fields?.documento || "") || null;
             const telValue = normalizePhoneDigits(fields?.telefono || "");
             const celValue = normalizePhoneDigits(fields?.celular || "");
+            const nameValue = normalizeText(fields?.nombre || "") || null;
+            const lastValue = normalizeText(fields?.apellido || "") || null;
             if (leadIdColumn === "id") {
             await client.query(
               `
               UPDATE datos_para_trabajar
               SET contact_id = $2, updated_at = now()
-              WHERE id = $1 AND contact_id IS NULL
+              WHERE id = $1
+                AND contact_id IS NULL
+                AND (
+                  TRIM(LOWER(nombre)) = TRIM(LOWER($3))
+                  OR TRIM(LOWER(apellido)) = TRIM(LOWER($4))
+                  OR documento = $5
+                )
               `,
-              [leadId, safeContactId]
+              [leadId, safeContactId, nameValue, lastValue, docValue]
             );
             } else if (docValue || telValue || celValue) {
               await client.query(
