@@ -7446,6 +7446,7 @@ export const handler = async (event) => {
         const hasGestionId = await columnExists(client, "sales", "gestion_id");
         const hasTitularContactId = await columnExists(client, "sales", "titular_contact_id");
         const hasRelation = await columnExists(client, "sales", "relation");
+        const hasProductId = await columnExists(client, "sales", "product_id");
 
         const createManagementInContacts = false;
 
@@ -7541,6 +7542,7 @@ export const handler = async (event) => {
 
         const insertSale = async ({
           contactId,
+          productId,
           sellerId,
           medioPago,
           sellerNameSnapshot,
@@ -7554,6 +7556,7 @@ export const handler = async (event) => {
           relation
         }) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
+          const safeProductId = isValidUuid(productId) ? productId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
           const safeSaleGroupId = isValidUuid(saleGroupId) ? saleGroupId : null;
           const safeParentSaleId = isValidUuid(parentSaleId) ? parentSaleId : null;
@@ -7572,6 +7575,10 @@ export const handler = async (event) => {
           if (hasDocumentoCobranza) {
             cols.push("documento_cobranza");
             vals.push(documentoCobranza || null);
+          }
+          if (hasProductId) {
+            cols.push("product_id");
+            vals.push(safeProductId);
           }
           if (hasSaleGroupId) {
             cols.push("sale_group_id");
@@ -8172,6 +8179,7 @@ export const handler = async (event) => {
 
           const saleId = await insertSale({
             contactId,
+            productId,
             sellerId,
             medioPago,
             sellerNameSnapshot,
