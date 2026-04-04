@@ -11370,7 +11370,7 @@ export const handler = async (event) => {
 
         const leadRes = await client.query(
           `
-          SELECT id, telefono, celular, ${hasContactIdCol ? "contact_id" : "NULL::uuid AS contact_id"}
+          SELECT id, nombre, apellido, telefono, celular, ${hasContactIdCol ? "contact_id" : "NULL::uuid AS contact_id"}
           FROM datos_para_trabajar
           WHERE id = $1
           LIMIT 1
@@ -11386,6 +11386,8 @@ export const handler = async (event) => {
         const telefono = normalizeText(lead.telefono || "");
         const celular = normalizeText(lead.celular || "");
         const contactId = lead.contact_id || null;
+        const leadNombre = normalizeText(lead.nombre || "");
+        const leadApellido = normalizeText(lead.apellido || "");
 
         const normalizeDigits = (value) => String(value || "").replace(/\D/g, "");
         const isDummyNumber = (value) => {
@@ -11399,7 +11401,7 @@ export const handler = async (event) => {
 
         const basePhones = [telefono, celular].filter(Boolean).filter((v) => !isDummyNumber(v));
         if (!basePhones.length) {
-          return json(200, { ok: true, success: true, data: { items: [] }, items: [] });
+          return json(200, { ok: true, success: true, data: { items: [] } });
         }
 
         const params = [];
@@ -11426,6 +11428,15 @@ export const handler = async (event) => {
           [...params, leadId]
         );
 
+        const hasLeadIdentity = !contactId && leadNombre && leadApellido;
+        const contactsExtraWhere = contactId
+          ? `AND id <> $${idx}`
+          : (hasLeadIdentity ? `AND NOT (lower(nombre) = $${idx} AND lower(apellido) = $${idx + 1})` : "");
+        const contactsParams = contactId
+          ? [...params, contactId]
+          : (hasLeadIdentity
+            ? [...params, leadNombre.toLowerCase(), leadApellido.toLowerCase()]
+            : params);
         const contactsRes = await client.query(
           `
           SELECT id, nombre, apellido, telefono, celular
@@ -11434,9 +11445,9 @@ export const handler = async (event) => {
             telefono = ANY(ARRAY[${phonePlaceholders.join(", ")}]) OR
             celular = ANY(ARRAY[${phonePlaceholders.join(", ")}])
           )
-          ${contactId ? `AND id <> $${idx}` : ""}
+          ${contactsExtraWhere}
           `,
-          contactId ? [...params, contactId] : params
+          contactsParams
         );
 
         const items = [];
@@ -11466,8 +11477,7 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
-          data: { items },
-          items
+          data: { items }
         });
       } finally {
         await client.end();
