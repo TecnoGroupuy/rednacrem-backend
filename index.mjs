@@ -8278,6 +8278,22 @@ export const handler = async (event) => {
               relation: familySale?.relation ?? "familiar"
             });
           }
+          await client.query(
+            `
+            INSERT INTO contact_relations (
+              contact_id_a,
+              contact_id_b,
+              relation,
+              source
+            )
+            VALUES ($1, $2, $3, 'venta')
+            ON CONFLICT (contact_id_a, contact_id_b)
+            DO UPDATE SET
+              relation = EXCLUDED.relation,
+              updated_at = NOW()
+            `,
+            [main.id, famContact.id, familySale?.relation || "familiar"]
+          );
           const familyMgmt = await linkLeadSaleFromPrincipal({
             contactId: famContact.id,
             fields: famContact.fields,
@@ -11413,26 +11429,62 @@ export const handler = async (event) => {
           return json(200, { ok: true, success: true, data: { items: [] } });
         }
 
+        const relationsRes = await client.query(
+          `
+          SELECT
+            CASE WHEN cr.contact_id_a = $1 THEN cr.contact_id_b
+                 ELSE cr.contact_id_a END AS related_contact_id,
+            cr.relation
+          FROM contact_relations cr
+          WHERE cr.contact_id_a = $1 OR cr.contact_id_b = $1
+          `,
+          [contactId]
+        );
+        const relationByContactId = new Map();
+        const relatedIds = [];
+        for (const row of relationsRes.rows) {
+          const relId = row.related_contact_id;
+          if (!relId || relId === contactId) continue;
+          if (!relationByContactId.has(relId)) {
+            relationByContactId.set(relId, row.relation || null);
+            relatedIds.push(relId);
+          }
+        }
+
+        let relatedContacts = [];
+        if (relatedIds.length) {
+          const relatedRes = await client.query(
+            `
+            SELECT id, nombre, apellido, telefono, celular, documento
+            FROM contacts
+            WHERE id = ANY($1)
+              AND id <> $2
+              AND status = 'activo'
+            `,
+            [relatedIds, contactId]
+          );
+          relatedContacts = relatedRes.rows || [];
+        }
+
         const telefono = normalizeText(contact.telefono || "");
         const celular = normalizeText(contact.celular || "");
         const basePhones = [telefono, celular].filter(Boolean).filter((v) => !isDummyNumber(v));
-        if (!basePhones.length) {
-          return json(200, { ok: true, success: true, data: { items: [] } });
+        let phoneFallback = [];
+        if (basePhones.length) {
+          const phone1 = basePhones[0] || "";
+          const phone2 = basePhones[1] || phone1;
+          const fallbackRes = await client.query(
+            `
+            SELECT id, nombre, apellido, telefono, celular, documento
+            FROM contacts
+            WHERE (telefono = $1 OR celular = $1 OR telefono = $2 OR celular = $2)
+              AND id <> $3
+              AND status = 'activo'
+            `,
+            [phone1, phone2, contactId]
+          );
+          phoneFallback = fallbackRes.rows || [];
         }
-
-        const phone1 = basePhones[0] || "";
-        const phone2 = basePhones[1] || phone1;
-        const contactsParams = [phone1, phone2, contactId];
-        const contactsRes = await client.query(
-          `
-          SELECT id, nombre, apellido, telefono, celular, documento
-          FROM contacts
-          WHERE (telefono = $1 OR celular = $1 OR telefono = $2 OR celular = $2)
-            AND id <> $3
-            AND status = 'activo'
-          `,
-          contactsParams
-        );
 
         const items = [];
         const seen = new Set();
@@ -11452,11 +11504,13 @@ export const handler = async (event) => {
             apellido: row.apellido || null,
             telefono: row.telefono || null,
             celular: row.celular || null,
-            documento: row.documento || null
+            documento: row.documento || null,
+            relation: relationByContactId.get(row.id) || null
           });
         };
 
-        for (const row of contactsRes.rows) pushUnique(row);
+        for (const row of relatedContacts) pushUnique(row);
+        for (const row of phoneFallback) pushUnique(row);
 
         return json(200, {
           ok: true,
