@@ -10705,7 +10705,7 @@ export const handler = async (event) => {
             return json(200, {
               ok: true,
               success: true,
-              data: null,
+              data: { gestion_id: existingGestionId },
               message: enOla2
                 ? `No hay contactos disponibles en esta franja. Volv� a las ${ola1Inicio}`
                 : `No hay contactos disponibles en esta franja. Volv� a las ${ola2Inicio}`,
@@ -11720,11 +11720,22 @@ export const handler = async (event) => {
           // Venta y dato_erroneo son siempre finales
           const estadosFinalesPermanentes = ["venta", "dato_erroneo"];
           if (estadosFinalesPermanentes.includes(currentEstadoVenta)) {
+            const latestGestion = await client.query(
+              `
+              SELECT id
+              FROM lead_management_history
+              WHERE contact_id = $1
+              ORDER BY fecha_gestion DESC
+              LIMIT 1
+              `,
+              [leadId]
+            );
+            const existingGestionId = latestGestion.rows[0]?.id ?? null;
             await client.query("ROLLBACK");
             return json(409, {
               ok: false,
               success: false,
-              data: null,
+              data: { gestion_id: existingGestionId },
               error: {
                 message: "Contacto ya est� en estado final",
                 estado_actual: currentEstadoVenta
