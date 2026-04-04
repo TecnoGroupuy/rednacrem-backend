@@ -11383,11 +11383,7 @@ export const handler = async (event) => {
           return json(404, { ok: false, message: "Lead not found" });
         }
 
-        const telefono = normalizeText(lead.telefono || "");
-        const celular = normalizeText(lead.celular || "");
         const contactId = lead.contact_id || null;
-        const leadNombre = normalizeText(lead.nombre || "");
-        const leadApellido = normalizeText(lead.apellido || "");
 
         const normalizeDigits = (value) => String(value || "").replace(/\D/g, "");
         const isDummyNumber = (value) => {
@@ -11399,53 +11395,41 @@ export const handler = async (event) => {
           return false;
         };
 
+        if (!contactId) {
+          return json(200, { ok: true, success: true, data: { items: [] } });
+        }
+
+        const contactRes = await client.query(
+          `
+          SELECT id, nombre, apellido, telefono, celular, documento, status
+          FROM contacts
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [contactId]
+        );
+        const contact = contactRes.rows[0];
+        if (!contact) {
+          return json(200, { ok: true, success: true, data: { items: [] } });
+        }
+
+        const telefono = normalizeText(contact.telefono || "");
+        const celular = normalizeText(contact.celular || "");
         const basePhones = [telefono, celular].filter(Boolean).filter((v) => !isDummyNumber(v));
         if (!basePhones.length) {
           return json(200, { ok: true, success: true, data: { items: [] } });
         }
 
-        const params = [];
-        let idx = 1;
-        const phoneVals = [];
-        for (const val of basePhones) {
-          if (!phoneVals.includes(val)) phoneVals.push(val);
-        }
-        const phonePlaceholders = phoneVals.map((val) => {
-          params.push(val);
-          return `$${idx++}`;
-        });
-
-        const dptRes = await client.query(
-          `
-          SELECT id, nombre, apellido, telefono, celular
-          FROM datos_para_trabajar
-          WHERE id <> $${idx}
-            AND (
-              telefono = ANY(ARRAY[${phonePlaceholders.join(", ")}]) OR
-              celular = ANY(ARRAY[${phonePlaceholders.join(", ")}])
-            )
-          `,
-          [...params, leadId]
-        );
-
-        const hasLeadIdentity = !contactId && leadNombre && leadApellido;
-        const contactsExtraWhere = contactId
-          ? `AND id <> $${idx}`
-          : (hasLeadIdentity ? `AND NOT (lower(nombre) = $${idx} AND lower(apellido) = $${idx + 1})` : "");
-        const contactsParams = contactId
-          ? [...params, contactId]
-          : (hasLeadIdentity
-            ? [...params, leadNombre.toLowerCase(), leadApellido.toLowerCase()]
-            : params);
+        const phone1 = basePhones[0] || "";
+        const phone2 = basePhones[1] || phone1;
+        const contactsParams = [phone1, phone2, contactId];
         const contactsRes = await client.query(
           `
-          SELECT id, nombre, apellido, telefono, celular
+          SELECT id, nombre, apellido, telefono, celular, documento
           FROM contacts
-          WHERE (
-            telefono = ANY(ARRAY[${phonePlaceholders.join(", ")}]) OR
-            celular = ANY(ARRAY[${phonePlaceholders.join(", ")}])
-          )
-          ${contactsExtraWhere}
+          WHERE (telefono = $1 OR celular = $1 OR telefono = $2 OR celular = $2)
+            AND id <> $3
+            AND status = 'activo'
           `,
           contactsParams
         );
@@ -11467,11 +11451,11 @@ export const handler = async (event) => {
             nombre: row.nombre || null,
             apellido: row.apellido || null,
             telefono: row.telefono || null,
-            celular: row.celular || null
+            celular: row.celular || null,
+            documento: row.documento || null
           });
         };
 
-        for (const row of dptRes.rows) pushUnique(row);
         for (const row of contactsRes.rows) pushUnique(row);
 
         return json(200, {
