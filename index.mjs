@@ -7447,6 +7447,7 @@ export const handler = async (event) => {
         const hasTitularContactId = await columnExists(client, "sales", "titular_contact_id");
         const hasRelation = await columnExists(client, "sales", "relation");
         const hasProductId = await columnExists(client, "sales", "product_id");
+        const hasContactProductProductId = await columnExists(client, "contact_products", "product_id");
 
         const createManagementInContacts = false;
 
@@ -8211,44 +8212,64 @@ export const handler = async (event) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
           const safeSaleId = isValidUuid(saleId) ? saleId : null;
+          let resolvedProductId = null;
+          if (hasContactProductProductId && productName) {
+            const prodRes = await client.query(
+              `
+              SELECT id FROM products
+              WHERE TRIM(LOWER(nombre)) = TRIM(LOWER($1))
+              LIMIT 1
+              `,
+              [productName]
+            );
+            resolvedProductId = prodRes.rows[0]?.id ?? null;
+          }
+
+          const contactProductCols = [
+            "contact_id",
+            "nombre_producto",
+            "plan",
+            "precio",
+            "fecha_alta",
+            "cuotas_pagas",
+            "carencia_cuotas",
+            "estado",
+            "motivo_baja",
+            "motivo_baja_detalle",
+            "fecha_baja",
+            "seller_user_id",
+            "seller_name_snapshot",
+            "seller_origin",
+            "sale_id"
+          ];
+          const contactProductVals = [
+            safeContactId,
+            productName,
+            plan,
+            precio || 0,
+            fechaAlta,
+            0,
+            0,
+            isAlta ? "alta" : "baja",
+            motivoBaja,
+            motivoBajaDetalle,
+            fechaBaja,
+            safeSellerId,
+            sellerNameSnapshot,
+            sellerOrigin,
+            safeSaleId
+          ];
+          if (hasContactProductProductId) {
+            contactProductCols.push("product_id");
+            contactProductVals.push(resolvedProductId);
+          }
+          const contactProductPlaceholders = contactProductVals.map((_, idx) => `$${idx + 1}`);
           await client.query(
             `
-            INSERT INTO contact_products (
-              contact_id,
-              nombre_producto,
-              plan,
-              precio,
-              fecha_alta,
-              cuotas_pagas,
-              carencia_cuotas,
-              estado,
-              motivo_baja,
-              motivo_baja_detalle,
-              fecha_baja,
-              seller_user_id,
-              seller_name_snapshot,
-              seller_origin,
-              sale_id
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            INSERT INTO contact_products (${contactProductCols.join(", ")})
+            VALUES (${contactProductPlaceholders.join(", ")})
             `,
-            [
-              safeContactId,
-              productName,
-              plan,
-              precio || 0,
-              fechaAlta,
-              0,
-              0,
-              isAlta ? "alta" : "baja",
-              motivoBaja,
-              motivoBajaDetalle,
-              fechaBaja,
-              safeSellerId,
-              sellerNameSnapshot,
-              sellerOrigin,
-              safeSaleId
-            ]
+            contactProductVals
           );
 
           return saleId;
