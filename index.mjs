@@ -10870,6 +10870,7 @@ export const handler = async (event) => {
         const salesStatsRes = await client.query(
           `
           SELECT
+            COUNT(*) AS total_contratos,
             COUNT(*) FILTER (WHERE s.gestion_id IS NOT NULL) AS ventas_reales,
             COUNT(*) FILTER (WHERE s.relation = 'titular') AS ventas_titular,
             COUNT(*) FILTER (WHERE s.relation = 'familiar') AS ventas_familiar,
@@ -10892,6 +10893,7 @@ export const handler = async (event) => {
         const noContestaTotal = parseInt(s.no_contesta || "0", 10);
         const rellamarTotal = parseInt(s.rellamar || "0", 10);
         const datosErroneosTotal = parseInt(s.dato_erroneo || "0", 10);
+        const finalVentas = parseInt(ss.total_contratos || 0, 10);
         const ventasReales = parseInt(ss.ventas_reales || 0, 10);
         const ventasTitular = parseInt(ss.ventas_titular || 0, 10);
         const ventasFamiliar = parseInt(ss.ventas_familiar || 0, 10);
@@ -10902,7 +10904,7 @@ export const handler = async (event) => {
         const totalGestionado = utiles + inutiles;
 
         const contactoPct = totalGestionado > 0 ? Math.round((utiles / totalGestionado) * 100) : 0;
-        const efectividadPct = utiles > 0 ? Math.round((ventasTotal / utiles) * 100) : 0;
+        const efectividadPct = utiles > 0 ? Math.round((finalVentas / utiles) * 100) : 0;
 
         const totalAsignados = parseInt(l.total_asignados || "0", 10);
         const data = {
@@ -10911,7 +10913,8 @@ export const handler = async (event) => {
           no_contesta: noContestaTotal,
           seguimiento: seguimientoTotal,
           rechazos: rechazosTotal,
-          ventas: ventasTotal,
+          ventas: finalVentas,
+          gestiones_venta: ventasTotal,
           ventas_reales: ventasReales,
           ventas_titular: ventasTitular,
           ventas_familiar: ventasFamiliar,
@@ -10921,7 +10924,7 @@ export const handler = async (event) => {
           pct_contacto: contactoPct,
           pct_efectividad: efectividadPct,
           gestiones_hoy: totalGestionado,
-          ventas_hoy: ventasTotal,
+          ventas_hoy: finalVentas,
           no_contesta_hoy: noContestaTotal,
           tipificados_seguimiento_hoy: seguimientoTotal,
           rechazos_hoy: rechazosTotal,
@@ -15470,12 +15473,13 @@ export const handler = async (event) => {
         const items = sellers.map((seller) => {
           const daily = dailyMap.get(seller.id) || {};
           const manualVentas = manualSalesMap.get(seller.id) || 0;
-          const ventas = Number(daily.ventas || 0) + manualVentas;
+          const ventas = manualVentas;
           const seguimientos = Number(daily.seguimientos || 0);
           const rellamadas = Number(daily.rellamadas || 0);
           const noContesta = Number(daily.no_contesta || 0);
           const rechazos = Number(daily.rechazos || 0);
           const datosErroneos = Number(daily.datos_erroneos || 0);
+          const gestionesVenta = Number(daily.ventas || 0);
           const totalGestionado =
             ventas +
             seguimientos +
@@ -15498,6 +15502,7 @@ export const handler = async (event) => {
             gestiones: totalGestionado,
             asignados: assignedMap.get(seller.id) || 0,
             ventas,
+            gestiones_venta: gestionesVenta,
             seguimientos,
             rellamadas,
             no_contesta: noContesta,
