@@ -15438,7 +15438,6 @@ export const handler = async (event) => {
               AND (
                 $3::text IS NULL
                 OR lb.tipo = $3
-                OR (lb.id IS NULL AND $3::text IS NULL)
               )
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
@@ -15487,7 +15486,7 @@ export const handler = async (event) => {
             ${manualJoin}
             WHERE s.seller_user_id = ANY($1::uuid[])
               AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-              AND ($3::text IS NULL OR lb.tipo = $3 OR lb.id IS NULL)
+              AND ($3::text IS NULL OR lb.tipo = $3)
             GROUP BY s.seller_user_id
             `,
             [sellerIds, fecha, batchTipo]
