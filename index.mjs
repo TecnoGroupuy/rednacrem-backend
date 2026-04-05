@@ -1507,7 +1507,16 @@ async function getLeadStatusCatalogEntry(client, nombre) {
 
 function normalizeNextAction(value) {
   if (!value) return null;
-  const parsed = new Date(value);
+  let normalized = value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const hasTz = /([zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed);
+    const looksLikeDateTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(trimmed);
+    if (looksLikeDateTime && !hasTz) {
+      normalized = `${trimmed}${trimmed.length === 16 ? ":00" : ""}-03:00`;
+    }
+  }
+  const parsed = new Date(normalized);
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed.toISOString();
 }
