@@ -15435,7 +15435,11 @@ export const handler = async (event) => {
             JOIN lead_batches lb ON lb.id = lmh.batch_id
             WHERE lmh.user_id = ANY($1::uuid[])
               AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-              AND ($3::text IS NULL OR lb.tipo = $3 OR lb.id IS NULL)
+              AND (
+                $3::text IS NULL
+                OR lb.tipo = $3
+                OR (lb.id IS NULL AND $3::text IS NULL)
+              )
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
               user_id,
