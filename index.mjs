@@ -10867,7 +10867,23 @@ export const handler = async (event) => {
           `,
           [sellerId, fecha, batchTipo]
         );
+        const salesStatsRes = await client.query(
+          `
+          SELECT
+            COUNT(*) FILTER (WHERE s.gestion_id IS NOT NULL) AS ventas_reales,
+            COUNT(*) FILTER (WHERE s.relation = 'titular') AS ventas_titular,
+            COUNT(*) FILTER (WHERE s.relation = 'familiar') AS ventas_familiar,
+            COUNT(*) FILTER (WHERE s.relation = 'familiar' OR s.relation != 'titular') AS ventas_adicionales,
+            COALESCE(SUM(si.price), 0) AS ingresos_hoy
+          FROM sales s
+          LEFT JOIN sale_items si ON si.sale_id = s.id
+          WHERE s.seller_user_id = $1
+            AND (s.created_at AT TIME ZONE 'America/Montevideo')::date = $2::date
+          `,
+          [sellerId, fecha]
+        );
         const s = statsResult.rows[0] || {};
+        const ss = salesStatsRes.rows[0] || {};
         const l = lotesResult.rows[0] || {};
         const ventasLead = parseInt(s.ventas || "0", 10);
         const ventasTotal = ventasLead;
@@ -10876,6 +10892,10 @@ export const handler = async (event) => {
         const noContestaTotal = parseInt(s.no_contesta || "0", 10);
         const rellamarTotal = parseInt(s.rellamar || "0", 10);
         const datosErroneosTotal = parseInt(s.dato_erroneo || "0", 10);
+        const ventasReales = parseInt(ss.ventas_reales || 0, 10);
+        const ventasTitular = parseInt(ss.ventas_titular || 0, 10);
+        const ventasFamiliar = parseInt(ss.ventas_familiar || 0, 10);
+        const ingresosHoy = parseFloat(ss.ingresos_hoy || 0);
 
         const utiles = ventasTotal + rechazosTotal + seguimientoTotal;
         const inutiles = noContestaTotal + rellamarTotal + datosErroneosTotal;
@@ -10892,6 +10912,10 @@ export const handler = async (event) => {
           seguimiento: seguimientoTotal,
           rechazos: rechazosTotal,
           ventas: ventasTotal,
+          ventas_reales: ventasReales,
+          ventas_titular: ventasTitular,
+          ventas_familiar: ventasFamiliar,
+          ingresos_hoy: ingresosHoy,
           tocados: totalGestionado,
           contactos_reales: utiles,
           pct_contacto: contactoPct,
