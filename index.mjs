@@ -2950,22 +2950,22 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     durations AS (
       SELECT
         agente_id,
-        SUM(CASE WHEN tipo = 'TRABAJO' AND siguiente_inicio IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
-        SUM(CASE WHEN tipo = 'DESCANSO' AND siguiente_inicio IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS descanso_seg,
-        SUM(CASE WHEN tipo IN ('BANO', 'BA?O') AND siguiente_inicio IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS bano_seg,
-        SUM(CASE WHEN tipo = 'SUPERVISOR' AND siguiente_inicio IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS supervisor_seg
+        SUM(CASE WHEN tipo = 'TRABAJO'
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
+        SUM(CASE WHEN tipo = 'DESCANSO'
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS descanso_seg,
+        SUM(CASE WHEN tipo IN ('BANO', 'BA?O')
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS bano_seg,
+        SUM(CASE WHEN tipo = 'SUPERVISOR'
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS supervisor_seg
       FROM intervalos
       GROUP BY agente_id
     ),
     total_jornada AS (
       SELECT
         agente_id,
-        SUM(CASE WHEN siguiente_inicio IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (siguiente_inicio - inicio)) ELSE 0 END)::bigint AS total_jornada_seg
+        SUM(CASE WHEN tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BANO', 'BA?O', 'INACTIVO')
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS total_jornada_seg
       FROM intervalos
       WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BANO', 'BA?O', 'INACTIVO')
       GROUP BY agente_id
@@ -2994,10 +2994,10 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     LEFT JOIN session_count sc ON sc.agente_id = u.id
     WHERE u.role_key = 'vendedor'
       AND u.status = 'approved'
-      AND ($3::uuid IS NULL OR u.id = $3::uuid)
+      AND ($4::uuid IS NULL OR u.id = $4::uuid)
     ORDER BY u.nombre
     `,
-    [fecha, timezone, filterUserId]
+    [fecha, timezone, now, filterUserId]
   );
 
   return result.rows.map((row) => {
