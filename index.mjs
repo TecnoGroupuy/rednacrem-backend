@@ -2871,7 +2871,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
   };
 }
 
-async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new Date()) {
+async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new Date(), filterUserId = null) {
   const result = await client.query(
     `
     WITH base AS (
@@ -2994,9 +2994,10 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     LEFT JOIN session_count sc ON sc.agente_id = u.id
     WHERE u.role_key = 'vendedor'
       AND u.status = 'approved'
+      AND ($3::uuid IS NULL OR u.id = $3::uuid)
     ORDER BY u.nombre
     `,
-    [fecha, timezone]
+    [fecha, timezone, filterUserId]
   );
 
   return result.rows.map((row) => {
@@ -15328,10 +15329,12 @@ export const handler = async (event) => {
 
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const timezone = getQueryParam(event, "timezone") || LOCAL_TZ;
+      const filterUserId = getQueryParam(event, "user_id") || null;
+      const effectiveFilterUserId = dbUser?.role_key === "vendedor" ? dbUser.id : filterUserId;
       const client = createDbClient();
       await client.connect();
       try {
-        const items = await getDailyWorkReport(client, fecha, timezone, new Date());
+        const items = await getDailyWorkReport(client, fecha, timezone, new Date(), effectiveFilterUserId);
         return json(200, { ok: true, fecha, timezone, items });
       } finally {
         await client.end();
