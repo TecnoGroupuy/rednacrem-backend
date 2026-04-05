@@ -11169,6 +11169,14 @@ export const handler = async (event) => {
         }
 
         let leadId = existingLeadId;
+        let validContactId = null;
+        if (hasContactIdCol && principalContactId) {
+          const checkRes = await client.query(
+            `SELECT id FROM contacts WHERE id = $1 LIMIT 1`,
+            [principalContactId]
+          );
+          validContactId = checkRes.rows[0]?.id ?? null;
+        }
         if (!leadId) {
           const columns = [];
           const values = [];
@@ -11196,7 +11204,7 @@ export const handler = async (event) => {
           if (dCols.has("pais")) pushCol("pais", fields.pais);
           if (dCols.has("origen_dato")) pushCol("origen_dato", "captacion");
           if (dCols.has("estado")) pushCol("estado", "nuevo");
-          if (hasContactIdCol && principalContactId) pushCol("contact_id", principalContactId);
+          if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
 
           if (!columns.length) {
             await client.query("ROLLBACK");
