@@ -10904,7 +10904,7 @@ export const handler = async (event) => {
         const totalGestionado = utiles + inutiles;
 
         const contactoPct = totalGestionado > 0 ? Math.round((utiles / totalGestionado) * 100) : 0;
-        const efectividadPct = utiles > 0 ? Math.round((finalVentas / utiles) * 100) : 0;
+        const efectividadPct = utiles > 0 ? Math.round((ventasTotal / utiles) * 100) : 0;
 
         const totalAsignados = parseInt(l.total_asignados || "0", 10);
         const data = {
@@ -11205,7 +11205,7 @@ export const handler = async (event) => {
           if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields.email);
           if (dCols.has("email")) pushCol("email", fields.email);
           if (dCols.has("pais")) pushCol("pais", fields.pais);
-          if (dCols.has("origen_dato")) pushCol("origen_dato", "captacion");
+          if (dCols.has("origen_dato")) pushCol("origen_dato", "Manual");
           if (dCols.has("estado")) pushCol("estado", "nuevo");
           if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
 
