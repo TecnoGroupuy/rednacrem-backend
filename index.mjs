@@ -2950,25 +2950,29 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     durations AS (
       SELECT
         agente_id,
-        SUM(CASE WHEN tipo = 'TRABAJO'
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS trabajo_seg,
         SUM(CASE WHEN tipo = 'DESCANSO'
           THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS descanso_seg,
         SUM(CASE WHEN tipo IN ('BANO', 'BA?O')
           THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS bano_seg,
         SUM(CASE WHEN tipo = 'SUPERVISOR'
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS supervisor_seg
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS supervisor_seg,
+        SUM(CASE WHEN tipo = 'INACTIVO'
+          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS inactivo_seg
       FROM intervalos
       GROUP BY agente_id
     ),
-    total_jornada AS (
+    jornada_span AS (
       SELECT
-        agente_id,
-        SUM(CASE WHEN tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BANO', 'BA?O', 'INACTIVO')
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS total_jornada_seg
-      FROM intervalos
-      WHERE tipo IN ('TRABAJO', 'DESCANSO', 'SUPERVISOR', 'BANO', 'BA?O', 'INACTIVO')
-      GROUP BY agente_id
+        l.agente_id,
+        l.login_utc,
+        o.logout_utc,
+        COALESCE(o.logout_utc, $3) AS jornada_fin,
+        CASE
+          WHEN l.login_utc IS NULL THEN 0
+          ELSE EXTRACT(EPOCH FROM (COALESCE(o.logout_utc, $3) - l.login_utc))
+        END::bigint AS total_jornada_seg
+      FROM logins l
+      LEFT JOIN logouts o ON o.agente_id = l.agente_id
     )
     SELECT
       u.id,
@@ -2980,17 +2984,24 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       (o.logout_utc AT TIME ZONE $2) AS logout_local,
       ls.estado_actual,
       COALESCE(sc.session_count, 0) AS session_count,
-      COALESCE(d.trabajo_seg, 0) AS trabajo_seg,
+      GREATEST(
+        COALESCE(js.total_jornada_seg, 0)
+        - COALESCE(d.descanso_seg, 0)
+        - COALESCE(d.bano_seg, 0)
+        - COALESCE(d.supervisor_seg, 0)
+        - COALESCE(d.inactivo_seg, 0),
+        0
+      ) AS trabajo_seg,
       COALESCE(d.descanso_seg, 0) AS descanso_seg,
       COALESCE(d.bano_seg, 0) AS bano_seg,
       COALESCE(d.supervisor_seg, 0) AS supervisor_seg,
-      tj.total_jornada_seg
+      js.total_jornada_seg
     FROM users u
     LEFT JOIN logins l ON l.agente_id = u.id
     LEFT JOIN logouts o ON o.agente_id = u.id
     LEFT JOIN last_state ls ON ls.agente_id = u.id
     LEFT JOIN durations d ON d.agente_id = u.id
-    LEFT JOIN total_jornada tj ON tj.agente_id = u.id
+    LEFT JOIN jornada_span js ON js.agente_id = u.id
     LEFT JOIN session_count sc ON sc.agente_id = u.id
     WHERE u.role_key = 'vendedor'
       AND u.status = 'approved'
