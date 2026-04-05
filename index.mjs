@@ -15463,17 +15463,11 @@ export const handler = async (event) => {
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
         const warnings = [];
-        const manualJoin = hasDptContactId
-          ? `
-            LEFT JOIN datos_para_trabajar d ON d.contact_id = s.contact_id
-            LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
-            LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
-          `
-          : `
-            LEFT JOIN contacts c ON c.id = s.contact_id
-            LEFT JOIN datos_para_trabajar d ON d.documento = c.documento
-            LEFT JOIN lead_management_history lmh ON lmh.contact_id = d.id
-            LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+        const manualJoin = `
+            JOIN contacts c ON c.id = s.contact_id
+            JOIN datos_para_trabajar d ON d.contact_id = c.id
+            JOIN lead_contact_status lcs ON lcs.contact_id = d.id
+            JOIN lead_batches lb ON lb.id = lcs.batch_id
           `;
 
         let manualSalesMap = new Map();
