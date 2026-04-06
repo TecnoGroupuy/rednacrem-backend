@@ -2394,25 +2394,49 @@ function normalizeCsvHeader(header) {
 const CSV_HEADER_MAP = {
   "nombre": "nombre",
   "apellido": "apellido",
+  "nombres": "nombre",
+  "apellidos": "apellido",
   "documento": "documento",
+  "cedula de identidad del beneficiario": "documento",
   "fecha de nacimiento": "fecha_nacimiento",
   "telefono": "telefono",
+  "telefono de venta": "telefono",
+  "telefono fijo": "telefono_fijo",
   "celular": "telefono_celular",
+  "telefono celular": "telefono_celular",
   "correo electronico": "email",
   "direccion": "direccion",
+  "telefono de contacto alternativo": "telefono_alternativo",
   "departamento": "departamento_residencia",
+  "departamento de residencia": "departamento_residencia",
   "pais": "pais",
   "nombre del familiar": "nombre_familiar",
   "apellido del familiar": "apellido_familiar",
   "telefono del familiar": "telefono_familiar",
+  "telefono de contacto": "telefono_familiar",
   "vinculo": "parentesco",
+  "parentesco": "parentesco",
   "vendedor": "vendedor_nombre",
+  "nombre del asesor": "vendedor_nombre",
+  "7_consulta vendedor": "vendedor_nombre",
   "fecha de venta": "fecha_venta",
+  "marca temporal": "fecha_venta",
+  "2_fecha de venta (simplificada)": "fecha_venta_simple",
   "producto": "producto_nombre",
   "precio": "precio",
+  "precio de venta (mensual)": "precio",
   "medio de pago": "medio_pago",
   "estado": "producto_estado",
-  "fecha de baja": "fecha_baja"
+  "30_estado": "producto_estado",
+  "fecha de baja": "fecha_baja",
+  "31_fecha de baja": "fecha_baja",
+  "32_motivo de baja": "motivo_baja",
+  "motivo de baja": "motivo_baja_detalle",
+  "cedula de identidad de cobranza": "documento_cobranza",
+  "5_consulta de estado": "consulta_estado",
+  "6_evaluacion": "evaluacion",
+  "19_ok auditoria": "auditoria_ok",
+  "plan contratado": "plan"
 };
 
 function parseDate(value) {
@@ -4306,6 +4330,23 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         const documento = documentoRaw || null;
         const email = normalizeText(row.email).toLowerCase() || null;
         const vendedorNombre = normalizeText(row.vendedor_nombre);
+        let sellerUserId = null;
+        if (vendedorNombre) {
+          const sellerRes = await client.query(
+            `
+            SELECT id FROM users
+            WHERE TRIM(LOWER(nombre || ' ' || apellido))
+                  LIKE TRIM(LOWER($1)) || '%'
+               OR TRIM(LOWER(nombre)) = ANY(
+                 SELECT TRIM(LOWER(word))
+                 FROM unnest(string_to_array(TRIM($1), ' ')) word
+               )
+            LIMIT 1
+            `,
+            [vendedorNombre]
+          );
+          sellerUserId = sellerRes.rows[0]?.id ?? null;
+        }
         const medioPago = normalizeText(row.medio_pago);
         const productoNombre = buildProductDisplayName(row.producto_nombre, row.precio);
         const phones = normalizeContactPhones(row.telefono, row.telefono_celular);
@@ -4327,40 +4368,100 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           pais: row.pais || null
         };
 
-        // Siempre crear un contacto nuevo para imports de clientes (sin deduplicar por documento).
-        const insertContact = await client.query(
-          `
-          INSERT INTO contacts (
-            nombre,
-            apellido,
-            email,
-            telefono,
-            celular,
-            documento,
-            fecha_nacimiento,
-            direccion,
-            departamento,
-            pais,
-            status
-          )
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'activo')
-          RETURNING *
-          `,
-          [
-            contactPayload.nombre || "",
-            contactPayload.apellido,
-            contactPayload.email,
-            contactPayload.telefono,
-            contactPayload.celular,
-            contactPayload.documento,
-            contactPayload.fecha_nacimiento,
-            contactPayload.direccion,
-            contactPayload.departamento,
-            contactPayload.pais || "Uruguay"
-          ]
-        );
-        const contact = insertContact.rows[0];
-        newContacts += 1;
+        let contact = null;
+        let contactImportStatus = "created";
+        let existingContactId = null;
+
+        if (documento) {
+          const byDoc = await client.query(
+            `
+            SELECT id FROM contacts
+            WHERE documento = $1
+            LIMIT 1
+            `,
+            [documento]
+          );
+          existingContactId = byDoc.rows[0]?.id ?? null;
+        }
+
+        if (!existingContactId && phones.telefono) {
+          const byTel = await client.query(
+            `
+            SELECT id FROM contacts
+            WHERE telefono = $1 OR celular = $1
+            LIMIT 1
+            `,
+            [phones.telefono]
+          );
+          existingContactId = byTel.rows[0]?.id ?? null;
+        }
+
+        if (existingContactId) {
+          await client.query(
+            `
+            UPDATE contacts SET
+              nombre = COALESCE($2, nombre),
+              apellido = COALESCE($3, apellido),
+              telefono = COALESCE($4, telefono),
+              celular = COALESCE($5, celular),
+              email = COALESCE($6, email),
+              direccion = COALESCE($7, direccion),
+              departamento = COALESCE($8, departamento),
+              fecha_nacimiento = COALESCE($9, fecha_nacimiento),
+              documento = COALESCE($10, documento),
+              updated_at = NOW()
+            WHERE id = $1
+            `,
+            [
+              existingContactId,
+              contactPayload.nombre || null,
+              contactPayload.apellido || null,
+              contactPayload.telefono || null,
+              contactPayload.celular || null,
+              contactPayload.email || null,
+              contactPayload.direccion || null,
+              contactPayload.departamento || null,
+              contactPayload.fecha_nacimiento || null,
+              contactPayload.documento || null
+            ]
+          );
+          contact = { id: existingContactId };
+          contactImportStatus = "updated";
+        } else {
+          const insertContact = await client.query(
+            `
+            INSERT INTO contacts (
+              nombre,
+              apellido,
+              email,
+              telefono,
+              celular,
+              documento,
+              fecha_nacimiento,
+              direccion,
+              departamento,
+              pais,
+              status
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'activo')
+            RETURNING *
+            `,
+            [
+              contactPayload.nombre || "",
+              contactPayload.apellido,
+              contactPayload.email,
+              contactPayload.telefono,
+              contactPayload.celular,
+              contactPayload.documento,
+              contactPayload.fecha_nacimiento,
+              contactPayload.direccion,
+              contactPayload.departamento,
+              contactPayload.pais || "Uruguay"
+            ]
+          );
+          contact = insertContact.rows[0];
+          newContacts += 1;
+        }
         const nombreFamiliar = String(row.nombre_familiar || "").trim();
         if (nombreFamiliar) {
           const relativeExists = await client.query(
@@ -4448,7 +4549,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             VALUES ($1, $2, $3, $4, 'importado', $5)
             RETURNING id
             `,
-            [contact.id, null, row.medio_pago || null, row.vendedor_nombre || null, fechaVenta]
+            [contact.id, sellerUserId, row.medio_pago || null, row.vendedor_nombre || null, fechaVenta]
           );
           saleId = saleInsert.rows[0].id;
 
@@ -4508,7 +4609,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               motivoBaja,
               motivoBajaDetalle,
               fechaBaja,
-              null,
+              sellerUserId,
               row.vendedor_nombre || null,
               "importado",
               saleId
@@ -4519,13 +4620,13 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         await client.query(
           `
           UPDATE contact_import_rows
-          SET import_status = 'imported',
+          SET import_status = $3,
               error_detail = NULL,
               resolved_contact_id = $1,
               updated_at = now()
           WHERE id = $2
           `,
-          [contact.id, row.id]
+          [contact.id, row.id, contactImportStatus]
         );
 
         await client.query("COMMIT");
