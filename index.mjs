@@ -4564,11 +4564,26 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
 
           const saleInsert = await client.query(
             `
-            INSERT INTO sales (contact_id, seller_user_id, medio_pago, seller_name_snapshot, seller_origin, fecha_venta)
-            VALUES ($1, $2, $3, $4, 'importado', $5)
+            INSERT INTO sales (
+              contact_id,
+              seller_user_id,
+              medio_pago,
+              seller_name_snapshot,
+              seller_origin,
+              fecha_venta,
+              documento_cobranza
+            )
+            VALUES ($1, $2, $3, $4, 'importado', $5, $6)
             RETURNING id
             `,
-            [contact.id, sellerUserId, row.medio_pago || null, row.vendedor_nombre || null, fechaVenta]
+            [
+              contact.id,
+              sellerUserId,
+              row.medio_pago || null,
+              row.vendedor_nombre || null,
+              fechaVenta,
+              row.documento_cobranza || null
+            ]
           );
           saleId = saleInsert.rows[0].id;
 
