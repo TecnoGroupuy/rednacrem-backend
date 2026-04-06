@@ -16870,6 +16870,123 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.match(/\/imports\/clients\/([^/]+)\/status$/)) {
+    const match = path.match(/\/imports\/clients\/([^/]+)\/status$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const batchResult = await client.query(
+          `
+          SELECT
+            id,
+            file_name,
+            status,
+            import_type,
+            total_rows,
+            valid_rows,
+            error_rows,
+            rejected_missing_documento,
+            report_products_detected,
+            report_products_created,
+            report_sellers_detected,
+            report_new_contacts,
+            created_at,
+            updated_at
+          FROM contact_import_batches
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [batchId]
+        );
+
+        if (!batchResult.rows.length) {
+          return json(404, { ok: false, message: "Batch no encontrado" });
+        }
+
+        const progressResult = await client.query(
+          `
+          SELECT
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE import_status = 'created')::int AS created,
+            COUNT(*) FILTER (WHERE import_status = 'updated')::int AS updated,
+            COUNT(*) FILTER (WHERE import_status = 'error')::int AS errors,
+            COUNT(*) FILTER (WHERE import_status = 'imported')::int AS imported,
+            COUNT(*) FILTER (WHERE import_status IS NULL OR import_status = 'pending')::int AS pending
+          FROM contact_import_rows
+          WHERE batch_id = $1
+          `,
+          [batchId]
+        );
+
+        const batch = batchResult.rows[0];
+        const progress = progressResult.rows[0] || {};
+        const totalRows = Number(batch.total_rows || progress.total || 0);
+        const created = Number(progress.created || 0);
+        const updated = Number(progress.updated || 0);
+        const imported = Number(progress.imported || 0);
+        const errors = Number(progress.errors || 0);
+        const pending = Number(progress.pending || 0);
+        const processed = created + updated + imported + errors;
+        const pct = totalRows > 0 ? Math.round((processed / totalRows) * 100) : 0;
+
+        return json(200, {
+          ok: true,
+          data: {
+            batchId: batch.id,
+            status: batch.status,
+            fileName: batch.file_name,
+            totalRows: totalRows,
+            validRows: Number(batch.valid_rows || 0),
+            errorRows: Number(batch.error_rows || 0),
+            progress: {
+              created,
+              updated,
+              errors,
+              imported,
+              pending,
+              processed,
+              pct
+            },
+            report: {
+              productosDetectados: Number(batch.report_products_detected || 0),
+              productosCreados: Number(batch.report_products_created || 0),
+              vendedoresDetectados: Number(batch.report_sellers_detected || 0),
+              nuevosContactos: Number(batch.report_new_contacts || 0)
+            }
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load import status",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.match(/\/imports\/([^/]+)\/rows$/)) {
     const match = path.match(/\/imports\/([^/]+)\/rows$/);
     const batchId = match?.[1];
