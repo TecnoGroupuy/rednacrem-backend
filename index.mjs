@@ -2407,6 +2407,7 @@ const CSV_HEADER_MAP = {
   "apellidos": "apellido",
   "documento": "documento",
   "cedula de identidad del beneficiario": "documento",
+  "documento de cobranza": "documento_cobranza",
   "fecha de nacimiento": "fecha_nacimiento",
   "telefono": "telefono",
   "telefono de venta": "telefono",
