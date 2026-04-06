@@ -600,6 +600,15 @@ function normalizeContactPhones(telefonoRaw, celularRaw) {
   return { telefono, celular };
 }
 
+function sanitizePhone(value) {
+  if (!value) return null;
+  const digits = String(value).replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length < 7) return null;
+  if (/^(.)\1+$/.test(digits)) return null;
+  return digits;
+}
+
 function normalizeUyNumber(value) {
   let digits = normalizePhoneDigits(value);
   if (!digits) return "";
@@ -4361,7 +4370,11 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         }
         const medioPago = normalizeText(row.medio_pago);
         const productoNombre = buildProductDisplayName(row.producto_nombre, row.precio);
-        const phones = normalizeContactPhones(row.telefono, row.telefono_celular);
+        const telefonoSan = sanitizePhone(row.telefono);
+        const celularSan = sanitizePhone(row.telefono_celular);
+        const telefonoFijoSan = sanitizePhone(row.telefono_fijo);
+        const telefonoAltSan = sanitizePhone(row.telefono_alternativo);
+        const phones = normalizeContactPhones(telefonoSan, celularSan);
 
         if (vendedorNombre) sellersSeen.add(vendedorNombre.toLowerCase());
         if (medioPago) paymentMethodsSeen.add(medioPago.toLowerCase());
@@ -4371,8 +4384,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           nombre: row.nombre || null,
           apellido: row.apellido || null,
           email,
-          telefono: phones.telefono || null,
-          celular: phones.celular || null,
+          telefono: phones.telefono || telefonoSan || null,
+          celular: phones.celular || celularSan || null,
+          telefono_fijo: telefonoFijoSan || null,
+          telefono_alternativo: telefonoAltSan || null,
           documento: documento || null,
           fecha_nacimiento: row.fecha_nacimiento || null,
           direccion: row.direccion || null,
