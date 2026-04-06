@@ -3648,6 +3648,7 @@ function buildContactImportInsertBatch(batchRows) {
   const placeholders = batchRows.map((row, index) => {
     const base = index * CONTACT_IMPORT_COLUMNS.length;
     const params = CONTACT_IMPORT_COLUMNS.map((_, colIndex) => `$${base + colIndex + 1}`);
+    values.push(...row);
     return `(${params.join(", ")})`;
   });
   return {
