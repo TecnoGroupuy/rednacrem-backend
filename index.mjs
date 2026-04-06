@@ -3654,6 +3654,15 @@ function validateImportRow(item) {
   if (!item.nombre && !item.apellido) {
     errors.push("nombre o apellido requerido");
   }
+  const telefono =
+    item.telefono ||
+    item.telefono_venta ||
+    item.telefono_celular ||
+    item.telefono_fijo ||
+    item.telefono_alternativo;
+  if (!item.documento && !telefono) {
+    errors.push("documento requerido");
+  }
   return errors;
 }
 
