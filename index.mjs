@@ -4417,6 +4417,19 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           existingContactId = byDoc.rows[0]?.id ?? null;
         }
 
+        if (!existingContactId && documento) {
+          const byDocOnly = await client.query(
+            `
+            SELECT id FROM contacts
+            WHERE documento = $1
+            `,
+            [documento]
+          );
+          if (byDocOnly.rowCount === 1) {
+            existingContactId = byDocOnly.rows[0]?.id ?? null;
+          }
+        }
+
         if (!existingContactId && telefonoSan) {
           const byTel = await client.query(
             `
@@ -14074,7 +14087,7 @@ export const handler = async (event) => {
     const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
     const rawBody = event?.body || "";
     const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("utf8")
+      ? Buffer.from(rawBody, "base64").toString("latin1")
       : typeof rawBody === "string"
       ? rawBody
       : JSON.stringify(rawBody);
