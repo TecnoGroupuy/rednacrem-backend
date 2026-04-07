@@ -16791,7 +16791,11 @@ export const handler = async (event) => {
       if (!headerLine.trim()) {
         return json(400, { ok: false, message: "CSV vacio" });
       }
-      const separator = detectCsvSeparator(headerLine);
+      const separator = headerLine.includes(";")
+        ? ";"
+        : headerLine.includes("\t")
+        ? "\t"
+        : ",";
       const headerKeys = parseCsvLine(headerLine, separator).map(
         (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
       );
