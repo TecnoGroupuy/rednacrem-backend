@@ -609,6 +609,15 @@ function sanitizePhone(value) {
   return digits;
 }
 
+function unaccentSimple(value) {
+  if (!value) return "";
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
 function normalizeUyNumber(value) {
   let digits = normalizePhoneDigits(value);
   if (!digits) return "";
@@ -4392,26 +4401,30 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         let contactImportStatus = "created";
         let existingContactId = null;
 
-        if (documento) {
+        const nombreNorm = unaccentSimple(contactPayload.nombre);
+        const apellidoNorm = unaccentSimple(contactPayload.apellido);
+        if (documento && nombreNorm && apellidoNorm) {
           const byDoc = await client.query(
             `
             SELECT id FROM contacts
             WHERE documento = $1
+              AND lower(coalesce(nombre, '')) = $2
+              AND lower(coalesce(apellido, '')) = $3
             LIMIT 1
             `,
-            [documento]
+            [documento, nombreNorm, apellidoNorm]
           );
           existingContactId = byDoc.rows[0]?.id ?? null;
         }
 
-        if (!existingContactId && phones.telefono) {
+        if (!existingContactId && telefonoSan) {
           const byTel = await client.query(
             `
             SELECT id FROM contacts
             WHERE telefono = $1 OR celular = $1
             LIMIT 1
             `,
-            [phones.telefono]
+            [telefonoSan]
           );
           existingContactId = byTel.rows[0]?.id ?? null;
         }
@@ -4483,46 +4496,46 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           newContacts += 1;
         }
         const nombreFamiliar = String(row.nombre_familiar || "").trim();
-        if (nombreFamiliar) {
-          const relativeExists = await client.query(
-            `
-            SELECT id
-            FROM contact_relatives
-            WHERE contact_id = $1
-              AND lower(coalesce(nombre, '')) = lower($2)
-              AND lower(coalesce(apellido, '')) = lower($3)
-              AND coalesce(telefono, '') = $4
-              AND lower(coalesce(parentesco, '')) = lower($5)
-            LIMIT 1
-            `,
-            [
-              contact.id,
-              nombreFamiliar,
-              row.apellido_familiar || "",
-              row.telefono_familiar || "",
-              row.parentesco || ""
-            ]
-          );
+        const apellidoFamiliar = String(row.apellido_familiar || "").trim();
+        const telefonoFamiliar = sanitizePhone(row.telefono_familiar);
+        const parentesco = row.parentesco || null;
+        if (nombreFamiliar || apellidoFamiliar || telefonoFamiliar) {
+          let relatedContactId = null;
+          if (telefonoFamiliar) {
+            const famRes = await client.query(
+              `
+              SELECT id
+              FROM contacts
+              WHERE (telefono = $1 OR celular = $1)
+                AND translate(lower(coalesce(nombre, '')),
+                  'áéíóúäëïöüàèìòùâêîôûñÁÉÍÓÚÄËÏÖÜÀÈÌÒÙÂÊÎÔÛÑ',
+                  'aeiouaeiouaeiouaeiounAEIOUAEIOUAEIOUAEIOUN') = $2
+                AND translate(lower(coalesce(apellido, '')),
+                  'áéíóúäëïöüàèìòùâêîôûñÁÉÍÓÚÄËÏÖÜÀÈÌÒÙÂÊÎÔÛÑ',
+                  'aeiouaeiouaeiouaeiounAEIOUAEIOUAEIOUAEIOUN') = $3
+              LIMIT 1
+              `,
+              [telefonoFamiliar, unaccentSimple(nombreFamiliar), unaccentSimple(apellidoFamiliar)]
+            );
+            relatedContactId = famRes.rows[0]?.id ?? null;
+          }
 
-          if (relativeExists.rowCount === 0) {
+          if (relatedContactId && relatedContactId !== contact.id) {
             await client.query(
               `
-              INSERT INTO contact_relatives (
-                contact_id,
-                nombre,
-                apellido,
-                telefono,
-                parentesco
+              INSERT INTO contact_relations (
+                contact_id_a,
+                contact_id_b,
+                relation,
+                source
               )
-              VALUES ($1,$2,$3,$4,$5)
+              VALUES ($1,$2,$3,'import')
+              ON CONFLICT (contact_id_a, contact_id_b)
+              DO UPDATE SET
+                relation = EXCLUDED.relation,
+                updated_at = NOW()
               `,
-              [
-                contact.id,
-                nombreFamiliar,
-                row.apellido_familiar || null,
-                row.telefono_familiar || null,
-                row.parentesco || null
-              ]
+              [contact.id, relatedContactId, parentesco || "familiar"]
             );
           }
         }
@@ -4572,9 +4585,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               seller_name_snapshot,
               seller_origin,
               fecha_venta,
-              documento_cobranza
+              documento_cobranza,
+              titular_contact_id
             )
-            VALUES ($1, $2, $3, $4, 'importado', $5, $6)
+            VALUES ($1, $2, $3, $4, 'importado', $5, $6, $7)
             RETURNING id
             `,
             [
@@ -4583,7 +4597,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               row.medio_pago || null,
               row.vendedor_nombre || null,
               fechaVenta,
-              row.documento_cobranza || null
+              row.documento_cobranza || null,
+              contact.id
             ]
           );
           saleId = saleInsert.rows[0].id;
