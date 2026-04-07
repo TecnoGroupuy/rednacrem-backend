@@ -4349,7 +4349,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             SELECT id, user_id, nombre, apellido
             FROM sellers
             WHERE lower(unaccent_simple(nombre || ' ' || coalesce(apellido, '')))
-                  = unaccent_simple($1)
+                  = lower(unaccent_simple($1))
+               OR lower(unaccent_simple(nombre)) = lower(unaccent_simple($1))
             LIMIT 1
             `,
             [vendedorNombre]
