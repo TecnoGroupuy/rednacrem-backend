@@ -2463,6 +2463,7 @@ const CSV_HEADER_MAP = {
 
 function parseDate(str) {
   if (!str?.trim()) return null;
+  if (str.includes(";")) return null;
   const datePart = str.trim().split(" ")[0];
   const parts = datePart.split("/");
   if (parts.length !== 3) return null;
@@ -16796,7 +16797,13 @@ export const handler = async (event) => {
         : headerLine.includes("\t")
         ? "\t"
         : ",";
-      const headerKeys = parseCsvLine(headerLine, separator).map(
+      let headerCells = parseCsvLine(headerLine, separator);
+      if (headerCells.length === 1 && headerLine.includes(";")) {
+        headerCells = headerLine.split(";");
+      } else if (headerCells.length === 1 && headerLine.includes("\t")) {
+        headerCells = headerLine.split("\t");
+      }
+      const headerKeys = headerCells.map(
         (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
       );
       let ignoredEmptyRows = 0;
@@ -16846,6 +16853,11 @@ export const handler = async (event) => {
           let cells = parseCsvLine(line, separator);
           if (cells.length === 1 && line.includes(";")) {
             cells = parseCsvLine(line, ";");
+          }
+          if (cells.length === 1 && line.includes(";")) {
+            cells = line.split(";");
+          } else if (cells.length === 1 && line.includes("\t")) {
+            cells = line.split("\t");
           }
           const item = {};
           for (let j = 0; j < headerKeys.length; j += 1) {
