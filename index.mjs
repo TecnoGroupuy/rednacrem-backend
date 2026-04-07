@@ -3341,26 +3341,13 @@ function normalizeCsvValue(value) {
 }
 
 function detectCsvSeparator(headerLine) {
-  const candidates = [",", ";", "\t"];
-  let best = { separator: ",", count: 0 };
-  for (const separator of candidates) {
-    let inQuotes = false;
-    let count = 0;
-    for (let i = 0; i < headerLine.length; i += 1) {
-      const char = headerLine[i];
-      if (char === "\"") {
-        if (inQuotes && headerLine[i + 1] === "\"") {
-          i += 1;
-        } else {
-          inQuotes = !inQuotes;
-        }
-        continue;
-      }
-      if (!inQuotes && char === separator) count += 1;
-    }
-    if (count > best.count) best = { separator, count };
-  }
-  return best.count > 0 ? best.separator : ",";
+  const firstLine = String(headerLine || "").split("\n")[0];
+  const semicolons = (firstLine.match(/;/g) || []).length;
+  const commas = (firstLine.match(/,/g) || []).length;
+  const tabs = (firstLine.match(/\t/g) || []).length;
+  if (semicolons >= commas && semicolons >= tabs) return ";";
+  if (tabs >= commas) return "\t";
+  return ",";
 }
 
 function parseCsvLine(line, separator) {
