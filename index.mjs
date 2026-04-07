@@ -2419,7 +2419,8 @@ const CSV_HEADER_MAP = {
   "documento de cobranza": "documento_cobranza",
   "fecha de nacimiento": "fecha_nacimiento",
   "telefono": "telefono",
-  "telefono de venta": "telefono",
+  "telefono de venta": "telefono_venta",
+  "telefono venta": "telefono_venta",
   "telefono fijo": "telefono_fijo",
   "celular": "telefono_celular",
   "telefono celular": "telefono_celular",
@@ -2435,9 +2436,11 @@ const CSV_HEADER_MAP = {
   "telefono de contacto": "telefono_familiar",
   "vinculo": "parentesco",
   "parentesco": "parentesco",
-  "vendedor": "vendedor_nombre",
-  "nombre del asesor": "vendedor_nombre",
-  "7_consulta vendedor": "vendedor_nombre",
+  "vendedor": "nombre_asesor",
+  "nombre del asesor": "nombre_asesor",
+  "nombre asesor": "nombre_asesor",
+  "nombre_asesor": "nombre_asesor",
+  "7_consulta vendedor": "nombre_asesor",
   "fecha y hora de la venta": "fecha_venta",
   "fecha de venta": "fecha_venta",
   "marca temporal": "fecha_venta",
@@ -3605,7 +3608,7 @@ function buildContactImportRowValues(batchId, rowNumber, item, importStatus, err
     null,
     null,
     parseDate(item.fecha_baja),
-    item.vendedor_nombre,
+    item.nombre_asesor,
     item.vendedor_email,
     parseDate(item.fecha_venta),
     item.documento_beneficiario,
@@ -4336,7 +4339,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         const documentoRaw = normalizeText(row.documento);
         const documento = documentoRaw || null;
         const email = normalizeText(row.email).toLowerCase() || null;
-        const vendedorNombre = normalizeText(row.vendedor_nombre);
+        const vendedorNombre = normalizeText(row.nombre_asesor);
         let sellerUserId = null;
         let sellerId = null;
         let sellerNameSnapshot = vendedorNombre || null;
@@ -4375,7 +4378,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         }
         const medioPago = normalizeText(row.medio_pago);
         const productoNombre = buildProductDisplayName(row.producto_nombre, row.precio);
-        const telefonoSan = sanitizePhone(row.telefono);
+        const telefonoSan = sanitizePhone(row.telefono || row.telefono_venta);
         const celularSan = sanitizePhone(row.telefono_celular);
         const telefonoFijoSan = sanitizePhone(row.telefono_fijo);
         const telefonoAltSan = sanitizePhone(row.telefono_alternativo);
