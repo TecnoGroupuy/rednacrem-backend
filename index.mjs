@@ -4294,6 +4294,11 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
   const paymentMethodsSeen = new Set();
 
   try {
+    const hasResolvedSellerUserId = await columnExists(
+      client,
+      "contact_import_rows",
+      "resolved_seller_user_id"
+    );
     if (createProducts) {
       const pendingProducts = await client.query(
         `
@@ -4354,21 +4359,40 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         const email = normalizeText(row.email).toLowerCase() || null;
         const vendedorNombre = normalizeText(row.vendedor_nombre);
         let sellerUserId = null;
+        let sellerId = null;
+        let sellerNameSnapshot = vendedorNombre || null;
         if (vendedorNombre) {
           const sellerRes = await client.query(
             `
-            SELECT id FROM users
-            WHERE TRIM(LOWER(nombre || ' ' || apellido))
-                  LIKE TRIM(LOWER($1)) || '%'
-               OR TRIM(LOWER(nombre)) = ANY(
-                 SELECT TRIM(LOWER(word))
-                 FROM unnest(string_to_array(TRIM($1), ' ')) word
-               )
+            SELECT id, user_id, nombre, apellido
+            FROM sellers
+            WHERE lower(unaccent_simple(nombre || ' ' || coalesce(apellido, '')))
+                  = unaccent_simple($1)
             LIMIT 1
             `,
             [vendedorNombre]
           );
-          sellerUserId = sellerRes.rows[0]?.id ?? null;
+          if (sellerRes.rowCount > 0) {
+            const seller = sellerRes.rows[0];
+            sellerId = seller.id;
+            sellerUserId = seller.user_id || null;
+            const fullName = [seller.nombre, seller.apellido].filter(Boolean).join(" ").trim();
+            sellerNameSnapshot = fullName || vendedorNombre;
+          } else {
+            const sellerInsert = await client.query(
+              `
+              INSERT INTO sellers (nombre, activo)
+              VALUES ($1, true)
+              RETURNING id, nombre, apellido, user_id
+              `,
+              [vendedorNombre]
+            );
+            const seller = sellerInsert.rows[0];
+            sellerId = seller.id;
+            sellerUserId = seller.user_id || null;
+            const fullName = [seller.nombre, seller.apellido].filter(Boolean).join(" ").trim();
+            sellerNameSnapshot = fullName || vendedorNombre;
+          }
         }
         const medioPago = normalizeText(row.medio_pago);
         const productoNombre = buildProductDisplayName(row.producto_nombre, row.precio);
@@ -4608,7 +4632,7 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               contact.id,
               sellerUserId,
               row.medio_pago || null,
-              row.vendedor_nombre || null,
+              sellerNameSnapshot,
               fechaVenta,
               row.documento_cobranza || null,
               contact.id
@@ -4673,24 +4697,26 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               motivoBajaDetalle,
               fechaBaja,
               sellerUserId,
-              row.vendedor_nombre || null,
+              sellerNameSnapshot,
               "importado",
               saleId
             ]
           );
         }
 
-        await client.query(
-          `
+        const updateImportSql = `
           UPDATE contact_import_rows
           SET import_status = $3,
               error_detail = NULL,
               resolved_contact_id = $1,
               updated_at = now()
+              ${hasResolvedSellerUserId ? ", resolved_seller_user_id = $4" : ""}
           WHERE id = $2
-          `,
-          [contact.id, row.id, contactImportStatus]
-        );
+        `;
+        const updateImportValues = hasResolvedSellerUserId
+          ? [contact.id, row.id, contactImportStatus, sellerId]
+          : [contact.id, row.id, contactImportStatus];
+        await client.query(updateImportSql, updateImportValues);
 
         await client.query("COMMIT");
         imported += 1;
