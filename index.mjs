@@ -2463,17 +2463,12 @@ const CSV_HEADER_MAP = {
 
 function parseDate(str) {
   if (!str?.trim()) return null;
-  const parts = str.trim().split("/");
+  const datePart = str.trim().split(" ")[0];
+  const parts = datePart.split("/");
   if (parts.length !== 3) return null;
   const [day, month, year] = parts;
   if (!day || !month || !year) return null;
   return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-}
-
-function parseDateFromDateTime(str) {
-  if (!str?.trim()) return null;
-  const datePart = str.trim().split(" ")[0];
-  return parseDate(datePart);
 }
 
 const LOCAL_TZ = process.env.APP_TIMEZONE || process.env.TIMEZONE || "America/Argentina/Buenos_Aires";
@@ -3615,7 +3610,7 @@ function buildContactImportRowValues(batchId, rowNumber, item, importStatus, err
     item.plan || null,
     parseNumber(item.precio),
     item.medio_pago,
-    parseDateFromDateTime(item.fecha_venta),
+    parseDate(item.fecha_venta),
     null,
     null,
     item.producto_estado,
@@ -3624,7 +3619,7 @@ function buildContactImportRowValues(batchId, rowNumber, item, importStatus, err
     parseDate(item.fecha_baja),
     item.vendedor_nombre,
     item.vendedor_email,
-    parseDateFromDateTime(item.fecha_venta),
+    parseDate(item.fecha_venta),
     item.documento_beneficiario,
     item.documento_cobranza,
     item.telefono_venta,
