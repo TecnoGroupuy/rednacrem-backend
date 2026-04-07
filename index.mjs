@@ -16843,7 +16843,10 @@ export const handler = async (event) => {
             ignoredEmptyRows += 1;
             continue;
           }
-          const cells = parseCsvLine(line, separator);
+          let cells = parseCsvLine(line, separator);
+          if (cells.length === 1 && line.includes(";")) {
+            cells = parseCsvLine(line, ";");
+          }
           const item = {};
           for (let j = 0; j < headerKeys.length; j += 1) {
             const key = headerKeys[j];
