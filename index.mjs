@@ -2461,23 +2461,19 @@ const CSV_HEADER_MAP = {
   "plan contratado": "plan"
 };
 
-function parseDate(value) {
-  const text = String(value || "").trim();
-  if (!text) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-  const slashMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slashMatch) {
-    const day = slashMatch[1].padStart(2, "0");
-    const month = slashMatch[2].padStart(2, "0");
-    const year = slashMatch[3];
-    return `${year}-${month}-${day}`;
-  }
-  const parsed = new Date(text);
-  if (Number.isNaN(parsed.getTime())) return null;
-  const year = String(parsed.getFullYear());
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function parseDate(str) {
+  if (!str?.trim()) return null;
+  const parts = str.trim().split("/");
+  if (parts.length !== 3) return null;
+  const [day, month, year] = parts;
+  if (!day || !month || !year) return null;
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+function parseDateFromDateTime(str) {
+  if (!str?.trim()) return null;
+  const datePart = str.trim().split(" ")[0];
+  return parseDate(datePart);
 }
 
 const LOCAL_TZ = process.env.APP_TIMEZONE || process.env.TIMEZONE || "America/Argentina/Buenos_Aires";
@@ -3619,7 +3615,7 @@ function buildContactImportRowValues(batchId, rowNumber, item, importStatus, err
     item.plan || null,
     parseNumber(item.precio),
     item.medio_pago,
-    parseDate(item.fecha_venta),
+    parseDateFromDateTime(item.fecha_venta),
     null,
     null,
     item.producto_estado,
@@ -3628,7 +3624,7 @@ function buildContactImportRowValues(batchId, rowNumber, item, importStatus, err
     parseDate(item.fecha_baja),
     item.vendedor_nombre,
     item.vendedor_email,
-    parseDate(item.fecha_venta),
+    parseDateFromDateTime(item.fecha_venta),
     item.documento_beneficiario,
     item.documento_cobranza,
     item.telefono_venta,
@@ -4659,49 +4655,70 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           const estadoNorm = estadoRaw.toLowerCase();
           const isAlta = estadoNorm === "alta" || estadoNorm === "activo";
           const isBaja = !isAlta;
-          const fechaBaja = isBaja ? (row.fecha_baja || fechaVenta || new Date().toISOString().slice(0, 10)) : null;
+          const fechaAlta = fechaVenta || new Date().toISOString().slice(0, 10);
+          const fechaBaja = isBaja ? (row.fecha_baja || fechaAlta) : null;
           const motivoBaja = isBaja ? "otro" : null;
           const motivoBajaDetalle = isBaja ? (estadoRaw || "importado") : null;
 
-          await client.query(
-            `
-            INSERT INTO contact_products (
-              contact_id,
-              nombre_producto,
-              plan,
-              precio,
-              fecha_alta,
-              cuotas_pagas,
-              carencia_cuotas,
-              estado,
-              motivo_baja,
-              motivo_baja_detalle,
-              fecha_baja,
-              seller_user_id,
-              seller_name_snapshot,
-              seller_origin,
-              sale_id
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-            `,
-            [
-              contact.id,
-              productName || "Producto",
-              row.plan || null,
-              precio || 0,
-              fechaVenta || new Date().toISOString().slice(0, 10),
-              row.cuotas_pagas || 0,
-              row.carencia_cuotas || 0,
-              isBaja ? "baja" : "alta",
-              motivoBaja,
-              motivoBajaDetalle,
-              fechaBaja,
-              sellerUserId,
-              sellerNameSnapshot,
-              "importado",
-              saleId
-            ]
-          );
+          let shouldInsertContactProduct = true;
+          if (contactImportStatus === "updated") {
+            const exists = await client.query(
+              `
+              SELECT id
+              FROM contact_products
+              WHERE contact_id = $1
+                AND fecha_alta = $2
+                AND nombre_producto = $3
+              LIMIT 1
+              `,
+              [contact.id, fechaAlta, productName || "Producto"]
+            );
+            if (exists.rowCount > 0) {
+              shouldInsertContactProduct = false;
+            }
+          }
+
+          if (shouldInsertContactProduct) {
+            await client.query(
+              `
+              INSERT INTO contact_products (
+                contact_id,
+                nombre_producto,
+                plan,
+                precio,
+                fecha_alta,
+                cuotas_pagas,
+                carencia_cuotas,
+                estado,
+                motivo_baja,
+                motivo_baja_detalle,
+                fecha_baja,
+                seller_user_id,
+                seller_name_snapshot,
+                seller_origin,
+                sale_id
+              )
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              `,
+              [
+                contact.id,
+                productName || "Producto",
+                row.plan || null,
+                precio || 0,
+                fechaAlta,
+                row.cuotas_pagas || 0,
+                row.carencia_cuotas || 0,
+                isBaja ? "baja" : "alta",
+                motivoBaja,
+                motivoBajaDetalle,
+                fechaBaja,
+                sellerUserId,
+                sellerNameSnapshot,
+                "importado",
+                saleId
+              ]
+            );
+          }
         }
 
         const updateImportSql = `
