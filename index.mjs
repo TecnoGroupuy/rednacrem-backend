@@ -1738,6 +1738,39 @@ function parseMultipartFormData(event, options = {}) {
   return { fields, files };
 }
 
+function extractClientsImportCsv(event) {
+  const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
+  let csvText = "";
+  let multipartFileName = null;
+  let parsedMultipart = null;
+  if (contentType.toLowerCase().includes("multipart/form-data")) {
+    parsedMultipart = parseMultipartFormData(event, { encoding: "latin1" });
+    const fileEntry =
+      parsedMultipart?.files?.file ||
+      parsedMultipart?.files?.archivo ||
+      Object.values(parsedMultipart?.files || {})[0];
+    csvText = fileEntry?.content || "";
+    multipartFileName = fileEntry?.filename || null;
+  } else {
+    const rawBody = event?.body || "";
+    const bodyText = event?.isBase64Encoded
+      ? Buffer.from(rawBody, "base64").toString("latin1")
+      : typeof rawBody === "string"
+      ? rawBody
+      : JSON.stringify(rawBody);
+
+    csvText = bodyText;
+    if (contentType.includes("application/json")) {
+      const parsed = safeParseBody(event);
+      if (parsed && parsed.csv) {
+        csvText = parsed.csv;
+      }
+    }
+  }
+
+  return { csvText, fileName: multipartFileName, parsedMultipart };
+}
+
 function getClientsCsvParseContext(csvText) {
   const lineIterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
   const headerLineResult = lineIterator.next();
@@ -16776,43 +16809,7 @@ export const handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/imports/clients/analyze-diff")) {
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    let csvText = "";
-    if (contentType.toLowerCase().includes("multipart/form-data")) {
-      const parsedMultipart = parseMultipartFormData(event, { encoding: "latin1" });
-      console.log(
-        "analyze-diff: multipart fields",
-        Object.keys(parsedMultipart?.fields || {})
-      );
-      console.log(
-        "analyze-diff: multipart files",
-        Object.keys(parsedMultipart?.files || {})
-      );
-      console.log(
-        "analyze-diff: file content length",
-        parsedMultipart?.files?.file?.content?.length
-      );
-      const fileEntry =
-        parsedMultipart?.files?.file ||
-        parsedMultipart?.files?.archivo ||
-        Object.values(parsedMultipart?.files || {})[0];
-      csvText = fileEntry?.content || "";
-    } else {
-      const rawBody = event?.body || "";
-      const bodyText = event?.isBase64Encoded
-        ? Buffer.from(rawBody, "base64").toString("latin1")
-        : typeof rawBody === "string"
-        ? rawBody
-        : JSON.stringify(rawBody);
-
-      csvText = bodyText;
-      if (contentType.includes("application/json")) {
-        const parsed = safeParseBody(event);
-        if (parsed && parsed.csv) {
-          csvText = parsed.csv;
-        }
-      }
-    }
+    const { csvText, parsedMultipart } = extractClientsImportCsv(event);
     const rawCsv = csvText;
 
     if (!csvText || !csvText.trim()) {
@@ -16967,6 +16964,18 @@ export const handler = async (event) => {
         console.log("analyze-diff: body length", event?.body?.length);
         console.log("analyze-diff: isBase64", event?.isBase64Encoded);
         console.log("analyze-diff: rawCsv length después de decode", rawCsv?.length);
+        console.log(
+          "analyze-diff: multipart fields",
+          Object.keys(parsedMultipart?.fields || {})
+        );
+        console.log(
+          "analyze-diff: multipart files",
+          Object.keys(parsedMultipart?.files || {})
+        );
+        console.log(
+          "analyze-diff: file content length",
+          parsedMultipart?.files?.file?.content?.length
+        );
         console.log("analyze-diff: líneas detectadas", lines?.length);
         console.log("analyze-diff: separador detectado", separator);
         console.log("analyze-diff: primera línea", lines?.[0]?.substring(0, 100));
@@ -17004,33 +17013,7 @@ export const handler = async (event) => {
       event?.headers?.["x-filename"] ||
       event?.headers?.["X-Filename"] ||
       "import_clientes.csv";
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    let csvText = "";
-    let multipartFileName = null;
-    if (contentType.toLowerCase().includes("multipart/form-data")) {
-      const multipart = parseMultipartFormData(event, { encoding: "latin1" });
-      const fileEntry =
-        multipart?.files?.file ||
-        multipart?.files?.archivo ||
-        Object.values(multipart?.files || {})[0];
-      csvText = fileEntry?.content || "";
-      multipartFileName = fileEntry?.filename || null;
-    } else {
-      const rawBody = event?.body || "";
-      const bodyText = event?.isBase64Encoded
-        ? Buffer.from(rawBody, "base64").toString("latin1")
-        : typeof rawBody === "string"
-        ? rawBody
-        : JSON.stringify(rawBody);
-
-      csvText = bodyText;
-      if (contentType.includes("application/json")) {
-        const parsed = safeParseBody(event);
-        if (parsed && parsed.csv) {
-          csvText = parsed.csv;
-        }
-      }
-    }
+    const { csvText, fileName: multipartFileName } = extractClientsImportCsv(event);
     const fileName = multipartFileName || fileNameHeader || "import_clientes.csv";
 
     if (!csvText || !csvText.trim()) {
