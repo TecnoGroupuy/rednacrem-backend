@@ -16779,11 +16779,23 @@ export const handler = async (event) => {
     const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
     let csvText = "";
     if (contentType.toLowerCase().includes("multipart/form-data")) {
-      const multipart = parseMultipartFormData(event, { encoding: "latin1" });
+      const parsedMultipart = parseMultipartFormData(event, { encoding: "latin1" });
+      console.log(
+        "analyze-diff: multipart fields",
+        Object.keys(parsedMultipart?.fields || {})
+      );
+      console.log(
+        "analyze-diff: multipart files",
+        Object.keys(parsedMultipart?.files || {})
+      );
+      console.log(
+        "analyze-diff: file content length",
+        parsedMultipart?.files?.file?.content?.length
+      );
       const fileEntry =
-        multipart?.files?.file ||
-        multipart?.files?.archivo ||
-        Object.values(multipart?.files || {})[0];
+        parsedMultipart?.files?.file ||
+        parsedMultipart?.files?.archivo ||
+        Object.values(parsedMultipart?.files || {})[0];
       csvText = fileEntry?.content || "";
     } else {
       const rawBody = event?.body || "";
