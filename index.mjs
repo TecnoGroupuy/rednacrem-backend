@@ -1703,7 +1703,7 @@ function parseMultipartFormData(event, options = {}) {
   if (!contentType.toLowerCase().includes("multipart/form-data")) return null;
   const boundaryMatch = contentType.match(/boundary=([^;]+)/i);
   if (!boundaryMatch) return null;
-  const boundary = boundaryMatch[1];
+  const boundary = boundaryMatch[1].trim().replace(/^["']|["']$/g, "");
   const encoding = options?.encoding || "utf8";
   const rawBody = event?.body || "";
   const buffer = event?.isBase64Encoded
@@ -1711,6 +1711,12 @@ function parseMultipartFormData(event, options = {}) {
     : Buffer.from(typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody));
   const text = buffer.toString(encoding);
   const parts = text.split("--" + boundary);
+  console.log("parseMultipart: boundary del header:", JSON.stringify(boundary));
+  console.log("parseMultipart: parts count:", parts.length);
+  console.log(
+    "parseMultipart: primera part (100 chars):",
+    parts[1]?.substring(0, 100)
+  );
   const fields = {};
   const files = {};
   for (const part of parts) {
