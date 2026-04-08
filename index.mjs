@@ -2470,9 +2470,24 @@ function parseDate(str) {
   const datePart = str.trim().split(" ")[0];
   const parts = datePart.split("/");
   if (parts.length !== 3) return null;
-  const [day, month, year] = parts;
+  let [day, month, year] = parts;
   if (!day || !month || !year) return null;
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  if (year.length === 2) {
+    const yearNum = parseInt(year, 10);
+    if (!Number.isNaN(yearNum)) {
+      year = yearNum <= 30
+        ? `20${String(yearNum).padStart(2, "0")}`
+        : `19${String(yearNum).padStart(2, "0")}`;
+    }
+  }
+  const d = parseInt(day, 10);
+  const m = parseInt(month, 10);
+  const y = parseInt(year, 10);
+  if (!Number.isFinite(d) || !Number.isFinite(m) || !Number.isFinite(y)) return null;
+  if (d < 1 || d > 31) return null;
+  if (m < 1 || m > 12) return null;
+  if (y < 1900 || y > 2100) return null;
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
 const LOCAL_TZ = process.env.APP_TIMEZONE || process.env.TIMEZONE || "America/Argentina/Buenos_Aires";
