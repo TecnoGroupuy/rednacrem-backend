@@ -1768,9 +1768,7 @@ function extractClientsImportCsv(event) {
     csvText = bodyText;
     if (contentType.includes("application/json")) {
       const parsed = safeParseBody(event);
-      if (parsed && parsed.csv) {
-        csvText = parsed.csv;
-      }
+      csvText = parsed?.csv || "";
     }
   }
 
@@ -16970,6 +16968,7 @@ export const handler = async (event) => {
         console.log("analyze-diff: body length", event?.body?.length);
         console.log("analyze-diff: isBase64", event?.isBase64Encoded);
         console.log("analyze-diff: rawCsv length después de decode", rawCsv?.length);
+        console.log("analyze-diff: csvText length desde JSON:", rawCsv?.length);
         console.log(
           "analyze-diff: multipart fields",
           Object.keys(parsedMultipart?.fields || {})
