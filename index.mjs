@@ -1698,17 +1698,18 @@ function getLocalidadFromFixed(numero) {
 const NO_CALL_JOB_CHUNK_SIZE = 5000;
 const CONTACT_IMPORT_BATCH_SIZE = 500;
 
-function parseMultipartFormData(event) {
+function parseMultipartFormData(event, options = {}) {
   const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
   if (!contentType.toLowerCase().includes("multipart/form-data")) return null;
   const boundaryMatch = contentType.match(/boundary=([^;]+)/i);
   if (!boundaryMatch) return null;
   const boundary = boundaryMatch[1];
+  const encoding = options?.encoding || "utf8";
   const rawBody = event?.body || "";
   const buffer = event?.isBase64Encoded
     ? Buffer.from(rawBody, "base64")
     : Buffer.from(typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody));
-  const text = buffer.toString("utf8");
+  const text = buffer.toString(encoding);
   const parts = text.split("--" + boundary);
   const fields = {};
   const files = {};
@@ -1735,6 +1736,61 @@ function parseMultipartFormData(event) {
     }
   }
   return { fields, files };
+}
+
+function extractClientsImportCsv(event) {
+  const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
+  if (contentType.toLowerCase().includes("multipart/form-data")) {
+    const multipart = parseMultipartFormData(event, { encoding: "latin1" });
+    if (multipart) {
+      const fileEntry =
+        multipart.files?.file ||
+        multipart.files?.archivo ||
+        Object.values(multipart.files || {})[0];
+      return {
+        csvText: fileEntry?.content || "",
+        fileName: fileEntry?.filename || null
+      };
+    }
+  }
+
+  const rawBody = event?.body || "";
+  const bodyText = event?.isBase64Encoded
+    ? Buffer.from(rawBody, "base64").toString("latin1")
+    : typeof rawBody === "string"
+    ? rawBody
+    : JSON.stringify(rawBody);
+
+  let csvText = bodyText;
+  if (contentType.includes("application/json")) {
+    const parsed = safeParseBody(event);
+    if (parsed && parsed.csv) {
+      csvText = parsed.csv;
+    }
+  }
+
+  return { csvText, fileName: null };
+}
+
+function getClientsCsvParseContext(csvText) {
+  const lineIterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+  const headerLineResult = lineIterator.next();
+  const headerLine = headerLineResult.done ? "" : headerLineResult.value || "";
+  if (!headerLine.trim()) {
+    return { error: "CSV vacio" };
+  }
+  const separator = detectSeparator(headerLine);
+  let headerCells = parseCsvLine(headerLine, separator);
+  if (headerCells.length === 1 && headerLine.includes(";")) {
+    headerCells = headerLine.split(";");
+  } else if (headerCells.length === 1 && headerLine.includes("\t")) {
+    headerCells = headerLine.split("\t");
+  }
+  const headerKeys = headerCells.map(
+    (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
+  );
+
+  return { lineIterator, headerLine, separator, headerKeys };
 }
 
 function normalizeImportValue(value) {
@@ -16754,21 +16810,7 @@ export const handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/imports/clients/analyze-diff")) {
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    const rawBody = event?.body || "";
-    const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("latin1")
-      : typeof rawBody === "string"
-      ? rawBody
-      : JSON.stringify(rawBody);
-
-    let csvText = bodyText;
-    if (contentType.includes("application/json")) {
-      const parsed = safeParseBody(event);
-      if (parsed && parsed.csv) {
-        csvText = parsed.csv;
-      }
-    }
+    const { csvText } = extractClientsImportCsv(event);
 
     if (!csvText || !csvText.trim()) {
       return json(400, { ok: false, message: "CSV vacio" });
@@ -16789,26 +16831,11 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const lineIterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
-      const headerLineResult = lineIterator.next();
-      const headerLine = headerLineResult.done ? "" : headerLineResult.value || "";
-      if (!headerLine.trim()) {
+      const parseContext = getClientsCsvParseContext(csvText);
+      if (parseContext.error) {
         return json(400, { ok: false, message: "CSV vacio" });
       }
-      const separator = headerLine.includes(";")
-        ? ";"
-        : headerLine.includes("\t")
-        ? "\t"
-        : ",";
-      let headerCells = parseCsvLine(headerLine, separator);
-      if (headerCells.length === 1 && headerLine.includes(";")) {
-        headerCells = headerLine.split(";");
-      } else if (headerCells.length === 1 && headerLine.includes("\t")) {
-        headerCells = headerLine.split("\t");
-      }
-      const headerKeys = headerCells.map(
-        (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
-      );
+      const { lineIterator, separator, headerKeys } = parseContext;
 
       const client = createDbClient();
       await client.connect();
@@ -16823,6 +16850,7 @@ export const handler = async (event) => {
         const detalleBajaBdAlta = [];
         const detalleNoEncontrados = [];
 
+        const rows = [];
         let rowNumber = 0;
         for (const line of lineIterator) {
           if (!line || !line.trim()) continue;
@@ -16846,6 +16874,7 @@ export const handler = async (event) => {
           );
           if (!hasValues) continue;
 
+          rows.push(item);
           rowNumber += 1;
           totalCsv += 1;
 
@@ -16930,6 +16959,7 @@ export const handler = async (event) => {
           }
         }
 
+        console.log("analyze-diff rows:", rows.length);
         return json(200, {
           resumen: {
             total_csv: totalCsv,
@@ -16957,28 +16987,14 @@ export const handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/imports/clients")) {
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    const fileName =
+    const fileNameHeader =
       event?.headers?.["x-file-name"] ||
       event?.headers?.["X-File-Name"] ||
       event?.headers?.["x-filename"] ||
       event?.headers?.["X-Filename"] ||
       "import_clientes.csv";
-
-    const rawBody = event?.body || "";
-    const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("utf8")
-      : typeof rawBody === "string"
-      ? rawBody
-      : JSON.stringify(rawBody);
-
-    let csvText = bodyText;
-    if (contentType.includes("application/json")) {
-      const parsed = safeParseBody(event);
-      if (parsed && parsed.csv) {
-        csvText = parsed.csv;
-      }
-    }
+    const { csvText, fileName: multipartFileName } = extractClientsImportCsv(event);
+    const fileName = multipartFileName || fileNameHeader || "import_clientes.csv";
 
     if (!csvText || !csvText.trim()) {
       return json(400, { ok: false, message: "CSV vacio" });
@@ -17008,26 +17024,11 @@ export const handler = async (event) => {
         .toLowerCase();
       const createProducts = !["false", "0", "no"].includes(createProductsParam);
 
-      const lineIterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
-      const headerLineResult = lineIterator.next();
-      const headerLine = headerLineResult.done ? "" : headerLineResult.value || "";
-      if (!headerLine.trim()) {
+      const parseContext = getClientsCsvParseContext(csvText);
+      if (parseContext.error) {
         return json(400, { ok: false, message: "CSV vacio" });
       }
-      const separator = headerLine.includes(";")
-        ? ";"
-        : headerLine.includes("\t")
-        ? "\t"
-        : ",";
-      let headerCells = parseCsvLine(headerLine, separator);
-      if (headerCells.length === 1 && headerLine.includes(";")) {
-        headerCells = headerLine.split(";");
-      } else if (headerCells.length === 1 && headerLine.includes("\t")) {
-        headerCells = headerLine.split("\t");
-      }
-      const headerKeys = headerCells.map(
-        (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
-      );
+      const { lineIterator, separator, headerKeys } = parseContext;
       let ignoredEmptyRows = 0;
       const client = createDbClient();
       await client.connect();
