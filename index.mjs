@@ -16811,6 +16811,7 @@ export const handler = async (event) => {
 
   if (method === "POST" && path.endsWith("/imports/clients/analyze-diff")) {
     const { csvText } = extractClientsImportCsv(event);
+    const rawCsv = csvText;
 
     if (!csvText || !csvText.trim()) {
       return json(400, { ok: false, message: "CSV vacio" });
@@ -16836,6 +16837,7 @@ export const handler = async (event) => {
         return json(400, { ok: false, message: "CSV vacio" });
       }
       const { lineIterator, separator, headerKeys } = parseContext;
+      const lines = String(rawCsv || "").replace(/^\uFEFF/, "").split(/\r?\n/);
 
       const client = createDbClient();
       await client.connect();
@@ -16959,6 +16961,13 @@ export const handler = async (event) => {
           }
         }
 
+        console.log("analyze-diff: content-type", event?.headers?.["content-type"]);
+        console.log("analyze-diff: body length", event?.body?.length);
+        console.log("analyze-diff: isBase64", event?.isBase64Encoded);
+        console.log("analyze-diff: rawCsv length después de decode", rawCsv?.length);
+        console.log("analyze-diff: líneas detectadas", lines?.length);
+        console.log("analyze-diff: separador detectado", separator);
+        console.log("analyze-diff: primera línea", lines?.[0]?.substring(0, 100));
         console.log("analyze-diff rows:", rows.length);
         return json(200, {
           resumen: {
