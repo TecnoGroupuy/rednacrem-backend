@@ -14132,7 +14132,7 @@ export const handler = async (event) => {
     const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
     const rawBody = event?.body || "";
     const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("latin1")
+      ? Buffer.from(rawBody, "base64").toString("utf8")
       : typeof rawBody === "string"
       ? rawBody
       : JSON.stringify(rawBody);
@@ -16748,6 +16748,209 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to list datos para trabajar",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/imports/clients/analyze-diff")) {
+    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
+    const rawBody = event?.body || "";
+    const bodyText = event?.isBase64Encoded
+      ? Buffer.from(rawBody, "base64").toString("latin1")
+      : typeof rawBody === "string"
+      ? rawBody
+      : JSON.stringify(rawBody);
+
+    let csvText = bodyText;
+    if (contentType.includes("application/json")) {
+      const parsed = safeParseBody(event);
+      if (parsed && parsed.csv) {
+        csvText = parsed.csv;
+      }
+    }
+
+    if (!csvText || !csvText.trim()) {
+      return json(400, { ok: false, message: "CSV vacio" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const lineIterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+      const headerLineResult = lineIterator.next();
+      const headerLine = headerLineResult.done ? "" : headerLineResult.value || "";
+      if (!headerLine.trim()) {
+        return json(400, { ok: false, message: "CSV vacio" });
+      }
+      const separator = headerLine.includes(";")
+        ? ";"
+        : headerLine.includes("\t")
+        ? "\t"
+        : ",";
+      let headerCells = parseCsvLine(headerLine, separator);
+      if (headerCells.length === 1 && headerLine.includes(";")) {
+        headerCells = headerLine.split(";");
+      } else if (headerCells.length === 1 && headerLine.includes("\t")) {
+        headerCells = headerLine.split("\t");
+      }
+      const headerKeys = headerCells.map(
+        (header) => CSV_HEADER_MAP[normalizeCsvHeader(header)] || null
+      );
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        let totalCsv = 0;
+        let coinciden = 0;
+        let altaBdBajaCsv = 0;
+        let bajaBdAltaCsv = 0;
+        let noEncontrados = 0;
+
+        const detalleAltaBdBaja = [];
+        const detalleBajaBdAlta = [];
+        const detalleNoEncontrados = [];
+
+        let rowNumber = 0;
+        for (const line of lineIterator) {
+          if (!line || !line.trim()) continue;
+          let cells = parseCsvLine(line, separator);
+          if (cells.length === 1 && line.includes(";")) {
+            cells = parseCsvLine(line, ";");
+          }
+          if (cells.length === 1 && line.includes(";")) {
+            cells = line.split(";");
+          } else if (cells.length === 1 && line.includes("\t")) {
+            cells = line.split("\t");
+          }
+          const item = {};
+          for (let j = 0; j < headerKeys.length; j += 1) {
+            const key = headerKeys[j];
+            if (!key) continue;
+            item[key] = normalizeCsvValue(cells[j]);
+          }
+          const hasValues = Object.values(item).some(
+            (value) => value !== null && String(value).trim() !== ""
+          );
+          if (!hasValues) continue;
+
+          rowNumber += 1;
+          totalCsv += 1;
+
+          const nombre = item.nombre || "";
+          const apellido = item.apellido || "";
+          const documento = item.documento || "";
+          const estadoCsvRaw = normalizeText(item.producto_estado || item.estado || "");
+          const estadoCsvNorm = estadoCsvRaw.toLowerCase();
+          const csvIsAlta = estadoCsvNorm === "alta" || estadoCsvNorm === "activo";
+          const csvIsBaja = estadoCsvNorm === "baja";
+
+          let contactId = null;
+          if (documento && nombre && apellido) {
+            const contactRes = await client.query(
+              `
+              SELECT id
+              FROM contacts
+              WHERE documento = $1
+                AND lower(unaccent_simple(nombre)) = lower(unaccent_simple($2))
+                AND lower(unaccent_simple(apellido)) = lower(unaccent_simple($3))
+              LIMIT 1
+              `,
+              [documento, nombre, apellido]
+            );
+            contactId = contactRes.rows[0]?.id ?? null;
+          }
+
+          if (!contactId) {
+            noEncontrados += 1;
+            if (detalleNoEncontrados.length < 50) {
+              detalleNoEncontrados.push({
+                row_number: rowNumber,
+                documento: documento || null,
+                nombre: nombre || null,
+                apellido: apellido || null,
+                estado_csv: estadoCsvRaw || null
+              });
+            }
+            continue;
+          }
+
+          const estadoRes = await client.query(
+            `
+            SELECT estado
+            FROM contact_products
+            WHERE contact_id = $1
+            ORDER BY fecha_alta DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            `,
+            [contactId]
+          );
+          const estadoBdRaw = estadoRes.rows[0]?.estado || null;
+          const estadoBdNorm = String(estadoBdRaw || "").toLowerCase();
+          const bdIsAlta = estadoBdNorm === "alta";
+
+          if (csvIsBaja && bdIsAlta) {
+            altaBdBajaCsv += 1;
+            if (detalleAltaBdBaja.length < 50) {
+              detalleAltaBdBaja.push({
+                row_number: rowNumber,
+                documento: documento || null,
+                nombre: nombre || null,
+                apellido: apellido || null,
+                estado_csv: estadoCsvRaw || null,
+                estado_bd: estadoBdRaw || null
+              });
+            }
+          } else if (csvIsAlta && !bdIsAlta) {
+            bajaBdAltaCsv += 1;
+            if (detalleBajaBdAlta.length < 50) {
+              detalleBajaBdAlta.push({
+                row_number: rowNumber,
+                documento: documento || null,
+                nombre: nombre || null,
+                apellido: apellido || null,
+                estado_csv: estadoCsvRaw || null,
+                estado_bd: estadoBdRaw || null
+              });
+            }
+          } else {
+            coinciden += 1;
+          }
+        }
+
+        return json(200, {
+          resumen: {
+            total_csv: totalCsv,
+            coinciden,
+            alta_bd_baja_csv: altaBdBajaCsv,
+            baja_bd_alta_csv: bajaBdAltaCsv,
+            no_encontrados: noEncontrados
+          },
+          detalle: {
+            alta_bd_baja_csv: detalleAltaBdBaja,
+            baja_bd_alta_csv: detalleBajaBdAlta,
+            no_encontrados: detalleNoEncontrados
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to analyze diff",
         error: error.message
       });
     }
