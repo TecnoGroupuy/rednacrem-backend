@@ -132,7 +132,8 @@ async function enqueueContactImportJob(batchId, options = {}) {
   const payload = {
     type: "contact_import",
     batchId,
-    createProducts: options.createProducts !== false
+    createProducts: options.createProducts !== false,
+    organizationId: options.organizationId || null
   };
   await sqs.send(
     new SendMessageCommand({
@@ -2231,7 +2232,7 @@ function getClientUiStatus(row) {
     : "Control";
 }
 
-function buildContactSummarySelect() {
+function buildContactSummarySelect(whereClause = "") {
   return `
     SELECT
       c.id,
@@ -2241,6 +2242,7 @@ function buildContactSummarySelect() {
       c.telefono,
       c.celular,
       c.documento,
+      c.organization_id,
             CASE\n              WHEN c.fecha_nacimiento IS NULL THEN NULL\n              ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int\n            END AS edad,
       c.status AS contacto_estado,
       COUNT(cp.id)::int AS productos_total,
@@ -2255,6 +2257,7 @@ function buildContactSummarySelect() {
     FROM contacts c
     LEFT JOIN contact_products cp
       ON cp.contact_id = c.id
+    ${whereClause}
     GROUP BY
       c.id,
       c.nombre,
@@ -2263,6 +2266,7 @@ function buildContactSummarySelect() {
       c.telefono,
       c.celular,
       c.documento,
+      c.organization_id,
       c.status,
       c.created_at,
       c.updated_at
@@ -4337,7 +4341,10 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
   }
 }
 
-async function processClientImportBatch(batchId, { createProducts = true } = {}) {
+async function processClientImportBatch(
+  batchId,
+  { createProducts = true, organizationId = null } = {}
+) {
   const client = createDbClient();
   await client.connect();
 
@@ -4356,6 +4363,9 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
       "resolved_seller_user_id"
     );
     if (createProducts) {
+      const pendingValues = [batchId];
+      const pendingOrgClause = organizationId ? "AND organization_id = $2" : "";
+      if (organizationId) pendingValues.push(organizationId);
       const pendingProducts = await client.query(
         `
         SELECT
@@ -4363,12 +4373,13 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           MAX(precio)::numeric AS precio
         FROM contact_import_rows
         WHERE batch_id = $1
+          ${pendingOrgClause}
           AND import_status = 'validated'
           AND producto_nombre IS NOT NULL
           AND trim(producto_nombre) <> ''
         GROUP BY producto_nombre
         `,
-        [batchId]
+        pendingValues
       );
       for (const row of pendingProducts.rows) {
         const productName = buildProductDisplayName(row.producto_nombre, row.precio);
@@ -4379,31 +4390,36 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           SELECT id
           FROM products
           WHERE lower(nombre) = lower($1)
+          ${organizationId ? "AND organization_id = $2" : ""}
           LIMIT 1
           `,
-          [productName]
+          organizationId ? [productName, organizationId] : [productName]
         );
         if (exists.rowCount > 0) continue;
         await client.query(
           `
-          INSERT INTO products (nombre, categoria, precio, activo)
-          VALUES ($1, 'General', $2, true)
+          INSERT INTO products (nombre, categoria, precio, activo, organization_id)
+          VALUES ($1, 'General', $2, true, $3)
           `,
-          [productName, row.precio || 0]
+          [productName, row.precio || 0, organizationId]
         );
         productsCreated += 1;
       }
     }
 
+    const rowsValues = [batchId];
+    const rowsOrgClause = organizationId ? "AND organization_id = $2" : "";
+    if (organizationId) rowsValues.push(organizationId);
     const rowsResult = await client.query(
       `
       SELECT *
       FROM contact_import_rows
       WHERE batch_id = $1
+        ${rowsOrgClause}
         AND import_status = 'validated'
       ORDER BY row_number ASC
       `,
-      [batchId]
+      rowsValues
     );
 
     for (const row of rowsResult.rows) {
@@ -4425,9 +4441,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             WHERE lower(unaccent_simple(nombre || ' ' || coalesce(apellido, '')))
                   = lower(unaccent_simple($1))
                OR lower(unaccent_simple(nombre)) = lower(unaccent_simple($1))
+              ${organizationId ? "AND organization_id = $2" : ""}
             LIMIT 1
             `,
-            [vendedorNombre]
+            organizationId ? [vendedorNombre, organizationId] : [vendedorNombre]
           );
           if (sellerRes.rowCount > 0) {
             const seller = sellerRes.rows[0];
@@ -4438,11 +4455,11 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           } else {
             const sellerInsert = await client.query(
               `
-              INSERT INTO sellers (nombre, activo)
-              VALUES ($1, true)
+              INSERT INTO sellers (nombre, activo, organization_id)
+              VALUES ($1, true, $2)
               RETURNING id, nombre, apellido, user_id
               `,
-              [vendedorNombre]
+              [vendedorNombre, organizationId]
             );
             const seller = sellerInsert.rows[0];
             sellerId = seller.id;
@@ -4491,9 +4508,12 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             WHERE documento = $1
               AND lower(coalesce(nombre, '')) = $2
               AND lower(coalesce(apellido, '')) = $3
+              ${organizationId ? "AND organization_id = $4" : ""}
             LIMIT 1
             `,
-            [documento, nombreNorm, apellidoNorm]
+            organizationId
+              ? [documento, nombreNorm, apellidoNorm, organizationId]
+              : [documento, nombreNorm, apellidoNorm]
           );
           existingContactId = byDoc.rows[0]?.id ?? null;
         }
@@ -4503,8 +4523,9 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             `
             SELECT id FROM contacts
             WHERE documento = $1
+              ${organizationId ? "AND organization_id = $2" : ""}
             `,
-            [documento]
+            organizationId ? [documento, organizationId] : [documento]
           );
           if (byDocOnly.rowCount === 1) {
             existingContactId = byDocOnly.rows[0]?.id ?? null;
@@ -4516,9 +4537,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
             `
             SELECT id FROM contacts
             WHERE telefono = $1 OR celular = $1
+              ${organizationId ? "AND organization_id = $2" : ""}
             LIMIT 1
             `,
-            [telefonoSan]
+            organizationId ? [telefonoSan, organizationId] : [telefonoSan]
           );
           existingContactId = byTel.rows[0]?.id ?? null;
         }
@@ -4538,19 +4560,34 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               documento = COALESCE($10, documento),
               updated_at = NOW()
             WHERE id = $1
+              ${organizationId ? "AND organization_id = $11" : ""}
             `,
-            [
-              existingContactId,
-              contactPayload.nombre || null,
-              contactPayload.apellido || null,
-              contactPayload.telefono || null,
-              contactPayload.celular || null,
-              contactPayload.email || null,
-              contactPayload.direccion || null,
-              contactPayload.departamento || null,
-              contactPayload.fecha_nacimiento || null,
-              contactPayload.documento || null
-            ]
+            organizationId
+              ? [
+                existingContactId,
+                contactPayload.nombre || null,
+                contactPayload.apellido || null,
+                contactPayload.telefono || null,
+                contactPayload.celular || null,
+                contactPayload.email || null,
+                contactPayload.direccion || null,
+                contactPayload.departamento || null,
+                contactPayload.fecha_nacimiento || null,
+                contactPayload.documento || null,
+                organizationId
+              ]
+              : [
+                existingContactId,
+                contactPayload.nombre || null,
+                contactPayload.apellido || null,
+                contactPayload.telefono || null,
+                contactPayload.celular || null,
+                contactPayload.email || null,
+                contactPayload.direccion || null,
+                contactPayload.departamento || null,
+                contactPayload.fecha_nacimiento || null,
+                contactPayload.documento || null
+              ]
           );
           contact = { id: existingContactId };
           contactImportStatus = "updated";
@@ -4568,9 +4605,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               direccion,
               departamento,
               pais,
-              status
+              status,
+              organization_id
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'activo')
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'activo',$11)
             RETURNING *
             `,
             [
@@ -4583,7 +4621,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               contactPayload.fecha_nacimiento,
               contactPayload.direccion,
               contactPayload.departamento,
-              contactPayload.pais || "Uruguay"
+              contactPayload.pais || "Uruguay",
+              organizationId
             ]
           );
           contact = insertContact.rows[0];
@@ -4646,9 +4685,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               SELECT id
               FROM products
               WHERE lower(nombre) = lower($1)
+              ${organizationId ? "AND organization_id = $2" : ""}
               LIMIT 1
               `,
-              [productName]
+              organizationId ? [productName, organizationId] : [productName]
             )
             : { rows: [] };
 
@@ -4661,11 +4701,11 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           if (!productId && productName && createProducts) {
             const productInsert = await client.query(
               `
-              INSERT INTO products (nombre, categoria, precio, activo)
-              VALUES ($1, 'General', $2, true)
+              INSERT INTO products (nombre, categoria, precio, activo, organization_id)
+              VALUES ($1, 'General', $2, true, $3)
               RETURNING id
               `,
-              [productName, precio || 0]
+              [productName, precio || 0, organizationId]
             );
             productId = productInsert.rows[0].id;
           }
@@ -4680,9 +4720,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               seller_origin,
               fecha_venta,
               documento_cobranza,
-              titular_contact_id
+              titular_contact_id,
+              organization_id
             )
-            VALUES ($1, $2, $3, $4, 'importado', $5, $6, $7)
+            VALUES ($1, $2, $3, $4, 'importado', $5, $6, $7, $8)
             RETURNING id
             `,
             [
@@ -4692,7 +4733,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               sellerNameSnapshot,
               fechaVenta,
               row.documento_cobranza || null,
-              contact.id
+              contact.id,
+              organizationId
             ]
           );
           saleId = saleInsert.rows[0].id;
@@ -4730,9 +4772,12 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               WHERE contact_id = $1
                 AND fecha_alta = $2
                 AND nombre_producto = $3
+                ${organizationId ? "AND organization_id = $4" : ""}
               LIMIT 1
               `,
-              [contact.id, fechaAlta, productName || "Producto"]
+              organizationId
+                ? [contact.id, fechaAlta, productName || "Producto", organizationId]
+                : [contact.id, fechaAlta, productName || "Producto"]
             );
             if (exists.rowCount > 0) {
               shouldInsertContactProduct = false;
@@ -4757,9 +4802,10 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
                 seller_user_id,
                 seller_name_snapshot,
                 seller_origin,
-                sale_id
+                sale_id,
+                organization_id
               )
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
               `,
               [
                 contact.id,
@@ -4776,7 +4822,8 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
                 sellerUserId,
                 sellerNameSnapshot,
                 "importado",
-                saleId
+                saleId,
+                organizationId
               ]
             );
           }
@@ -4790,10 +4837,12 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               updated_at = now()
               ${hasResolvedSellerUserId ? ", resolved_seller_user_id = $4" : ""}
           WHERE id = $2
+          ${organizationId ? `AND organization_id = $${hasResolvedSellerUserId ? 5 : 4}` : ""}
         `;
         const updateImportValues = hasResolvedSellerUserId
           ? [contact.id, row.id, contactImportStatus, sellerId]
           : [contact.id, row.id, contactImportStatus];
+        if (organizationId) updateImportValues.push(organizationId);
         await client.query(updateImportSql, updateImportValues);
 
         await client.query("COMMIT");
@@ -4801,6 +4850,9 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
       } catch (rowError) {
         await client.query("ROLLBACK");
         failed += 1;
+        const errorValues = [rowError.message, row.id];
+        const errorOrgClause = organizationId ? "AND organization_id = $3" : "";
+        if (organizationId) errorValues.push(organizationId);
         await client.query(
           `
           UPDATE contact_import_rows
@@ -4808,12 +4860,16 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
               error_detail = $1,
               updated_at = now()
           WHERE id = $2
+          ${errorOrgClause}
           `,
-          [rowError.message, row.id]
+          errorValues
         );
       }
     }
 
+    const summaryValues = [batchId];
+    const summaryOrgClause = organizationId ? "AND organization_id = $2" : "";
+    if (organizationId) summaryValues.push(organizationId);
     const summaryResult = await client.query(
       `
       SELECT
@@ -4822,8 +4878,9 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
         COUNT(*) FILTER (WHERE import_status = 'error')::int AS error_rows
       FROM contact_import_rows
       WHERE batch_id = $1
+      ${summaryOrgClause}
       `,
-      [batchId]
+      summaryValues
     );
 
     const summary = summaryResult.rows[0];
@@ -4841,18 +4898,32 @@ async function processClientImportBatch(batchId, { createProducts = true } = {})
           status = 'processed',
           updated_at = now()
       WHERE id = $9
+      ${organizationId ? "AND organization_id = $10" : ""}
       `,
-      [
-        summary.total_rows,
-        summary.imported_rows,
-        summary.error_rows,
-        productsSeen.size,
-        productsCreated,
-        sellersSeen.size,
-        paymentMethodsSeen.size,
-        newContacts,
-        batchId
-      ]
+      organizationId
+        ? [
+          summary.total_rows,
+          summary.imported_rows,
+          summary.error_rows,
+          productsSeen.size,
+          productsCreated,
+          sellersSeen.size,
+          paymentMethodsSeen.size,
+          newContacts,
+          batchId,
+          organizationId
+        ]
+        : [
+          summary.total_rows,
+          summary.imported_rows,
+          summary.error_rows,
+          productsSeen.size,
+          productsCreated,
+          sellersSeen.size,
+          paymentMethodsSeen.size,
+          newContacts,
+          batchId
+        ]
     );
 
     return {
@@ -5588,6 +5659,37 @@ async function getCurrentDbUserFromEvent(event) {
   return { authUser, dbUser };
 }
 
+async function resolveOrganizationId(client, dbUser, event) {
+  if (!dbUser) return null;
+  if (dbUser.role_key === "superadministrador") {
+    return getQueryParam(event, "organization_id") || null;
+  }
+  const orgUser = await client.query(
+    `
+    SELECT organization_id
+    FROM organization_users
+    WHERE user_id = $1
+      AND activo = true
+    LIMIT 1
+    `,
+    [dbUser.id]
+  );
+  if (!orgUser.rows[0]) {
+    throw { status: 403, message: "Usuario no asociado a una organización activa" };
+  }
+  return orgUser.rows[0].organization_id;
+}
+
+async function resolveOrganizationIdForRequest(dbUser, event) {
+  const client = createDbClient();
+  try {
+    await client.connect();
+    return await resolveOrganizationId(client, dbUser, event);
+  } finally {
+    await client.end();
+  }
+}
+
 async function listSuperadminUsers() {
   const client = createDbClient();
 
@@ -5612,17 +5714,21 @@ async function listSuperadminUsers() {
   }
 }
 
-async function listContacts() {
+async function listContacts(organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [];
+    const whereClause = organizationId ? "WHERE c.organization_id = $1" : "";
+    if (organizationId) values.push(organizationId);
 
     const result = await client.query(
       `
-      ${buildContactSummarySelect()}
+      ${buildContactSummarySelect(whereClause)}
       ORDER BY created_at DESC, nombre ASC, apellido ASC
-      `
+      `,
+      values
     );
 
     return result.rows.map(mapContactRowToApi);
@@ -5631,7 +5737,12 @@ async function listContacts() {
   }
 }
 
-async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) {
+async function listClientsDirectory({
+  page = 1,
+  limit = 50,
+  search = "",
+  organizationId = null
+} = {}) {
   const client = createDbClient();
 
   try {
@@ -5644,6 +5755,11 @@ async function listClientsDirectory({ page = 1, limit = 50, search = "" } = {}) 
 
     const whereParts = ["s.productos_total > 0"];
     const values = [];
+
+    if (organizationId) {
+      values.push(organizationId);
+      whereParts.push(`s.organization_id = $${values.length}`);
+    }
 
     if (searchText) {
       const digits = searchText.replace(/[^\d]/g, "");
@@ -5885,27 +6001,33 @@ async function fetchCodificaciones({
     await client.end();
   }
 }
-async function getClientMetrics() {
+async function getClientMetrics(organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [];
+    const summaryWhere = organizationId ? "WHERE c.organization_id = $1" : "";
+    const productWhere = organizationId ? "AND organization_id = $1" : "";
+    if (organizationId) values.push(organizationId);
 
     const result = await client.query(
       `
       WITH summary AS (
-        ${buildContactSummarySelect()}
+        ${buildContactSummarySelect(summaryWhere)}
       ),
       active_products AS (
         SELECT precio
         FROM contact_products
         WHERE estado = 'alta'
+        ${productWhere}
       )
       SELECT
         (SELECT COUNT(*)::int FROM summary WHERE tipo_persona = 'cliente_actual') AS activos,
         (SELECT COUNT(*)::int FROM summary WHERE tipo_persona = 'cliente_historico') AS en_baja,
         (SELECT COALESCE(AVG(precio), 0)::numeric(12,2) FROM active_products) AS cuota_promedio
-      `
+      `,
+      values
     );
 
     const row = result.rows[0] || {};
@@ -5921,7 +6043,7 @@ async function getClientMetrics() {
   }
 }
 
-async function getClientDocumentData(clientId) {
+async function getClientDocumentData(clientId, organizationId) {
   const client = createDbClient();
 
   try {
@@ -5932,6 +6054,15 @@ async function getClientDocumentData(clientId) {
       ? "u.nombre AS seller_nombre, u.apellido AS seller_apellido"
       : "NULL::text AS seller_nombre, NULL::text AS seller_apellido";
     const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_user_id" : "";
+
+    const values = [clientId];
+    let idx = values.length;
+    let orgClause = "";
+    if (organizationId) {
+      values.push(organizationId);
+      idx = values.length;
+      orgClause = `AND c.organization_id = $${idx}`;
+    }
 
     const result = await client.query(
       `
@@ -5956,6 +6087,7 @@ async function getClientDocumentData(clientId) {
         SELECT *
         FROM contact_products
         WHERE contact_id = c.id
+          ${organizationId ? "AND organization_id = $2" : ""}
         ORDER BY fecha_alta DESC NULLS LAST, created_at DESC
         LIMIT 1
       ) cp ON true
@@ -5963,9 +6095,10 @@ async function getClientDocumentData(clientId) {
         ON s.id = cp.sale_id
       ${userJoin}
       WHERE c.id = $1
+      ${orgClause}
       LIMIT 1
       `,
-      [clientId]
+      values
     );
 
     const row = result.rows[0];
@@ -6012,21 +6145,28 @@ async function getClientDocumentData(clientId) {
   }
 }
 
-async function getClientDetailData(clientId) {
+async function getClientDetailData(clientId, organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
     const metadata = await getUsersTableMetadata(client);
 
+    const contactValues = [clientId];
+    let contactOrgClause = "";
+    if (organizationId) {
+      contactValues.push(organizationId);
+      contactOrgClause = `AND organization_id = $2`;
+    }
     const contactResult = await client.query(
       `
       SELECT *
       FROM contacts
       WHERE id = $1
+      ${contactOrgClause}
       LIMIT 1
       `,
-      [clientId]
+      contactValues
     );
 
     const contact = contactResult.rows[0];
@@ -6037,6 +6177,12 @@ async function getClientDetailData(clientId) {
       : "NULL::text AS seller_nombre, NULL::text AS seller_apellido";
     const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_user_id" : "";
 
+    const productsValues = [clientId];
+    let productsOrgClause = "";
+    if (organizationId) {
+      productsValues.push(organizationId);
+      productsOrgClause = `AND cp.organization_id = $2`;
+    }
     const productsResult = await client.query(
       `
       SELECT
@@ -6052,9 +6198,10 @@ async function getClientDetailData(clientId) {
         ON s.id = cp.sale_id
       ${userJoin}
       WHERE cp.contact_id = $1
+      ${productsOrgClause}
       ORDER BY cp.fecha_alta DESC NULLS LAST, cp.created_at DESC
       `,
-      [clientId]
+      productsValues
     );
 
     const products = productsResult.rows.map((row) => {
@@ -6087,6 +6234,12 @@ async function getClientDetailData(clientId) {
       };
     });
 
+    const salesValues = [clientId];
+    let salesOrgClause = "";
+    if (organizationId) {
+      salesValues.push(organizationId);
+      salesOrgClause = `AND s.organization_id = $2`;
+    }
     const salesResult = await client.query(
       `
       SELECT
@@ -6095,9 +6248,10 @@ async function getClientDetailData(clientId) {
       FROM sales s
       ${userJoin}
       WHERE s.contact_id = $1
+      ${salesOrgClause}
       ORDER BY s.created_at DESC
       `,
-      [clientId]
+      salesValues
     );
 
     const salesHistory = salesResult.rows.map((row) => {
@@ -6209,11 +6363,14 @@ async function recordClientDocumentEvent(payload) {
   }
 }
 
-async function listProducts() {
+async function listProducts(organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [];
+    const whereClause = organizationId ? "WHERE organization_id = $1" : "";
+    if (organizationId) values.push(organizationId);
     const result = await client.query(
       `
       SELECT
@@ -6227,8 +6384,10 @@ async function listProducts() {
         created_at,
         updated_at
       FROM products
+      ${whereClause}
       ORDER BY created_at DESC, nombre ASC
-      `
+      `,
+      values
     );
 
     return result.rows.map(mapProductRowToApi);
@@ -6237,7 +6396,7 @@ async function listProducts() {
   }
 }
 
-async function createProductRecord(payload) {
+async function createProductRecord(payload, organizationId) {
   const client = createDbClient();
 
   try {
@@ -6250,9 +6409,10 @@ async function createProductRecord(payload) {
         descripcion,
         observaciones,
         precio,
-        activo
+        activo,
+        organization_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
       `,
       [
@@ -6261,7 +6421,8 @@ async function createProductRecord(payload) {
         payload.descripcion,
         payload.observaciones,
         payload.precio,
-        payload.activo
+        payload.activo,
+        organizationId
       ]
     );
 
@@ -6271,11 +6432,26 @@ async function createProductRecord(payload) {
   }
 }
 
-async function updateProductRecord(productId, payload) {
+async function updateProductRecord(productId, payload, organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [
+      productId,
+      payload.nombre || null,
+      payload.categoria || null,
+      payload.descripcion || null,
+      payload.observaciones || null,
+      payload.precio ?? null,
+      payload.activo === undefined ? null : payload.activo
+    ];
+    let orgClause = "";
+    if (organizationId) {
+      values.push(organizationId);
+      orgClause = `AND organization_id = $${values.length}`;
+    }
+
     const result = await client.query(
       `
       UPDATE products
@@ -6288,17 +6464,10 @@ async function updateProductRecord(productId, payload) {
         activo = COALESCE($7, activo),
         updated_at = now()
       WHERE id = $1
+      ${orgClause}
       RETURNING *
       `,
-      [
-        productId,
-        payload.nombre || null,
-        payload.categoria || null,
-        payload.descripcion || null,
-        payload.observaciones || null,
-        payload.precio ?? null,
-        payload.activo === undefined ? null : payload.activo
-      ]
+      values
     );
 
     if (!result.rows[0]) return null;
@@ -6325,7 +6494,7 @@ function mapManualTicketRowToApi(row) {
   };
 }
 
-async function createManualTicket(payload) {
+async function createManualTicket(payload, organizationId) {
   const client = createDbClient();
 
   try {
@@ -6340,9 +6509,10 @@ async function createManualTicket(payload) {
         service_request,
         prioridad,
         estado,
-        producto_contrato_id
+        producto_contrato_id,
+        organization_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
       `,
       [
@@ -6353,7 +6523,8 @@ async function createManualTicket(payload) {
         payload.serviceRequest ? JSON.stringify(payload.serviceRequest) : null,
         payload.prioridad,
         payload.estado,
-        payload.productoContratoId
+        payload.productoContratoId,
+        organizationId
       ]
     );
 
@@ -6363,7 +6534,7 @@ async function createManualTicket(payload) {
   }
 }
 
-async function listManualTickets({ clienteId } = {}) {
+async function listManualTickets({ clienteId, organizationId } = {}) {
   const client = createDbClient();
 
   try {
@@ -6371,7 +6542,14 @@ async function listManualTickets({ clienteId } = {}) {
     const values = [];
     let where = "";
     if (clienteId) {
+      values.push(clienteId);
       where = `WHERE cliente_id = $${values.length}`;
+    }
+    if (organizationId) {
+      values.push(organizationId);
+      where = where
+        ? `${where} AND organization_id = $${values.length}`
+        : `WHERE organization_id = $${values.length}`;
     }
 
     const result = await client.query(
@@ -6445,19 +6623,26 @@ async function listManualTickets({ clienteId } = {}) {
   }
 }
 
-async function getManualTicketById(ticketId) {
+async function getManualTicketById(ticketId, organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [ticketId];
+    let orgClause = "";
+    if (organizationId) {
+      values.push(organizationId);
+      orgClause = `AND organization_id = $2`;
+    }
     const result = await client.query(
       `
       SELECT *
       FROM manual_tickets
       WHERE id = $1
+      ${orgClause}
       LIMIT 1
       `,
-      [ticketId]
+      values
     );
 
     const row = result.rows[0];
@@ -6508,11 +6693,26 @@ async function getManualTicketById(ticketId) {
   }
 }
 
-async function updateManualTicket(ticketId, patch) {
+async function updateManualTicket(ticketId, patch, organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [
+      ticketId,
+      patch.tipoSolicitud || null,
+      patch.tipoSolicitudManual || null,
+      patch.resumen || null,
+      patch.serviceRequest ? JSON.stringify(patch.serviceRequest) : null,
+      patch.prioridad || null,
+      patch.estado || null,
+      patch.productoContratoId || null
+    ];
+    let orgClause = "";
+    if (organizationId) {
+      values.push(organizationId);
+      orgClause = `AND organization_id = $${values.length}`;
+    }
     const result = await client.query(
       `
       UPDATE manual_tickets
@@ -6526,18 +6726,10 @@ async function updateManualTicket(ticketId, patch) {
         producto_contrato_id = COALESCE($8, producto_contrato_id),
         updated_at = now()
       WHERE id = $1
+      ${orgClause}
       RETURNING *
       `,
-      [
-        ticketId,
-        patch.tipoSolicitud || null,
-        patch.tipoSolicitudManual || null,
-        patch.resumen || null,
-        patch.serviceRequest ? JSON.stringify(patch.serviceRequest) : null,
-        patch.prioridad || null,
-        patch.estado || null,
-        patch.productoContratoId || null
-      ]
+      values
     );
 
     if (!result.rows[0]) return null;
@@ -6547,19 +6739,26 @@ async function updateManualTicket(ticketId, patch) {
   }
 }
 
-async function addManualTicketNote(ticketId, { texto, autor }) {
+async function addManualTicketNote(ticketId, { texto, autor }, organizationId) {
   const client = createDbClient();
 
   try {
     await client.connect();
+    const values = [ticketId];
+    let orgClause = "";
+    if (organizationId) {
+      values.push(organizationId);
+      orgClause = `AND organization_id = $2`;
+    }
     await client.query(
       `
       UPDATE manual_tickets
       SET estado = 'en_proceso',
           updated_at = now()
       WHERE id = $1
+      ${orgClause}
       `,
-      [ticketId]
+      values
     );
 
     const result = await client.query(
@@ -6581,16 +6780,22 @@ async function addManualTicketNote(ticketId, { texto, autor }) {
   }
 }
 
-async function closeManualTicket({ ticketId, outcome, note, actorName }) {
+async function closeManualTicket({ ticketId, outcome, note, actorName, organizationId }) {
   const client = createDbClient();
 
   try {
     await client.connect();
     await client.query("BEGIN");
 
+    const ticketValues = [ticketId];
+    let ticketOrgClause = "";
+    if (organizationId) {
+      ticketValues.push(organizationId);
+      ticketOrgClause = `AND organization_id = $2`;
+    }
     const ticketResult = await client.query(
-      `SELECT * FROM manual_tickets WHERE id = $1 LIMIT 1`,
-      [ticketId]
+      `SELECT * FROM manual_tickets WHERE id = $1 ${ticketOrgClause} LIMIT 1`,
+      ticketValues
     );
     const ticket = ticketResult.rows[0];
     if (!ticket) {
@@ -6619,8 +6824,11 @@ async function closeManualTicket({ ticketId, outcome, note, actorName }) {
             fecha_baja = now()::date,
             updated_at = now()
           WHERE id = $1
+          ${organizationId ? "AND organization_id = $3" : ""}
           `,
-          [ticket.producto_contrato_id, note || "Baja confirmada"]
+          organizationId
+            ? [ticket.producto_contrato_id, note || "Baja confirmada", organizationId]
+            : [ticket.producto_contrato_id, note || "Baja confirmada"]
         );
       }
     }
@@ -6631,8 +6839,9 @@ async function closeManualTicket({ ticketId, outcome, note, actorName }) {
       SET estado = 'finalizada',
           updated_at = now()
       WHERE id = $1
+      ${organizationId ? "AND organization_id = $2" : ""}
       `,
-      [ticketId]
+      organizationId ? [ticketId, organizationId] : [ticketId]
     );
 
     await client.query(
@@ -7407,7 +7616,8 @@ export const handler = async (event) => {
       const batchId = payload.batchId || payload.jobId;
       if (!batchId) continue;
       const createProducts = payload.createProducts !== false;
-      await processClientImportBatch(batchId, { createProducts });
+      const organizationId = payload.organizationId || null;
+      await processClientImportBatch(batchId, { createProducts, organizationId });
     }
     return { ok: true };
   }
@@ -7642,7 +7852,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const items = await listContacts();
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const items = await listContacts(organizationId);
 
       return json(200, {
         ok: true,
@@ -7716,6 +7936,16 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
         await client.query("BEGIN");
         const salesCols = await getTableColumns(client, "sales");
         leadContactColumnsCache = null;
@@ -7752,8 +7982,13 @@ export const handler = async (event) => {
           let existingId = isValidUuid(payload?.id) ? payload.id : null;
           if (!existingId && fields.documento) {
             const existingRes = await client.query(
-              `SELECT id FROM contacts WHERE documento = $1 LIMIT 1`,
-              [fields.documento]
+              `
+              SELECT id FROM contacts
+              WHERE documento = $1
+              ${organizationId ? "AND organization_id = $2" : ""}
+              LIMIT 1
+              `,
+              organizationId ? [fields.documento, organizationId] : [fields.documento]
             );
             existingId = existingRes.rows[0]?.id || null;
           }
@@ -7781,13 +8016,20 @@ export const handler = async (event) => {
             push("status", fields.status);
 
             if (updates.length) {
+              const updateValues = [...values, existingId];
+              let orgClause = "";
+              if (organizationId) {
+                updateValues.push(organizationId);
+                orgClause = `AND organization_id = $${updateValues.length}`;
+              }
               await client.query(
                 `
                 UPDATE contacts
                 SET ${updates.join(", ")}, updated_at = now()
                 WHERE id = $${idx}
+                ${orgClause}
                 `,
-                [...values, existingId]
+                updateValues
               );
             }
             return { id: existingId, fields };
@@ -7807,10 +8049,11 @@ export const handler = async (event) => {
               departamento,
               pais,
               status,
+              organization_id,
               created_at,
               updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now(), now())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
             RETURNING id
             `,
             [
@@ -7824,7 +8067,8 @@ export const handler = async (event) => {
               fields.direccion,
               fields.departamento,
               fields.pais,
-              fields.status
+              fields.status,
+              organizationId
             ]
           );
           return { id: insertRes.rows[0]?.id || null, fields };
@@ -7854,6 +8098,10 @@ export const handler = async (event) => {
           const safeTitularContactId = isValidUuid(titularContactId) ? titularContactId : null;
           const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
           const vals = [safeContactId, medioPago, sellerNameSnapshot, sellerOrigin];
+          if (organizationId) {
+            cols.push("organization_id");
+            vals.push(organizationId);
+          }
           if (sellerUserCol) {
             cols.push(sellerUserCol);
             vals.push(safeSellerId);
@@ -8450,18 +8698,23 @@ export const handler = async (event) => {
           let productId = null;
           if (productName) {
             const productRes = await client.query(
-              `SELECT id FROM products WHERE lower(nombre) = lower($1) LIMIT 1`,
-              [productName]
+              `
+              SELECT id FROM products
+              WHERE lower(nombre) = lower($1)
+              ${organizationId ? "AND organization_id = $2" : ""}
+              LIMIT 1
+              `,
+              organizationId ? [productName, organizationId] : [productName]
             );
             productId = productRes.rows[0]?.id || null;
             if (!productId) {
               const productInsert = await client.query(
                 `
-                INSERT INTO products (nombre, categoria, precio, activo)
-                VALUES ($1, 'General', $2, true)
+                INSERT INTO products (nombre, categoria, precio, activo, organization_id)
+                VALUES ($1, 'General', $2, true, $3)
                 RETURNING id
                 `,
-                [productName, precio || 0]
+                [productName, precio || 0, organizationId]
               );
               productId = productInsert.rows[0]?.id || null;
             }
@@ -8507,9 +8760,10 @@ export const handler = async (event) => {
               `
               SELECT id FROM products
               WHERE TRIM(LOWER(nombre)) = TRIM(LOWER($1))
+              ${organizationId ? "AND organization_id = $2" : ""}
               LIMIT 1
               `,
-              [productName]
+              organizationId ? [productName, organizationId] : [productName]
             );
             resolvedProductId = prodRes.rows[0]?.id ?? null;
           }
@@ -8548,6 +8802,10 @@ export const handler = async (event) => {
             sellerOrigin,
             safeSaleId
           ];
+          if (organizationId) {
+            contactProductCols.push("organization_id");
+            contactProductVals.push(organizationId);
+          }
           if (hasContactProductProductId) {
             contactProductCols.push("product_id");
             contactProductVals.push(resolvedProductId);
@@ -9064,11 +9322,21 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const search = normalizeText(getQueryParam(event, "search") || "");
 
-      const result = await listClientsDirectory({ page, limit, search });
+      const result = await listClientsDirectory({ page, limit, search, organizationId });
 
       return json(200, {
         ok: true,
@@ -9099,7 +9367,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const metrics = await getClientMetrics();
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const metrics = await getClientMetrics(organizationId);
 
       return json(200, {
         ok: true,
@@ -9130,10 +9408,23 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const sellerId = dbUser?.id || null;
       const client = createDbClient();
       await client.connect();
       try {
+        const values = [sellerId];
+        const orgClause = organizationId ? "AND s.organization_id = $2" : "";
+        if (organizationId) values.push(organizationId);
         const salesCols = await getTableColumns(client, "sales");
         const extraSelect = [];
         if (salesCols.has("sale_group_id")) extraSelect.push("s.sale_group_id");
@@ -9163,11 +9454,14 @@ export const handler = async (event) => {
             ${extraSelectSql}
           FROM sales s
           JOIN contact_products cp ON cp.sale_id = s.id
+            ${organizationId ? "AND cp.organization_id = $2" : ""}
           JOIN contacts c ON c.id = s.contact_id
+            ${organizationId ? "AND c.organization_id = $2" : ""}
           WHERE s.seller_user_id = $1
+          ${orgClause}
           ORDER BY s.fecha_venta DESC
           `,
-          [sellerId]
+          values
         );
 
         const toItem = (row) => {
@@ -9262,11 +9556,24 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const sellerId = dbUser?.id || null;
       const client = createDbClient();
       await client.connect();
 
       try {
+        const values = [sellerId];
+        const orgClause = organizationId ? "AND s.organization_id = $2" : "";
+        if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
           SELECT
@@ -9293,12 +9600,16 @@ export const handler = async (event) => {
 
           FROM sales s
           LEFT JOIN contacts c           ON c.id = s.contact_id
+            ${organizationId ? "AND c.organization_id = $2" : ""}
           LEFT JOIN datos_para_trabajar d ON d.id = s.contact_id
+            ${organizationId ? "AND d.organization_id = $2" : ""}
           LEFT JOIN contact_products cp   ON cp.sale_id = s.id
+            ${organizationId ? "AND cp.organization_id = $2" : ""}
           LEFT JOIN lead_batches lb       ON lb.id = (
             SELECT lcs2.batch_id 
             FROM lead_contact_status lcs2 
             WHERE lcs2.contact_id = s.contact_id 
+              ${organizationId ? "AND lcs2.organization_id = $2" : ""}
             ORDER BY lcs2.updated_at DESC 
             LIMIT 1
           )
@@ -9308,9 +9619,10 @@ export const handler = async (event) => {
             AND lmh.user_id = s.seller_user_id
           )
           WHERE s.seller_user_id = $1
+          ${orgClause}
           ORDER BY s.fecha_venta DESC
           `,
-          [sellerId]
+          values
         );
 
         return json(200, {
@@ -9346,8 +9658,18 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const clientId = clientDocumentMatch[1];
-      const data = await getClientDocumentData(clientId);
+      const data = await getClientDocumentData(clientId, organizationId);
 
       if (!data) {
         return json(404, {
@@ -9451,7 +9773,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const item = await createManualTicket(validation.data);
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const item = await createManualTicket(validation.data, organizationId);
       return json(201, { ok: true, item });
     } catch (error) {
       return json(500, {
@@ -9478,8 +9810,21 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const clienteId = event?.queryStringParameters?.clienteId || event?.queryStringParameters?.cliente_id;
-      const items = await listManualTickets({ clienteId: normalizeText(clienteId) || null });
+      const items = await listManualTickets({
+        clienteId: normalizeText(clienteId) || null,
+        organizationId
+      });
       return json(200, { ok: true, items });
     } catch (error) {
       return json(500, {
@@ -9523,7 +9868,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const item = await updateManualTicket(manualTicketMatch[1], validation.data);
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const item = await updateManualTicket(manualTicketMatch[1], validation.data, organizationId);
       if (!item) {
         return json(404, {
           ok: false,
@@ -9574,11 +9929,21 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const autor = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || "Usuario";
       const note = await addManualTicketNote(manualTicketNotesMatch[1], {
         texto,
         autor
-      });
+      }, organizationId);
 
       return json(201, { ok: true, item: note });
     } catch (error) {
@@ -9608,11 +9973,22 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const result = await closeManualTicket({
         ticketId: manualTicketCloseMatch[1],
         outcome: normalizeText(body.outcome || ""),
         note: normalizeText(body.note || ""),
-        actorName: body.actorName || body.actor_name || dbUser?.nombre || ""
+        actorName: body.actorName || body.actor_name || dbUser?.nombre || "",
+        organizationId
       });
 
       if (result?.notFound) {
@@ -9623,7 +9999,7 @@ export const handler = async (event) => {
         return json(422, { ok: false, message: result.error });
       }
 
-      const item = await getManualTicketById(manualTicketCloseMatch[1]);
+      const item = await getManualTicketById(manualTicketCloseMatch[1], organizationId);
       return json(200, { ok: true, item });
     } catch (error) {
       return json(500, {
@@ -9650,7 +10026,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const item = await getManualTicketById(manualTicketMatch[1]);
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const item = await getManualTicketById(manualTicketMatch[1], organizationId);
       if (!item) {
         return json(404, {
           ok: false,
@@ -9684,7 +10070,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const item = await getClientDetailData(clientDetailMatch[1]);
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const item = await getClientDetailData(clientDetailMatch[1], organizationId);
 
       if (!item) {
         return json(404, {
@@ -9719,7 +10115,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const items = await listProducts();
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const items = await listProducts(organizationId);
       return json(200, { ok: true, items });
     } catch (error) {
       return json(500, {
@@ -9779,6 +10185,8 @@ export const handler = async (event) => {
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+        const orgParamIndex = organizationId ? values.length + 1 : null;
+        if (organizationId) values.push(organizationId);
         const paramMatches = whereClause.match(/\$(\d+)/g) || [];
         const maxParam = paramMatches.reduce((max, token) => Math.max(max, Number(token.slice(1))), 0);
         if (values.length < maxParam) {
@@ -12533,9 +12941,23 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
+        const values = [];
+        const orgFilter = organizationId ? "WHERE lb.organization_id = $1" : "";
+        const cntFilter = organizationId ? "WHERE organization_id = $1" : "";
+        if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
           SELECT
@@ -12549,6 +12971,7 @@ export const handler = async (event) => {
           LEFT JOIN (
             SELECT batch_id, COUNT(*) AS total
             FROM lead_batch_contacts
+            ${cntFilter}
             GROUP BY batch_id
           ) cnt ON cnt.batch_id = lb.id
           LEFT JOIN (
@@ -12564,10 +12987,13 @@ export const handler = async (event) => {
               ) AS vendedores
             FROM lead_batch_sellers lbs
             JOIN users u ON u.id = lbs.seller_id
+            ${organizationId ? "WHERE lbs.organization_id = $1" : ""}
             GROUP BY lbs.batch_id
           ) vnd ON vnd.batch_id = lb.id
+          ${orgFilter}
           ORDER BY lb.created_at DESC
-          `
+          `,
+          values
         );
         const items = result.rows.map((row) => {
           const totalContactos = Number.parseInt(row.total_contactos, 10) || 0;
@@ -12639,26 +13065,44 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
+        const statusValues = [batchId];
+        const statusOrgClause = organizationId ? "AND organization_id = $2" : "";
+        if (organizationId) statusValues.push(organizationId);
         const statusRes = await client.query(
           `
           SELECT estado_venta, ola_actual, COUNT(*)::int AS total
           FROM lead_contact_status
           WHERE batch_id = $1
+          ${statusOrgClause}
           GROUP BY estado_venta, ola_actual
           ORDER BY ola_actual, estado_venta
           `,
-          [batchId]
+          statusValues
         );
+        const totalValues = [batchId];
+        const totalOrgClause = organizationId ? "AND organization_id = $2" : "";
+        if (organizationId) totalValues.push(organizationId);
         const totalRes = await client.query(
           `
           SELECT COUNT(*)::int AS total
           FROM lead_batch_contacts
           WHERE batch_id = $1
+          ${totalOrgClause}
           `,
-          [batchId]
+          totalValues
         );
         return json(200, {
           ok: true,
@@ -12697,17 +13141,35 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
+        const values = [];
+        const whereClause = organizationId ? "WHERE s.organization_id = $1" : "";
+        if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
-          SELECT id, nombre, apellido, email
-          FROM users
-          WHERE role_key = 'vendedor'
-            AND status = 'approved'
-          ORDER BY nombre
-          `
+          SELECT
+            s.id,
+            s.nombre,
+            s.apellido,
+            u.email
+          FROM sellers s
+          LEFT JOIN users u ON u.id = s.user_id
+          ${whereClause}
+          ORDER BY s.nombre
+          `,
+          values
         );
         return json(200, {
           ok: true,
@@ -12743,9 +13205,22 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
+        const values = [];
+        const orgClause = organizationId ? "AND organization_id = $1" : "";
+        if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
           SELECT DISTINCT origen_dato AS id, origen_dato AS nombre
@@ -12753,8 +13228,10 @@ export const handler = async (event) => {
           WHERE origen_dato IS NOT NULL
             AND origen_dato <> ''
             AND estado = 'nuevo'
+            ${orgClause}
           ORDER BY origen_dato
-          `
+          `,
+          values
         );
         return json(200, {
           ok: true,
@@ -12790,9 +13267,22 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
+        const values = [];
+        const orgClause = organizationId ? "AND organization_id = $1" : "";
+        if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
           SELECT DISTINCT departamento AS id, departamento AS nombre
@@ -12800,8 +13290,10 @@ export const handler = async (event) => {
           WHERE departamento IS NOT NULL
             AND departamento <> ''
             AND estado = 'nuevo'
+            ${orgClause}
           ORDER BY departamento
-          `
+          `,
+          values
         );
         return json(200, {
           ok: true,
@@ -12837,6 +13329,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const departamento = getQueryParam(event, "departamento");
       const values = [];
       let where = `
@@ -12847,6 +13349,10 @@ export const handler = async (event) => {
       if (departamento) {
         where += ` AND departamento = $1`;
         values.push(departamento);
+      }
+      if (organizationId) {
+        values.push(organizationId);
+        where += ` AND organization_id = $${values.length}`;
       }
 
       const client = createDbClient();
@@ -12895,9 +13401,22 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
+        const values = [];
+        const orgClause = organizationId ? "AND organization_id = $1" : "";
+        if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
           SELECT DISTINCT code AS id, code AS nombre
@@ -12908,6 +13427,7 @@ export const handler = async (event) => {
               AND celular <> ''
               AND estado = 'nuevo'
               AND LENGTH(regexp_replace(celular, '\\D', '', 'g')) >= 8
+              ${orgClause}
             UNION
             SELECT SUBSTRING(regexp_replace(telefono, '\\D', '', 'g') FROM 1 FOR 2) AS code
             FROM datos_para_trabajar
@@ -12915,10 +13435,12 @@ export const handler = async (event) => {
               AND telefono <> ''
               AND estado = 'nuevo'
               AND LENGTH(regexp_replace(telefono, '\\D', '', 'g')) >= 8
+              ${orgClause}
           ) t
           WHERE code IS NOT NULL AND code <> ''
           ORDER BY code
-          `
+          `,
+          values
         );
         return json(200, {
           ok: true,
@@ -12954,9 +13476,20 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const conditions = ["estado = 'nuevo'"];
       const params = [];
       let i = 1;
+      let orgParamIndex = null;
 
       const nombre = getQueryParam(event, "nombre");
       if (nombre) {
@@ -12999,6 +13532,13 @@ export const handler = async (event) => {
         conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
       }
 
+      if (organizationId) {
+        conditions.push(`organization_id = $${i}`);
+        params.push(organizationId);
+        orgParamIndex = i;
+        i += 1;
+      }
+
       const edadDesde = getQueryParam(event, "edad_desde");
       if (edadDesde) {
         conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) >= $${i}`);
@@ -13031,6 +13571,7 @@ export const handler = async (event) => {
             SELECT DISTINCT contact_id
             FROM lead_management_history
             WHERE created_at >= NOW() - ($${i}::text || ' days')::interval
+            ${orgParamIndex ? `AND organization_id = $${orgParamIndex}` : ""}
           )
         `);
         params.push(parseInt(diasSinGestion, 10));
@@ -13076,9 +13617,20 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const conditions = ["estado = 'nuevo'"];
       const params = [];
       let i = 1;
+      let orgParamIndex = null;
 
       const nombre = getQueryParam(event, "nombre");
       if (nombre) {
@@ -13120,6 +13672,13 @@ export const handler = async (event) => {
         conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
       }
 
+      if (organizationId) {
+        conditions.push(`organization_id = $${i}`);
+        params.push(organizationId);
+        orgParamIndex = i;
+        i += 1;
+      }
+
       const edadDesde = getQueryParam(event, "edad_desde");
       if (edadDesde) {
         conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) >= $${i}`);
@@ -13152,6 +13711,7 @@ export const handler = async (event) => {
             SELECT DISTINCT contact_id
             FROM lead_management_history
             WHERE created_at >= NOW() - ($${i}::text || ' days')::interval
+            ${orgParamIndex ? `AND organization_id = $${orgParamIndex}` : ""}
           )
         `);
         params.push(parseInt(diasSinGestion, 10));
@@ -13211,6 +13771,16 @@ export const handler = async (event) => {
 
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
 
       const nombre = normalizeText(body?.nombre || body?.name);
       const sellerIdsRaw = Array.isArray(body?.sellerIds)
@@ -13275,9 +13845,10 @@ export const handler = async (event) => {
             franja_ola1_fin,
             franja_ola2_inicio,
             franja_ola2_fin,
-            dias_entre_olas
+            dias_entre_olas,
+            organization_id
           )
-          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           RETURNING *
           `,
           [
@@ -13292,18 +13863,19 @@ export const handler = async (event) => {
             franjaOla1Fin,
             franjaOla2Inicio,
             franjaOla2Fin,
-            diasEntreOlas
+            diasEntreOlas,
+            organizationId
           ]
         );
         const batchId = result.rows[0]?.id;
         for (const sid of sellerIds) {
           await client.query(
             `
-            INSERT INTO lead_batch_sellers (batch_id, seller_id)
-            VALUES ($1, $2)
+            INSERT INTO lead_batch_sellers (batch_id, seller_id, organization_id)
+            VALUES ($1, $2, $3)
             ON CONFLICT DO NOTHING
             `,
-            [batchId, sid]
+            [batchId, sid, organizationId]
           );
         }
         await client.query("COMMIT");
@@ -13351,16 +13923,30 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const updates = [];
       const values = [];
       let idx = 1;
 
       if (body?.nombre) {
         updates.push(`nombre = $${idx}`);
+        values.push(body.nombre);
+        idx += 1;
       }
 
       if (body?.estado) {
         updates.push(`estado = $${idx}`);
+        values.push(body.estado);
+        idx += 1;
       }
 
       if (!updates.length) return json(200, { ok: true });
@@ -13368,13 +13954,20 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const updateValues = [...values, batchId];
+        let orgClause = "";
+        if (organizationId) {
+          updateValues.push(organizationId);
+          orgClause = `AND organization_id = $${updateValues.length}`;
+        }
         await client.query(
           `
           UPDATE lead_batches
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
+          ${orgClause}
           `,
-          values
+          updateValues
         );
       } finally {
         await client.end();
@@ -13412,7 +14005,20 @@ export const handler = async (event) => {
       if (statusError) return statusError;
 
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;      const sellerId = body?.sellerId || null;
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const sellerId = body?.sellerId || null;
+      const sellerName = body?.sellerName || body?.seller_name || null;
 
       const client = createDbClient();
       await client.connect();
@@ -13429,14 +14035,20 @@ export const handler = async (event) => {
         if (resolvedSellerId) {
           await client.query(
             `
-            INSERT INTO lead_batch_sellers (batch_id, seller_id)
-            VALUES ($1, $2)
+            INSERT INTO lead_batch_sellers (batch_id, seller_id, organization_id)
+            VALUES ($1, $2, $3)
             ON CONFLICT DO NOTHING
             `,
-            [batchId, resolvedSellerId]
+            [batchId, resolvedSellerId, organizationId]
           );
         }
 
+        const updateValues = [resolvedSellerId, batchId];
+        let updateOrgClause = "";
+        if (organizationId) {
+          updateValues.push(organizationId);
+          updateOrgClause = `AND organization_id = $3`;
+        }
         await client.query(
           `
           UPDATE lead_batches
@@ -13445,10 +14057,19 @@ export const handler = async (event) => {
               estado = 'asignado',
               updated_at = now()
           WHERE id = $2
+          ${updateOrgClause}
           `,
-          [resolvedSellerId, batchId]
+          updateValues
         );
 
+        const statusValues = [resolvedSellerId, batchId];
+        let statusOrgClause = "";
+        let statusSubOrgClause = "";
+        if (organizationId) {
+          statusValues.push(organizationId);
+          statusOrgClause = `AND lcs.organization_id = $3`;
+          statusSubOrgClause = `AND organization_id = $3`;
+        }
         await client.query(
           `
           UPDATE lead_contact_status lcs
@@ -13457,9 +14078,11 @@ export const handler = async (event) => {
               updated_at = now()
           WHERE lcs.contact_id IN (
             SELECT contact_id FROM lead_batch_contacts WHERE batch_id = $2
+            ${statusSubOrgClause}
           )
+          ${statusOrgClause}
           `,
-          [resolvedSellerId, batchId]
+          statusValues
         );
       } finally {
         await client.end();
@@ -13501,11 +14124,29 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
         await client.query("BEGIN");
 
+        const contactsValues = [batchId];
+        let contactsOrgClause = "";
+        let statusOrgClause = "";
+        if (organizationId) {
+          contactsValues.push(organizationId);
+          contactsOrgClause = "AND lbc.organization_id = $2";
+          statusOrgClause = "AND lcs.organization_id = $2";
+        }
         const contactsRes = await client.query(
           `
           SELECT
@@ -13514,11 +14155,12 @@ export const handler = async (event) => {
             c.es_final,
             c.libera_al_cerrar
           FROM lead_batch_contacts lbc
-          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = lbc.contact_id
+          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = lbc.contact_id ${statusOrgClause}
           LEFT JOIN lead_status_catalog c ON c.nombre = lcs.estado_venta
           WHERE lbc.batch_id = $1
+          ${contactsOrgClause}
           `,
-          [batchId]
+          contactsValues
         );
 
         const rows = contactsRes.rows;
@@ -13527,24 +14169,38 @@ export const handler = async (event) => {
         const seguimiento = rows.filter((row) => row.estado_venta === "seguimiento").map((row) => row.contact_id);
 
         if (liberar.length) {
+          const liberarValues = [liberar];
+          let liberarOrgClause = "";
+          if (organizationId) {
+            liberarValues.push(organizationId);
+            liberarOrgClause = `AND organization_id = $2`;
+          }
           await client.query(
             `
             UPDATE datos_para_trabajar
             SET estado = 'nuevo', updated_at = now()
             WHERE id = ANY($1::uuid[])
               AND estado <> 'bloqueado'
+              ${liberarOrgClause}
             `,
-            [liberar]
+            liberarValues
           );
         }
 
+        const batchValues = [batchId];
+        let batchOrgClause = "";
+        if (organizationId) {
+          batchValues.push(organizationId);
+          batchOrgClause = `AND organization_id = $2`;
+        }
         await client.query(
           `
           UPDATE lead_batches
           SET estado = 'finalizado', updated_at = now()
           WHERE id = $1
+          ${batchOrgClause}
           `,
-          [batchId]
+          batchValues
         );
 
         await client.query("COMMIT");
@@ -13596,6 +14252,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const contactIds = Array.isArray(body?.contactIds) ? body.contactIds : [];
       const batchId = body?.batchId || null;
       console.log("[assign] body recibido:", JSON.stringify(body));
@@ -13608,14 +14274,21 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const sellerValues = [batchId];
+        let sellerOrgClause = "";
+        if (organizationId) {
+          sellerValues.push(organizationId);
+          sellerOrgClause = "AND organization_id = $2";
+        }
         const sellersRes = await client.query(
           `
           SELECT seller_id
           FROM lead_batch_sellers
           WHERE batch_id = $1
+          ${sellerOrgClause}
           ORDER BY id ASC
           `,
-          [batchId]
+          sellerValues
         );
         const sellers = sellersRes.rows.map((row) => row.seller_id);
         if (!sellers.length) {
@@ -13629,13 +14302,20 @@ export const handler = async (event) => {
           });
         }
 
+        const contactosValues = [contactIds];
+        let contactosOrgClause = "";
+        if (organizationId) {
+          contactosValues.push(organizationId);
+          contactosOrgClause = "AND organization_id = $2";
+        }
         const contactosRes = await client.query(
           `
           SELECT id, estado
           FROM datos_para_trabajar
           WHERE id = ANY($1::uuid[])
+          ${contactosOrgClause}
           `,
-          [contactIds]
+          contactosValues
         );
 
         const found = new Map(contactosRes.rows.map((row) => [row.id, row.estado]));
@@ -13668,6 +14348,12 @@ export const handler = async (event) => {
 
         await client.query("BEGIN");
 
+        const batchValues = [sellers[0] || null, batchId];
+        let batchOrgClause = "";
+        if (organizationId) {
+          batchValues.push(organizationId);
+          batchOrgClause = "AND organization_id = $3";
+        }
         await client.query(
           `
           UPDATE lead_batches
@@ -13676,8 +14362,9 @@ export const handler = async (event) => {
               estado = 'asignado',
               updated_at = now()
           WHERE id = $2
+          ${batchOrgClause}
           `,
-          [sellers[0] || null, batchId]
+          batchValues
         );
 
         const distribution = new Map();
@@ -13688,13 +14375,19 @@ export const handler = async (event) => {
 
           await client.query(
             `
-            INSERT INTO lead_batch_contacts (batch_id, contact_id)
-            VALUES ($1, $2)
+            INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
+            VALUES ($1, $2, $3)
             ON CONFLICT DO NOTHING
             `,
-            [batchId, contactId]
+            [batchId, contactId, organizationId]
           );
 
+          const updateValues = [contactId, batchId, assignedTo];
+          let updateOrgClause = "";
+          if (organizationId) {
+            updateValues.push(organizationId);
+            updateOrgClause = "AND organization_id = $4";
+          }
           const updateStatus = await client.query(
             `
             UPDATE lead_contact_status
@@ -13704,9 +14397,10 @@ export const handler = async (event) => {
                 intentos = 0,
                 updated_at = now()
             WHERE contact_id = $1
+            ${updateOrgClause}
             RETURNING contact_id
             `,
-            [contactId, batchId, assignedTo]
+            updateValues
           );
           if (!updateStatus.rows.length) {
             await client.query(
@@ -13716,23 +14410,31 @@ export const handler = async (event) => {
                 estado_venta,
                 intentos,
                 batch_id,
-                assigned_to
+                assigned_to,
+                organization_id
               )
-              VALUES ($1, 'nuevo', 0, $2, $3)
+              VALUES ($1, 'nuevo', 0, $2, $3, $4)
               `,
-              [contactId, batchId, assignedTo]
+              [contactId, batchId, assignedTo, organizationId]
             );
           }
         }
 
+        const updateContactosValues = [contactIds];
+        let updateContactosOrgClause = "";
+        if (organizationId) {
+          updateContactosValues.push(organizationId);
+          updateContactosOrgClause = "AND organization_id = $2";
+        }
         await client.query(
           `
           UPDATE datos_para_trabajar
           SET estado = 'trabajado', updated_at = now()
           WHERE id = ANY($1::uuid[])
             AND estado <> 'bloqueado'
+            ${updateContactosOrgClause}
           `,
-          [contactIds]
+          updateContactosValues
         );
 
         await client.query("COMMIT");
@@ -13871,6 +14573,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 8));
       const search = normalizeText(getQueryParam(event, "search") || "");
@@ -13934,9 +14646,11 @@ export const handler = async (event) => {
               b.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
-              'batches'::text AS source
+              'batches'::text AS source,
+              b.organization_id
             FROM contact_import_batches b
             LEFT JOIN users u ON u.id = b.created_by
+            ${organizationId ? `WHERE b.organization_id = $${orgParamIndex}` : ""}
 
             UNION ALL
 
@@ -13953,7 +14667,8 @@ export const handler = async (event) => {
               j.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
-              'no_call_jobs'::text AS source
+              'no_call_jobs'::text AS source,
+              NULL::uuid AS organization_id
             FROM no_call_import_jobs j
             LEFT JOIN users u ON u.id = j.created_by
 
@@ -13972,10 +14687,16 @@ export const handler = async (event) => {
               stats.created_at,
               NULL AS user_nombre,
               NULL AS user_apellido,
-              'datos_virtual'::text AS source
+              'datos_virtual'::text AS source,
+              stats.organization_id
             FROM (
-              SELECT COUNT(*)::int AS total_rows, MAX(created_at) AS created_at
+              SELECT
+                COUNT(*)::int AS total_rows,
+                MAX(created_at) AS created_at,
+                organization_id
               FROM datos_para_trabajar
+              ${organizationId ? `WHERE organization_id = $${orgParamIndex}` : ""}
+              GROUP BY organization_id
             ) stats
             WHERE stats.total_rows > 0
               AND NOT EXISTS (
@@ -14008,9 +14729,11 @@ export const handler = async (event) => {
               b.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
-              'batches'::text AS source
+              'batches'::text AS source,
+              b.organization_id
             FROM contact_import_batches b
             LEFT JOIN users u ON u.id = b.created_by
+            ${organizationId ? `WHERE b.organization_id = $${orgParamIndex}` : ""}
 
             UNION ALL
 
@@ -14027,7 +14750,8 @@ export const handler = async (event) => {
               j.created_at,
               u.nombre AS user_nombre,
               u.apellido AS user_apellido,
-              'no_call_jobs'::text AS source
+              'no_call_jobs'::text AS source,
+              NULL::uuid AS organization_id
             FROM no_call_import_jobs j
             LEFT JOIN users u ON u.id = j.created_by
 
@@ -14046,10 +14770,16 @@ export const handler = async (event) => {
               stats.created_at,
               NULL AS user_nombre,
               NULL AS user_apellido,
-              'datos_virtual'::text AS source
+              'datos_virtual'::text AS source,
+              stats.organization_id
             FROM (
-              SELECT COUNT(*)::int AS total_rows, MAX(created_at) AS created_at
+              SELECT
+                COUNT(*)::int AS total_rows,
+                MAX(created_at) AS created_at,
+                organization_id
               FROM datos_para_trabajar
+              ${organizationId ? `WHERE organization_id = $${orgParamIndex}` : ""}
+              GROUP BY organization_id
             ) stats
             WHERE stats.total_rows > 0
               AND NOT EXISTS (
@@ -14204,10 +14934,6 @@ export const handler = async (event) => {
       }
     }
 
-    if (!csvText || !csvText.trim()) {
-      return json(400, { ok: false, message: "CSV vacio" });
-    }
-
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -14345,6 +15071,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 20));
       const search = normalizeText(getQueryParam(event, "search") || "");
@@ -14359,6 +15095,12 @@ export const handler = async (event) => {
         const whereParts = [];
         const values = [];
         let idx = 1;
+
+        if (organizationId) {
+          whereParts.push(`d.organization_id = $${idx}`);
+          values.push(organizationId);
+          idx += 1;
+        }
 
         if (search) {
           whereParts.push(`(numero ILIKE $${idx} OR departamento ILIKE $${idx} OR localidad ILIKE $${idx})`);
@@ -16265,20 +17007,59 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const search = normalizeText(getQueryParam(event, "search") || "");
-      const items = await listUsersService({
-        role: "vendedor",
-        status: "approved",
-        search: search || null
-      });
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
 
-      const mapped = items.map((user) => ({
-        id: user.id,
-        nombre: user.nombre,
-        apellido: user.apellido,
-        email: user.email,
-        telefono: user.telefono
-      }));
+      const search = normalizeText(getQueryParam(event, "search") || "");
+      const values = [];
+      const whereParts = [];
+      if (organizationId) {
+        values.push(organizationId);
+        whereParts.push(`s.organization_id = $${values.length}`);
+      }
+      if (search) {
+        values.push(`%${search.toLowerCase()}%`);
+        const idx = values.length;
+        whereParts.push(`(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(u.email,'')) LIKE $${idx})`);
+      }
+      const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+      const client = createDbClient();
+      await client.connect();
+      let mapped = [];
+      try {
+        const result = await client.query(
+          `
+          SELECT
+            s.id,
+            s.nombre,
+            s.apellido,
+            u.email,
+            u.telefono
+          FROM sellers s
+          LEFT JOIN users u ON u.id = s.user_id
+          ${whereClause}
+          ORDER BY s.nombre ASC
+          `,
+          values
+        );
+        mapped = result.rows.map((row) => ({
+          id: row.id,
+          nombre: row.nombre,
+          apellido: row.apellido,
+          email: row.email,
+          telefono: row.telefono
+        }));
+      } finally {
+        await client.end();
+      }
 
       return json(200, {
         ok: true,
@@ -16480,6 +17261,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const { rows, ignoredEmptyRows } = mapDatosParaTrabajarCsv(csvText);
       const client = createDbClient();
       await client.connect();
@@ -16497,9 +17288,10 @@ export const handler = async (event) => {
               total_rows,
               valid_rows,
               error_rows,
-              created_by
+              created_by,
+              organization_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             `,
             [
@@ -16509,7 +17301,8 @@ export const handler = async (event) => {
               rows.length,
               0,
               0,
-              dbUser?.id || null
+              dbUser?.id || null,
+              organizationId
             ]
           );
         } catch (err) {
@@ -16537,9 +17330,10 @@ export const handler = async (event) => {
                 total_rows,
                 valid_rows,
                 error_rows,
-                created_by
+                created_by,
+                organization_id
               )
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
               RETURNING id
               `,
               [
@@ -16549,7 +17343,8 @@ export const handler = async (event) => {
                 rows.length,
                 0,
                 0,
-                dbUser?.id || null
+                dbUser?.id || null,
+                organizationId
               ]
             );
           } else if (message.includes('contact_import_batches_status_check')) {
@@ -16575,9 +17370,10 @@ export const handler = async (event) => {
                 total_rows,
                 valid_rows,
                 error_rows,
-                created_by
+                created_by,
+                organization_id
               )
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
               RETURNING id
               `,
               [
@@ -16587,7 +17383,8 @@ export const handler = async (event) => {
                 rows.length,
                 0,
                 0,
-                dbUser?.id || null
+                dbUser?.id || null,
+                organizationId
               ]
             );
           } else {
@@ -16608,12 +17405,13 @@ export const handler = async (event) => {
             blocked_rows,
             skipped_rows,
             csv_text,
-            created_by
+            created_by,
+            organization_id
           )
-          VALUES ($1, $2, 'queued', $3, 0, 0, 0, 0, $4, $5)
+          VALUES ($1, $2, 'queued', $3, 0, 0, 0, 0, $4, $5, $6)
           RETURNING id
           `,
-          [batchId, fileName, rows.length, csvText, dbUser?.id || null]
+          [batchId, fileName, rows.length, csvText, dbUser?.id || null, organizationId]
         );
 
         const jobId = jobRes.rows[0]?.id || null;
@@ -16631,8 +17429,9 @@ export const handler = async (event) => {
               error_rows = 0,
               updated_at = now()
           WHERE id = $1
+          ${organizationId ? "AND organization_id = $3" : ""}
           `,
-          [batchId, rows.length]
+          organizationId ? [batchId, rows.length, organizationId] : [batchId, rows.length]
         );
         await client.query("COMMIT");
         return json(201, {
@@ -16813,7 +17612,40 @@ export const handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/imports/clients/analyze-diff")) {
-    const { csvText, parsedMultipart } = extractClientsImportCsv(event);
+    // Intento directo de leer CSV del body
+    let csvText = "";
+    try {
+      const rawBody = event?.body || "";
+      const bodyStr = event?.isBase64Encoded
+        ? Buffer.from(rawBody, "base64").toString("latin1")
+        : typeof rawBody === "string"
+        ? rawBody
+        : JSON.stringify(rawBody);
+
+      // Intentar JSON primero
+      try {
+        const parsed = JSON.parse(bodyStr);
+        if (parsed?.csv) {
+          csvText = parsed.csv;
+          console.log("analyze-diff: CSV desde JSON, length:", csvText.length);
+        }
+      } catch {
+        // No es JSON, usar como texto directo
+        csvText = bodyStr;
+        console.log(
+          "analyze-diff: CSV como texto directo, length:",
+          csvText.length
+        );
+      }
+    } catch (e) {
+      console.log("analyze-diff: error leyendo body:", e.message);
+    }
+
+    if (!csvText?.trim()) {
+      return json(400, { ok: false, message: "CSV vacio" });
+    }
+
+    const parsedMultipart = null;
     const rawCsv = csvText;
 
     if (!csvText || !csvText.trim()) {
@@ -17040,6 +17872,20 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      const orgClient = createDbClient();
+      await orgClient.connect();
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationId(orgClient, dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      } finally {
+        await orgClient.end();
+      }
+
       const autoProcessParam = String(getQueryParam(event, "autoProcess") || "")
         .trim()
         .toLowerCase();
@@ -17070,12 +17916,13 @@ export const handler = async (event) => {
             valid_rows,
             error_rows,
             rejected_missing_documento,
-            created_by
+            created_by,
+            organization_id
           )
-          VALUES ($1, 'uploaded', 'clientes', 0, 0, 0, 0, $2)
+          VALUES ($1, 'uploaded', 'clientes', 0, 0, 0, 0, $2, $3)
           RETURNING *
           `,
-          [fileName, dbUser?.id || null]
+          [fileName, dbUser?.id || null, organizationId]
         );
 
         const batch = batchResult.rows[0];
@@ -17250,6 +18097,16 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
         const batchResult = await client.query(
           `
           SELECT
@@ -17269,9 +18126,10 @@ export const handler = async (event) => {
             updated_at
           FROM contact_import_batches
           WHERE id = $1
+            ${organizationId ? "AND organization_id = $2" : ""}
           LIMIT 1
           `,
-          [batchId]
+          organizationId ? [batchId, organizationId] : [batchId]
         );
 
         if (!batchResult.rows.length) {
@@ -17289,8 +18147,9 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE import_status IS NULL OR import_status = 'pending')::int AS pending
           FROM contact_import_rows
           WHERE batch_id = $1
+          ${organizationId ? "AND organization_id = $2" : ""}
           `,
-          [batchId]
+          organizationId ? [batchId, organizationId] : [batchId]
         );
 
         const batch = batchResult.rows[0];
@@ -17367,6 +18226,16 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
         const rowsResult = await client.query(
           `
           SELECT
@@ -17378,9 +18247,10 @@ export const handler = async (event) => {
             resolved_contact_id
           FROM contact_import_rows
           WHERE batch_id = $1
+            ${organizationId ? "AND organization_id = $2" : ""}
           ORDER BY row_number ASC
           `,
-          [batchId]
+          organizationId ? [batchId, organizationId] : [batchId]
         );
 
         return json(200, {
@@ -17423,20 +18293,32 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
         await client.query("BEGIN");
         await client.query(
           `
           DELETE FROM contact_import_rows
           WHERE batch_id = $1
+            ${organizationId ? "AND organization_id = $2" : ""}
           `,
-          [batchId]
+          organizationId ? [batchId, organizationId] : [batchId]
         );
         const deleteBatch = await client.query(
           `
           DELETE FROM contact_import_batches
           WHERE id = $1
+            ${organizationId ? "AND organization_id = $2" : ""}
           `,
-          [batchId]
+          organizationId ? [batchId, organizationId] : [batchId]
         );
         await client.query("COMMIT");
         return json(200, { ok: true, deleted: deleteBatch.rowCount || 0 });
@@ -17483,7 +18365,21 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      await enqueueContactImportJob(batchId, { createProducts });
+      const orgClient = createDbClient();
+      await orgClient.connect();
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationId(orgClient, dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      } finally {
+        await orgClient.end();
+      }
+
+      await enqueueContactImportJob(batchId, { createProducts, organizationId });
       return json(200, { ok: true, batchId, enqueued: true });
     } catch (error) {
       return json(500, {
@@ -17527,7 +18423,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, ["superadministrador"]);
       if (roleError) return roleError;
 
-      const item = await createProductRecord(validation.data);
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const item = await createProductRecord(validation.data, organizationId);
       return json(201, { ok: true, item });
     } catch (error) {
       return json(500, {
@@ -17571,7 +18477,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, ["superadministrador"]);
       if (roleError) return roleError;
 
-      const item = await updateProductRecord(productMatch[1], validation.data);
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const item = await updateProductRecord(productMatch[1], validation.data, organizationId);
       if (!item) {
         return json(404, { ok: false, message: "Product not found" });
       }
