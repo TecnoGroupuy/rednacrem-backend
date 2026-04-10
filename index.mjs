@@ -1255,198 +1255,219 @@ async function fetchRecuperoContactos({
   console.log("[recupero] organizationId:", organizationId);
   console.log("[recupero] params:", { producto, tab, page });
 
-  const itemsRes = await client.query(
-    `
-    SELECT DISTINCT ON (c.telefono)
-      c.id,
-      c.nombre,
-      c.apellido,
-      c.telefono,
-      c.celular,
-      c.documento,
-      CASE WHEN c.fecha_nacimiento IS NULL THEN NULL ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int END AS edad,
-      c.departamento,
-      cp.nombre_producto,
-      cp.precio,
-      cp.fecha_baja,
-      COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
-      COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja_detalle,
-      lote.batch_id,
-      lote.nombre_lote,
-      lote.vendedor_asignado_id,
-      lote.vendedor_asignado_nombre,
-      lote.vendedor_asignado_nombre AS vendedor_asignado,
-      COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) AS ultimo_estado_gestion,
-      gestion.fecha_ultima_gestion,
-      COALESCE(gestion.fecha_ultima_gestion, gestion.fecha_ultima_gestion_ts) AS ultima_gestion
-    FROM contacts c
-    JOIN contact_products cp ON cp.contact_id = c.id
-    LEFT JOIN external_management_status ems
-      ON ems.documento = c.documento
-    LEFT JOIN datos_para_trabajar d
-      ON d.contact_id = c.id
-    LEFT JOIN LATERAL (
-      SELECT
-        lbc.batch_id,
-        lb.nombre AS nombre_lote,
-        lcs.assigned_to AS vendedor_asignado_id,
-        COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
-      FROM lead_batch_contacts lbc
-      JOIN lead_batches lb ON lb.id = lbc.batch_id
-      LEFT JOIN lead_contact_status lcs
-        ON lcs.contact_id = d.id
-       AND lcs.batch_id = lbc.batch_id
-      LEFT JOIN users u ON u.id = lcs.assigned_to
-      WHERE lbc.client_contact_id = c.id
-        AND lb.tipo = 'recupero'
-        AND lb.estado IN ('activo', 'asignado')
-      ORDER BY lb.created_at DESC
-      LIMIT 1
-    ) lote ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        lmh.resultado AS ultimo_estado_gestion,
-        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
-        lmh.created_at AS fecha_ultima_gestion_ts
-      FROM lead_management_history lmh
-      JOIN lead_batches lb ON lb.id = lmh.batch_id
-      WHERE lmh.contact_id = d.id
-        AND lb.tipo = 'recupero'
-      ORDER BY lmh.fecha_gestion DESC
-      LIMIT 1
-    ) gestion ON true
-    WHERE ${where}
-    ORDER BY c.telefono, ${orderBy}
-    LIMIT $${idx} OFFSET $${idx + 1}
-    `,
-    [...values, limit, offset]
-  );
-
-  const countRes = await client.query(
-    `
-    SELECT COUNT(DISTINCT c.telefono) AS total
-    FROM contacts c
-    JOIN contact_products cp ON cp.contact_id = c.id
-    LEFT JOIN external_management_status ems
-      ON ems.documento = c.documento
-    LEFT JOIN datos_para_trabajar d
-      ON d.contact_id = c.id
-    LEFT JOIN LATERAL (
-      SELECT
-        lbc.batch_id,
-        lb.nombre AS nombre_lote,
-        lcs.assigned_to AS vendedor_asignado_id,
-        COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
-      FROM lead_batch_contacts lbc
-      JOIN lead_batches lb ON lb.id = lbc.batch_id
-      LEFT JOIN lead_contact_status lcs
-        ON lcs.contact_id = d.id
-       AND lcs.batch_id = lbc.batch_id
-      LEFT JOIN users u ON u.id = lcs.assigned_to
-      WHERE lbc.client_contact_id = c.id
-        AND lb.tipo = 'recupero'
-        AND lb.estado IN ('activo', 'asignado')
-      ORDER BY lb.created_at DESC
-      LIMIT 1
-    ) lote ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        lmh.resultado AS ultimo_estado_gestion,
-        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
-        lmh.created_at AS fecha_ultima_gestion_ts
-      FROM lead_management_history lmh
-      JOIN lead_batches lb ON lb.id = lmh.batch_id
-      WHERE lmh.contact_id = d.id
-        AND lb.tipo = 'recupero'
-      ORDER BY lmh.fecha_gestion DESC
-      LIMIT 1
-    ) gestion ON true
-    WHERE ${where}
-    `,
-    values
-  );
-
-  const metricsRes = await client.query(
-    `
-    SELECT
-      COUNT(DISTINCT c.telefono) FILTER (WHERE NOT EXISTS (
-        SELECT 1
+  let itemsRes;
+  try {
+    itemsRes = await client.query(
+      `
+      SELECT DISTINCT ON (c.telefono)
+        c.id,
+        c.nombre,
+        c.apellido,
+        c.telefono,
+        c.celular,
+        c.documento,
+        CASE WHEN c.fecha_nacimiento IS NULL THEN NULL ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int END AS edad,
+        c.departamento,
+        cp.nombre_producto,
+        cp.precio,
+        cp.fecha_baja,
+        COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
+        COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja_detalle,
+        lote.batch_id,
+        lote.nombre_lote,
+        lote.vendedor_asignado_id,
+        lote.vendedor_asignado_nombre,
+        lote.vendedor_asignado_nombre AS vendedor_asignado,
+        COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) AS ultimo_estado_gestion,
+        gestion.fecha_ultima_gestion,
+        COALESCE(gestion.fecha_ultima_gestion, gestion.fecha_ultima_gestion_ts) AS ultima_gestion
+      FROM contacts c
+      JOIN contact_products cp ON cp.contact_id = c.id
+      LEFT JOIN external_management_status ems
+        ON ems.documento = c.documento
+      LEFT JOIN datos_para_trabajar d
+        ON d.contact_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT
+          lbc.batch_id,
+          lb.nombre AS nombre_lote,
+          lcs.assigned_to AS vendedor_asignado_id,
+          COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
         FROM lead_batch_contacts lbc
         JOIN lead_batches lb ON lb.id = lbc.batch_id
+        LEFT JOIN lead_contact_status lcs
+          ON lcs.contact_id = d.id
+         AND lcs.batch_id = lbc.batch_id
+        LEFT JOIN users u ON u.id = lcs.assigned_to
         WHERE lbc.client_contact_id = c.id
           AND lb.tipo = 'recupero'
           AND lb.estado IN ('activo', 'asignado')
-      )) AS disponibles,
-      COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
-        SELECT 1
+        ORDER BY lb.created_at DESC
+        LIMIT 1
+      ) lote ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          lmh.resultado AS ultimo_estado_gestion,
+          (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
+          lmh.created_at AS fecha_ultima_gestion_ts
+        FROM lead_management_history lmh
+        JOIN lead_batches lb ON lb.id = lmh.batch_id
+        WHERE lmh.contact_id = d.id
+          AND lb.tipo = 'recupero'
+        ORDER BY lmh.fecha_gestion DESC
+        LIMIT 1
+      ) gestion ON true
+      WHERE ${where}
+      ORDER BY c.telefono, ${orderBy}
+      LIMIT $${idx} OFFSET $${idx + 1}
+      `,
+      [...values, limit, offset]
+    );
+  } catch (err) {
+    console.error("[recupero] SQL error:", err.message);
+    console.error("[recupero] SQL detail:", err.detail);
+    throw err;
+  }
+
+  let countRes;
+  try {
+    countRes = await client.query(
+      `
+      SELECT COUNT(DISTINCT c.telefono) AS total
+      FROM contacts c
+      JOIN contact_products cp ON cp.contact_id = c.id
+      LEFT JOIN external_management_status ems
+        ON ems.documento = c.documento
+      LEFT JOIN datos_para_trabajar d
+        ON d.contact_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT
+          lbc.batch_id,
+          lb.nombre AS nombre_lote,
+          lcs.assigned_to AS vendedor_asignado_id,
+          COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
         FROM lead_batch_contacts lbc
         JOIN lead_batches lb ON lb.id = lbc.batch_id
+        LEFT JOIN lead_contact_status lcs
+          ON lcs.contact_id = d.id
+         AND lcs.batch_id = lbc.batch_id
+        LEFT JOIN users u ON u.id = lcs.assigned_to
         WHERE lbc.client_contact_id = c.id
           AND lb.tipo = 'recupero'
-      )) AS en_lote,
-      COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
-        SELECT 1
-        FROM datos_para_trabajar d2
-        JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
-        JOIN lead_batches lb ON lb.id = lcs.batch_id
-        WHERE d2.contact_id = c.id
+          AND lb.estado IN ('activo', 'asignado')
+        ORDER BY lb.created_at DESC
+        LIMIT 1
+      ) lote ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          lmh.resultado AS ultimo_estado_gestion,
+          (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
+          lmh.created_at AS fecha_ultima_gestion_ts
+        FROM lead_management_history lmh
+        JOIN lead_batches lb ON lb.id = lmh.batch_id
+        WHERE lmh.contact_id = d.id
           AND lb.tipo = 'recupero'
-          AND lcs.assigned_to IS NOT NULL
-      )) AS asignados,
-      COUNT(DISTINCT c.telefono) FILTER (WHERE (
-        EXISTS (
+        ORDER BY lmh.fecha_gestion DESC
+        LIMIT 1
+      ) gestion ON true
+      WHERE ${where}
+      `,
+      values
+    );
+  } catch (err) {
+    console.error("[recupero] SQL error:", err.message);
+    console.error("[recupero] SQL detail:", err.detail);
+    throw err;
+  }
+
+  let metricsRes;
+  try {
+    metricsRes = await client.query(
+      `
+      SELECT
+        COUNT(DISTINCT c.telefono) FILTER (WHERE NOT EXISTS (
+          SELECT 1
+          FROM lead_batch_contacts lbc
+          JOIN lead_batches lb ON lb.id = lbc.batch_id
+          WHERE lbc.client_contact_id = c.id
+            AND lb.tipo = 'recupero'
+            AND lb.estado IN ('activo', 'asignado')
+        )) AS disponibles,
+        COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
+          SELECT 1
+          FROM lead_batch_contacts lbc
+          JOIN lead_batches lb ON lb.id = lbc.batch_id
+          WHERE lbc.client_contact_id = c.id
+            AND lb.tipo = 'recupero'
+        )) AS en_lote,
+        COUNT(DISTINCT c.telefono) FILTER (WHERE EXISTS (
           SELECT 1
           FROM datos_para_trabajar d2
           JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE d2.contact_id = c.id
             AND lb.tipo = 'recupero'
-            AND lcs.intentos > 0
-        )
-        OR COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NOT NULL
-      )) AS gestionados,
-      COUNT(DISTINCT c.telefono) FILTER (WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('venta', 'alta')) AS recuperados,
-      COUNT(DISTINCT c.telefono) FILTER (WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'rechazo') AS rechazados
-    FROM contacts c
-    JOIN contact_products cp ON cp.contact_id = c.id
-    LEFT JOIN external_management_status ems
-      ON ems.documento = c.documento
-    LEFT JOIN datos_para_trabajar d
-      ON d.contact_id = c.id
-    LEFT JOIN LATERAL (
-      SELECT
-        lbc.batch_id,
-        lb.nombre AS nombre_lote,
-        lcs.assigned_to AS vendedor_asignado_id,
-        COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
-      FROM lead_batch_contacts lbc
-      JOIN lead_batches lb ON lb.id = lbc.batch_id
-      LEFT JOIN lead_contact_status lcs
-        ON lcs.contact_id = d.id
-       AND lcs.batch_id = lbc.batch_id
-      LEFT JOIN users u ON u.id = lcs.assigned_to
-      WHERE lbc.client_contact_id = c.id
-        AND lb.tipo = 'recupero'
-        AND lb.estado IN ('activo', 'asignado')
-      ORDER BY lb.created_at DESC
-      LIMIT 1
-    ) lote ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        lmh.resultado AS ultimo_estado_gestion,
-        (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
-        lmh.created_at AS fecha_ultima_gestion_ts
-      FROM lead_management_history lmh
-      JOIN lead_batches lb ON lb.id = lmh.batch_id
-      WHERE lmh.contact_id = d.id
-        AND lb.tipo = 'recupero'
-      ORDER BY lmh.fecha_gestion DESC
-      LIMIT 1
-    ) gestion ON true
-    WHERE ${baseWhere}
-    `,
-    values
-  );
+            AND lcs.assigned_to IS NOT NULL
+        )) AS asignados,
+        COUNT(DISTINCT c.telefono) FILTER (WHERE (
+          EXISTS (
+            SELECT 1
+            FROM datos_para_trabajar d2
+            JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
+            JOIN lead_batches lb ON lb.id = lcs.batch_id
+            WHERE d2.contact_id = c.id
+              AND lb.tipo = 'recupero'
+              AND lcs.intentos > 0
+          )
+          OR COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NOT NULL
+        )) AS gestionados,
+        COUNT(DISTINCT c.telefono) FILTER (WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('venta', 'alta')) AS recuperados,
+        COUNT(DISTINCT c.telefono) FILTER (WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'rechazo') AS rechazados
+      FROM contacts c
+      JOIN contact_products cp ON cp.contact_id = c.id
+      LEFT JOIN external_management_status ems
+        ON ems.documento = c.documento
+      LEFT JOIN datos_para_trabajar d
+        ON d.contact_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT
+          lbc.batch_id,
+          lb.nombre AS nombre_lote,
+          lcs.assigned_to AS vendedor_asignado_id,
+          COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+        FROM lead_batch_contacts lbc
+        JOIN lead_batches lb ON lb.id = lbc.batch_id
+        LEFT JOIN lead_contact_status lcs
+          ON lcs.contact_id = d.id
+         AND lcs.batch_id = lbc.batch_id
+        LEFT JOIN users u ON u.id = lcs.assigned_to
+        WHERE lbc.client_contact_id = c.id
+          AND lb.tipo = 'recupero'
+          AND lb.estado IN ('activo', 'asignado')
+        ORDER BY lb.created_at DESC
+        LIMIT 1
+      ) lote ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          lmh.resultado AS ultimo_estado_gestion,
+          (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
+          lmh.created_at AS fecha_ultima_gestion_ts
+        FROM lead_management_history lmh
+        JOIN lead_batches lb ON lb.id = lmh.batch_id
+        WHERE lmh.contact_id = d.id
+          AND lb.tipo = 'recupero'
+        ORDER BY lmh.fecha_gestion DESC
+        LIMIT 1
+      ) gestion ON true
+      WHERE ${baseWhere}
+      `,
+      values
+    );
+  } catch (err) {
+    console.error("[recupero] SQL error:", err.message);
+    console.error("[recupero] SQL detail:", err.detail);
+    throw err;
+  }
 
   const total = Number(countRes.rows[0]?.total || 0);
   const metricsRow = metricsRes.rows[0] || {};
