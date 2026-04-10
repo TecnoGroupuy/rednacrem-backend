@@ -10191,6 +10191,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 50));
       const search = normalizeText(getQueryParam(event, "search") || "");
@@ -10223,9 +10233,14 @@ export const handler = async (event) => {
           idx += 1;
         }
 
+        if (organizationId) {
+          whereParts.push(`d.organization_id = $${idx}`);
+          values.push(organizationId);
+          idx += 1;
+        }
+
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-        const orgParamIndex = organizationId ? values.length + 1 : null;
-        if (organizationId) values.push(organizationId);
+        const orgParamIndex = null;
         const paramMatches = whereClause.match(/\$(\d+)/g) || [];
         const maxParam = paramMatches.reduce((max, token) => Math.max(max, Number(token.slice(1))), 0);
         if (values.length < maxParam) {
