@@ -873,6 +873,10 @@ async function fetchRecuperoContactos({
   values.push(organizationId ?? null);
   idx += 1;
 
+  console.log("[recupero] organizationId type:", typeof organizationId, "value:", organizationId);
+  console.log("[recupero] values array:", values);
+  console.log("[recupero] idx at query time:", idx);
+
   if (producto) {
     conditions.push(`cp.nombre_producto = $${idx}`);
     values.push(producto);
@@ -1257,6 +1261,7 @@ async function fetchRecuperoContactos({
 
   let itemsRes;
   try {
+    console.log("[recupero] starting itemsRes query");
     itemsRes = await client.query(
       `
       SELECT DISTINCT ON (c.telefono)
@@ -1323,6 +1328,7 @@ async function fetchRecuperoContactos({
       `,
       [...values, limit, offset]
     );
+    console.log("[recupero] itemsRes done, rows:", itemsRes.rows.length);
   } catch (err) {
     console.error("[recupero] SQL error:", err.message);
     console.error("[recupero] SQL detail:", err.detail);
@@ -1331,6 +1337,7 @@ async function fetchRecuperoContactos({
 
   let countRes;
   try {
+    console.log("[recupero] starting countRes query");
     countRes = await client.query(
       `
       SELECT COUNT(DISTINCT c.telefono) AS total
@@ -1374,6 +1381,7 @@ async function fetchRecuperoContactos({
       `,
       values
     );
+    console.log("[recupero] countRes done:", countRes.rows[0]);
   } catch (err) {
     console.error("[recupero] SQL error:", err.message);
     console.error("[recupero] SQL detail:", err.detail);
@@ -1382,6 +1390,7 @@ async function fetchRecuperoContactos({
 
   let metricsRes;
   try {
+    console.log("[recupero] starting metricsRes query");
     metricsRes = await client.query(
       `
       SELECT
@@ -1463,6 +1472,7 @@ async function fetchRecuperoContactos({
       `,
       values
     );
+    console.log("[recupero] metricsRes done:", metricsRes.rows[0]);
   } catch (err) {
     console.error("[recupero] SQL error:", err.message);
     console.error("[recupero] SQL detail:", err.detail);
