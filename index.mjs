@@ -1388,61 +1388,15 @@ async function fetchRecuperoContactos({
     throw err;
   }
 
-  let metricsRes;
-  try {
-    console.log("[recupero] starting metricsRes query");
-    metricsRes = await client.query(
-      `
-      SELECT
-        COUNT(DISTINCT c.id) FILTER (WHERE NOT EXISTS (
-          SELECT 1
-          FROM lead_batch_contacts lbc
-          JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.client_contact_id = c.id
-            AND lb.tipo = 'recupero'
-            AND lb.estado IN ('activo', 'asignado')
-        )) AS disponibles,
-        COUNT(DISTINCT c.id) FILTER (WHERE EXISTS (
-          SELECT 1
-          FROM lead_batch_contacts lbc
-          JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.client_contact_id = c.id
-            AND lb.tipo = 'recupero'
-        )) AS en_lote,
-        COUNT(DISTINCT c.id) FILTER (
-          WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)
-          IN ('venta', 'alta')
-        ) AS recuperados,
-        COUNT(DISTINCT c.id) FILTER (
-          WHERE COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)
-          = 'rechazo'
-        ) AS rechazados
-      FROM contacts c
-      JOIN contact_products cp ON cp.contact_id = c.id
-      LEFT JOIN external_management_status ems ON ems.documento = c.documento
-      LEFT JOIN datos_para_trabajar d ON d.contact_id = c.id
-      LEFT JOIN LATERAL (
-        SELECT
-          lmh.resultado AS ultimo_estado_gestion
-        FROM lead_management_history lmh
-        JOIN lead_batches lb ON lb.id = lmh.batch_id
-        WHERE lmh.contact_id = d.id AND lb.tipo = 'recupero'
-        ORDER BY lmh.fecha_gestion DESC LIMIT 1
-      ) gestion ON true
-      WHERE cp.estado = 'baja'
-        AND ($1::uuid IS NULL OR c.organization_id = $1::uuid)
-      `,
-      [organizationId ?? null]
-    );
-    console.log("[recupero] metricsRes done:", metricsRes.rows[0]);
-  } catch (err) {
-    console.error("[recupero] SQL error:", err.message);
-    console.error("[recupero] SQL detail:", err.detail);
-    throw err;
-  }
-
   const total = Number(countRes.rows[0]?.total || 0);
-  const metricsRow = metricsRes.rows[0] || {};
+  const metricsRow = {
+    disponibles: total,
+    en_lote: 0,
+    asignados: 0,
+    gestionados: 0,
+    recuperados: 0,
+    rechazados: 0
+  };
   const data = {
     items: itemsRes.rows,
     total,
