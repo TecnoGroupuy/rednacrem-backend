@@ -840,7 +840,8 @@ async function fetchRecuperoContactos({
   sortDir,
   page,
   limit,
-  filters
+  filters,
+  organizationId
 }) {
   const sortableColumns = {
     edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
@@ -867,6 +868,10 @@ async function fetchRecuperoContactos({
 
   const values = [];
   let idx = 1;
+
+  conditions.push(`($${idx}::uuid IS NULL OR c.organization_id = $${idx}::uuid)`);
+  values.push(organizationId ?? null);
+  idx += 1;
 
   if (producto) {
     conditions.push(`cp.nombre_producto = $${idx}`);
@@ -1246,6 +1251,9 @@ async function fetchRecuperoContactos({
   const orderBy = sortField && sortableColumns[sortField]
     ? `${sortableColumns[sortField]} ${sortDir}`
     : "cp.fecha_baja DESC";
+
+  console.log("[recupero] organizationId:", organizationId);
+  console.log("[recupero] params:", { producto, tab, page });
 
   const itemsRes = await client.query(
     `
@@ -10339,6 +10347,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const productoRaw = getQueryParam(event, "producto");
       const searchRaw = getQueryParam(event, "search");
       const sortRaw = getQueryParam(event, "sort");
@@ -10380,7 +10398,8 @@ export const handler = async (event) => {
           sortDir: dir,
           page,
           limit,
-          filters: null
+          filters: null,
+          organizationId
         });
         return safeResponse({
           data,
@@ -10467,6 +10486,16 @@ export const handler = async (event) => {
         });
       }
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       payloadHash = hashPayload({
         producto,
         departamento,
@@ -10528,7 +10557,8 @@ export const handler = async (event) => {
             sortDir,
             page,
             limit,
-            filters: emptyPayload ? null : filters
+            filters: emptyPayload ? null : filters,
+            organizationId
           });
         } finally {
           await client.end();
