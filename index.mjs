@@ -18681,7 +18681,6 @@ export const handler = async (event) => {
           SELECT
             o.id,
             o.nombre,
-            o.descripcion,
             o.activo,
             o.created_at,
             o.updated_at,
@@ -18732,11 +18731,11 @@ export const handler = async (event) => {
 
         const result = await client.query(
           `
-          INSERT INTO organizations (nombre, descripcion, activo, created_at, updated_at)
-          VALUES ($1, $2, true, now(), now())
-          RETURNING id, nombre, descripcion, activo, created_at, updated_at
+          INSERT INTO organizations (nombre, activo, created_at, updated_at)
+          VALUES ($1, true, now(), now())
+          RETURNING id, nombre, activo, created_at, updated_at
           `,
-          [nombre, descripcion || null]
+          [nombre]
         );
 
         return json(201, { ok: true, item: result.rows[0] });
@@ -18766,14 +18765,12 @@ export const handler = async (event) => {
 
       const orgId = orgDetailMatch[1];
       const nombre = body?.nombre !== undefined ? normalizeText(body.nombre) : undefined;
-      const descripcion = body?.descripcion !== undefined ? normalizeText(body.descripcion) : undefined;
       const activo = body?.activo !== undefined ? Boolean(body.activo) : undefined;
 
       const updates = [];
       const values = [];
       let idx = 1;
       if (nombre !== undefined) { updates.push(`nombre = $${idx}`); values.push(nombre); idx += 1; }
-      if (descripcion !== undefined) { updates.push(`descripcion = $${idx}`); values.push(descripcion || null); idx += 1; }
       if (activo !== undefined) { updates.push(`activo = $${idx}`); values.push(activo); idx += 1; }
       if (!updates.length) return json(400, { ok: false, message: "Sin campos para actualizar" });
 
@@ -18786,7 +18783,7 @@ export const handler = async (event) => {
           UPDATE organizations
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
-          RETURNING id, nombre, descripcion, activo, created_at, updated_at
+          RETURNING id, nombre, activo, created_at, updated_at
           `,
           values
         );
