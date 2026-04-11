@@ -18661,6 +18661,146 @@ export const handler = async (event) => {
     }
   }
 
+  // ─── ORGANIZATIONS ENDPOINTS ──────────────────────────────────────────────
+  if (method === "GET" && path.endsWith("/organizations")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(`
+          SELECT
+            o.id,
+            o.nombre,
+            o.descripcion,
+            o.activo,
+            o.created_at,
+            o.updated_at,
+            COUNT(ou.user_id)::int AS total_usuarios
+          FROM organizations o
+          LEFT JOIN organization_users ou ON ou.organization_id = o.id AND ou.activo = true
+          GROUP BY o.id
+          ORDER BY o.created_at DESC
+        `);
+        return json(200, { ok: true, items: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to list organizations", error: error.message });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/organizations")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const nombre = normalizeText(body?.nombre);
+      const descripcion = normalizeText(body?.descripcion || "");
+      if (!nombre) return json(422, { ok: false, message: "nombre es obligatorio" });
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const existing = await client.query(
+          `SELECT id FROM organizations WHERE lower(nombre) = lower($1) LIMIT 1`,
+          [nombre]
+        );
+        if (existing.rows.length) {
+          return json(409, { ok: false, message: "Ya existe una organización con ese nombre" });
+        }
+
+        const result = await client.query(
+          `
+          INSERT INTO organizations (nombre, descripcion, activo, created_at, updated_at)
+          VALUES ($1, $2, true, now(), now())
+          RETURNING id, nombre, descripcion, activo, created_at, updated_at
+          `,
+          [nombre, descripcion || null]
+        );
+
+        return json(201, { ok: true, item: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to create organization", error: error.message });
+    }
+  }
+
+  const orgDetailMatch = path.match(/\/organizations\/([^/]+)$/);
+  if (method === "PUT" && orgDetailMatch) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const orgId = orgDetailMatch[1];
+      const nombre = body?.nombre !== undefined ? normalizeText(body.nombre) : undefined;
+      const descripcion = body?.descripcion !== undefined ? normalizeText(body.descripcion) : undefined;
+      const activo = body?.activo !== undefined ? Boolean(body.activo) : undefined;
+
+      const updates = [];
+      const values = [];
+      let idx = 1;
+      if (nombre !== undefined) { updates.push(`nombre = $${idx}`); values.push(nombre); idx += 1; }
+      if (descripcion !== undefined) { updates.push(`descripcion = $${idx}`); values.push(descripcion || null); idx += 1; }
+      if (activo !== undefined) { updates.push(`activo = $${idx}`); values.push(activo); idx += 1; }
+      if (!updates.length) return json(400, { ok: false, message: "Sin campos para actualizar" });
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        values.push(orgId);
+        const result = await client.query(
+          `
+          UPDATE organizations
+          SET ${updates.join(", ")}, updated_at = now()
+          WHERE id = $${idx}
+          RETURNING id, nombre, descripcion, activo, created_at, updated_at
+          `,
+          values
+        );
+
+        if (!result.rows.length) return json(404, { ok: false, message: "Organización no encontrada" });
+        return json(200, { ok: true, item: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update organization", error: error.message });
+    }
+  }
+
   const approveVendorRequestMatch =
     method === "POST" ? matchVendorRequestActionPath(path, "approve") : null;
 
