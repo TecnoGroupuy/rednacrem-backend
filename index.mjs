@@ -18681,7 +18681,6 @@ export const handler = async (event) => {
           SELECT
             o.id,
             o.nombre,
-            o.activo,
             o.created_at,
             o.updated_at,
             COUNT(ou.user_id)::int AS total_usuarios
@@ -18731,9 +18730,9 @@ export const handler = async (event) => {
 
         const result = await client.query(
           `
-          INSERT INTO organizations (nombre, activo, created_at, updated_at)
-          VALUES ($1, true, now(), now())
-          RETURNING id, nombre, activo, created_at, updated_at
+          INSERT INTO organizations (nombre, created_at, updated_at)
+          VALUES ($1, now(), now())
+          RETURNING id, nombre, created_at, updated_at
           `,
           [nombre]
         );
@@ -18765,13 +18764,10 @@ export const handler = async (event) => {
 
       const orgId = orgDetailMatch[1];
       const nombre = body?.nombre !== undefined ? normalizeText(body.nombre) : undefined;
-      const activo = body?.activo !== undefined ? Boolean(body.activo) : undefined;
-
       const updates = [];
       const values = [];
       let idx = 1;
       if (nombre !== undefined) { updates.push(`nombre = $${idx}`); values.push(nombre); idx += 1; }
-      if (activo !== undefined) { updates.push(`activo = $${idx}`); values.push(activo); idx += 1; }
       if (!updates.length) return json(400, { ok: false, message: "Sin campos para actualizar" });
 
       const client = createDbClient();
@@ -18783,7 +18779,7 @@ export const handler = async (event) => {
           UPDATE organizations
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
-          RETURNING id, nombre, activo, created_at, updated_at
+          RETURNING id, nombre, created_at, updated_at
           `,
           values
         );
