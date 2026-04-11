@@ -12979,7 +12979,6 @@ export const handler = async (event) => {
               ) AS vendedores
             FROM lead_batch_sellers lbs
             JOIN users u ON u.id = lbs.seller_id
-            ${organizationId ? "WHERE lbs.organization_id = $1" : ""}
             GROUP BY lbs.batch_id
           ) vnd ON vnd.batch_id = lb.id
           ${orgFilter}
@@ -13863,11 +13862,11 @@ export const handler = async (event) => {
         for (const sid of sellerIds) {
           await client.query(
             `
-            INSERT INTO lead_batch_sellers (batch_id, seller_id, organization_id)
-            VALUES ($1, $2, $3)
+            INSERT INTO lead_batch_sellers (batch_id, seller_id)
+            VALUES ($1, $2)
             ON CONFLICT DO NOTHING
             `,
-            [batchId, sid, organizationId]
+            [batchId, sid]
           );
         }
         await client.query("COMMIT");
@@ -14027,11 +14026,11 @@ export const handler = async (event) => {
         if (resolvedSellerId) {
           await client.query(
             `
-            INSERT INTO lead_batch_sellers (batch_id, seller_id, organization_id)
-            VALUES ($1, $2, $3)
+            INSERT INTO lead_batch_sellers (batch_id, seller_id)
+            VALUES ($1, $2)
             ON CONFLICT DO NOTHING
             `,
-            [batchId, resolvedSellerId, organizationId]
+            [batchId, resolvedSellerId]
           );
         }
 
@@ -14267,11 +14266,7 @@ export const handler = async (event) => {
       await client.connect();
       try {
         const sellerValues = [batchId];
-        let sellerOrgClause = "";
-        if (organizationId) {
-          sellerValues.push(organizationId);
-          sellerOrgClause = "AND organization_id = $2";
-        }
+        const sellerOrgClause = "";
         const sellersRes = await client.query(
           `
           SELECT seller_id
