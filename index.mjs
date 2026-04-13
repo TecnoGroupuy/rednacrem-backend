@@ -11809,13 +11809,9 @@ export const handler = async (event) => {
             const principalLeadId = leadRes.rows[0]?.lead_id || null;
             if (principalLeadId) {
               const statusRes = await client.query(
-                `
-                SELECT batch_id
-                FROM lead_contact_status
-                WHERE contact_id = $1
-                ORDER BY updated_at DESC
-                LIMIT 1
-                `,
+                `SELECT batch_id FROM lead_contact_status
+                 WHERE contact_id = $1
+                 ORDER BY updated_at DESC LIMIT 1`,
                 [principalLeadId]
               );
               const batchId = statusRes.rows[0]?.batch_id || null;
@@ -11825,18 +11821,28 @@ export const handler = async (event) => {
 
           const safeSellerId = isValidUuid(dbUser?.id) ? dbUser.id : null;
           if (!safeSellerId) return null;
+
+          // Fallback 1: lote propio en lead_batches
           const batchRes = await client.query(
-            `
-            SELECT id
-            FROM lead_batches
-            WHERE estado IN ('activo','asignado')
-              AND (seller_id = $1 OR asignado_a = $1)
-            ORDER BY created_at DESC
-            LIMIT 1
-            `,
+            `SELECT id FROM lead_batches
+             WHERE estado IN ('activo','asignado')
+               AND (seller_id = $1 OR asignado_a = $1)
+             ORDER BY created_at DESC LIMIT 1`,
             [safeSellerId]
           );
-          return batchRes.rows[0]?.id || null;
+          if (batchRes.rows[0]?.id) return batchRes.rows[0].id;
+
+          // Fallback 2: lote más reciente asignado al vendedor vía lead_contact_status
+          const lcsRes = await client.query(
+            `SELECT lcs.batch_id
+             FROM lead_contact_status lcs
+             JOIN lead_batches lb ON lb.id = lcs.batch_id
+             WHERE lcs.assigned_to = $1
+               AND lb.estado IN ('activo','asignado')
+             ORDER BY lcs.updated_at DESC LIMIT 1`,
+            [safeSellerId]
+          );
+          return lcsRes.rows[0]?.batch_id || null;
         };
 
         const batchId = await resolveBatchId();
