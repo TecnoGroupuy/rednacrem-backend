@@ -8,6 +8,7 @@ import {
   ListUsersCommand
 } from "@aws-sdk/client-cognito-identity-provider";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
 import { normalizePhone } from "./src/lib/validation.js";
@@ -17,6 +18,9 @@ import { findCurrentUserFromClaims } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
+const s3Client = new S3Client({ region: "us-east-1" });
+const S3_BUCKET = "rednacrem-assets";
+const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
 
 function getRequestId(event) {
   const headerId =
@@ -18679,6 +18683,7 @@ export const handler = async (event) => {
           SELECT
             o.id,
             o.nombre,
+            o.logo_url,
             o.created_at,
             o.updated_at,
             COUNT(ou.user_id)::int AS total_usuarios
@@ -18730,7 +18735,7 @@ export const handler = async (event) => {
           `
           INSERT INTO organizations (nombre, created_at, updated_at)
           VALUES ($1, now(), now())
-          RETURNING id, nombre, created_at, updated_at
+          RETURNING id, nombre, logo_url, created_at, updated_at
           `,
           [nombre]
         );
@@ -18741,6 +18746,106 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to create organization", error: error.message });
+    }
+  }
+
+  // POST /organizations/:id/logo
+  const orgLogoMatch = path.match(/\/organizations\/([^/]+)\/logo$/);
+  if (method === "POST" && orgLogoMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const orgId = orgLogoMatch[1];
+
+      const dbCheck = createDbClient();
+      await dbCheck.connect();
+      let currentLogoUrl = null;
+      try {
+        const check = await dbCheck.query(
+          `SELECT id, logo_url FROM organizations WHERE id = $1 LIMIT 1`,
+          [orgId]
+        );
+        if (!check.rows.length) {
+          return json(404, { ok: false, message: "Organización no encontrada" });
+        }
+        currentLogoUrl = check.rows[0].logo_url || null;
+      } finally {
+        await dbCheck.end();
+      }
+
+      const body = event.body;
+      if (!body) return json(400, { ok: false, message: "Sin imagen en el body" });
+
+      const isBase64 = Boolean(event.isBase64Encoded);
+      const imageBuffer = isBase64
+        ? Buffer.from(body, "base64")
+        : Buffer.from(body, "binary");
+
+      const rawContentType =
+        event.headers?.["content-type"] ||
+        event.headers?.["Content-Type"] ||
+        "image/png";
+      const contentType = String(rawContentType).split(";")[0].trim() || "image/png";
+      const ext = contentType.includes("jpeg") || contentType.includes("jpg")
+        ? "jpg"
+        : contentType.includes("png")
+          ? "png"
+          : contentType.includes("svg")
+            ? "svg"
+            : contentType.includes("webp")
+              ? "webp"
+              : "png";
+
+      const key = `logos/${orgId}.${ext}`;
+
+      if (currentLogoUrl) {
+        const currentUrlBase = String(currentLogoUrl).split("?")[0];
+        const prefix = `${S3_BASE_URL}/`;
+        const oldKey = currentUrlBase.startsWith(prefix)
+          ? currentUrlBase.slice(prefix.length)
+          : null;
+        if (oldKey && oldKey !== key) {
+          try {
+            await s3Client.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: oldKey }));
+          } catch {}
+        }
+      }
+
+      await s3Client.send(new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: imageBuffer,
+        ContentType: contentType,
+        CacheControl: "public, max-age=31536000"
+      }));
+
+      const logoUrl = `${S3_BASE_URL}/${key}?v=${Date.now()}`;
+
+      const dbUpdate = createDbClient();
+      await dbUpdate.connect();
+      let updatedOrg = null;
+      try {
+        const result = await dbUpdate.query(
+          `UPDATE organizations SET logo_url = $1, updated_at = now() WHERE id = $2
+           RETURNING id, nombre, logo_url`,
+          [logoUrl, orgId]
+        );
+        updatedOrg = result.rows[0] || null;
+      } finally {
+        await dbUpdate.end();
+      }
+
+      return json(200, { ok: true, logo_url: updatedOrg?.logo_url || logoUrl, item: updatedOrg });
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to upload logo", error: error.message });
     }
   }
 
@@ -18777,7 +18882,7 @@ export const handler = async (event) => {
           UPDATE organizations
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
-          RETURNING id, nombre, created_at, updated_at
+          RETURNING id, nombre, logo_url, created_at, updated_at
           `,
           values
         );
