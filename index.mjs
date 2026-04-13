@@ -12948,7 +12948,6 @@ export const handler = async (event) => {
       try {
         const values = [];
         const orgFilter = organizationId ? "WHERE lb.organization_id = $1" : "";
-        const cntFilter = organizationId ? "WHERE organization_id = $1" : "";
         if (organizationId) values.push(organizationId);
         const result = await client.query(
           `
@@ -12963,7 +12962,6 @@ export const handler = async (event) => {
           LEFT JOIN (
             SELECT batch_id, COUNT(*) AS total
             FROM lead_batch_contacts
-            ${cntFilter}
             GROUP BY batch_id
           ) cnt ON cnt.batch_id = lb.id
           LEFT JOIN (
