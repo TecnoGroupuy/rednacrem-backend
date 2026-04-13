@@ -11746,6 +11746,7 @@ export const handler = async (event) => {
         const departamento = normalizeText(payload?.departamento) || null;
         const localidad = normalizeText(payload?.localidad) || null;
         const pais = normalizeText(payload?.pais) || "Uruguay";
+        const origenDato = normalizeText(payload?.origen_dato || payload?.origen) || null;
         return {
           nombre,
           apellido,
@@ -11757,7 +11758,8 @@ export const handler = async (event) => {
           direccion,
           departamento,
           localidad,
-          pais
+          pais,
+          origenDato
         };
       };
 
@@ -11898,7 +11900,7 @@ export const handler = async (event) => {
           if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields.email);
           if (dCols.has("email")) pushCol("email", fields.email);
           if (dCols.has("pais")) pushCol("pais", fields.pais);
-          if (dCols.has("origen_dato")) pushCol("origen_dato", "Manual");
+          if (dCols.has("origen_dato")) pushCol("origen_dato", fields.origenDato || "Manual");
           if (dCols.has("estado")) pushCol("estado", "nuevo");
           if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
 
