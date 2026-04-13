@@ -15275,6 +15275,19 @@ export const handler = async (event) => {
       await client.connect();
       try {
         const config = await getConfigMap(client);
+
+        // Agregar logo_url de la organización del usuario
+        const orgId = await resolveOrganizationIdForRequest(dbUser, event).catch(() => null);
+        if (orgId) {
+          const orgResult = await client.query(
+            `SELECT logo_url FROM organizations WHERE id = $1 LIMIT 1`,
+            [orgId]
+          );
+          config.logo_url = orgResult.rows[0]?.logo_url || null;
+        } else {
+          config.logo_url = null;
+        }
+
         return json(200, config);
       } finally {
         await client.end();
