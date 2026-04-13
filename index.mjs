@@ -8344,7 +8344,7 @@ export const handler = async (event) => {
           pushCol("departamento", fields?.departamento || null);
           if (dCols.has("localidad")) pushCol("localidad", null);
           if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields?.email || null);
-          if (dCols.has("origen_dato")) pushCol("origen_dato", batchTipo || "captacion");
+          if (dCols.has("origen_dato")) pushCol("origen_dato", fields?.origenDato || batchTipo || null);
           if (dCols.has("estado")) pushCol("estado", "nuevo");
           if (hasContactIdCol) pushCol("contact_id", contactId);
 
@@ -11900,7 +11900,7 @@ export const handler = async (event) => {
           if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields.email);
           if (dCols.has("email")) pushCol("email", fields.email);
           if (dCols.has("pais")) pushCol("pais", fields.pais);
-          if (dCols.has("origen_dato")) pushCol("origen_dato", fields.origenDato || "Manual");
+          if (dCols.has("origen_dato")) pushCol("origen_dato", fields.origenDato || null);
           if (dCols.has("estado")) pushCol("estado", "nuevo");
           if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
 
