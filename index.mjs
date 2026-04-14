@@ -7865,7 +7865,7 @@ export const handler = async (event) => {
               AND (
                 ($2::text IS NOT NULL AND regexp_replace(telefono, '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g'))
                 OR ($3::text IS NOT NULL AND regexp_replace(celular, '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g'))
-                OR ($4::text IS NOT NULL AND lower(correo_electronico) = lower($4))
+                OR ($4::text IS NOT NULL AND lower(email) = lower($4))
               )
             LIMIT 1
             `,
@@ -7901,7 +7901,7 @@ export const handler = async (event) => {
           `
           INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
-            correo_electronico, fecha_nacimiento,
+            email, fecha_nacimiento,
             origen_dato, estado, organization_id
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           RETURNING id
