@@ -7623,6 +7623,12 @@ export const handler = async (event) => {
     ),
     authorizerKeys: Object.keys(event?.requestContext?.authorizer || {})
   });
+  console.log("[DEBUG_PATH]", JSON.stringify({
+    method,
+    path,
+    rawPath: event?.rawPath,
+    pathParameters: event?.pathParameters
+  }));
 
   if (method === "GET" && path.endsWith("/health")) {
     return json(200, {
