@@ -7834,6 +7834,7 @@ export const handler = async (event) => {
   }
 
   // POST /webhooks/meta-sheet — ingesta desde n8n/Google Sheets
+  console.log("[DEBUG_REACH_METASHEET]", method, path.endsWith("/webhooks/meta-sheet"));
   if (method === "POST" && path.endsWith("/webhooks/meta-sheet")) {
     try {
       const body = safeParseBody(event);
