@@ -7844,16 +7844,23 @@ export const handler = async (event) => {
       if (!body) return json(200, { ok: true, skipped: true });
 
       const defaultOrgId = process.env.DEFAULT_ORGANIZATION_ID || "9223d62d-f558-4f4c-b9bd-9dcea9888a0e";
+      console.log("[DEBUG_1]", "defaultOrgId", defaultOrgId);
 
       // Parsear campos
       const rawNombre = normalizeText(body?.full_name || body?.nombre || "");
+      console.log("[DEBUG_2]", "rawNombre", rawNombre);
       const parts = rawNombre ? rawNombre.split(" ") : [];
       const nombre = parts[0] || null;
       const apellido = parts.slice(1).join(" ") || null;
+      console.log("[DEBUG_3]", "nombre", nombre, "apellido", apellido);
       const telefono = normalizePhone(body?.phone_number || body?.telefono);
+      console.log("[DEBUG_4]", "telefono", telefono);
       const celular = normalizePhone(body?.celular);
+      console.log("[DEBUG_5]", "celular", celular);
       const email = normalizeEmail(body?.email || body?.correo);
+      console.log("[DEBUG_6]", "email", email);
       const fechaNacimiento = parseDateMDY(body?.date_of_birth || body?.fecha_nacimiento);
+      console.log("[DEBUG_7]", "fechaNacimiento", fechaNacimiento);
       const origenDato = normalizeText(body?.origen_dato) || "facebook";
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
