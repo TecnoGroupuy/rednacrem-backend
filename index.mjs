@@ -7873,6 +7873,7 @@ export const handler = async (event) => {
       console.log("[DEBUG_8]", "connecting to db");
       await client.connect();
       console.log("[DEBUG_9]", "db connected");
+      let result;
       try {
         const insertRes = await client.query(
           `
@@ -7890,10 +7891,11 @@ export const handler = async (event) => {
           ]
         );
         console.log("[DEBUG_INSERT]", insertRes.rows[0]?.id);
-        return json(200, { ok: true, id: insertRes.rows[0]?.id });
+        result = { ok: true, id: insertRes.rows[0]?.id };
       } finally {
         await client.end();
       }
+      return json(200, result);
     } catch (error) {
       console.error("[DEBUG_CATCH]", error?.message, error?.code);
       return json(200, { ok: true, error: error.message });
