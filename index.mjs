@@ -11,7 +11,7 @@ import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
-import { normalizePhone } from "./src/lib/validation.js";
+import { normalizePhone as normalizePhoneValidation } from "./src/lib/validation.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
 import { emitRealtime } from "./src/monitoring/realtimeBus.js";
 import { findCurrentUserFromClaims } from "./src/services/userService.js";
@@ -527,6 +527,25 @@ function splitFullName(value) {
   if (parts.length === 1) return { nombre: parts[0], apellido: "" };
   return { nombre: parts.slice(0, -1).join(" "), apellido: parts.slice(-1).join(" ") };
 }
+
+// --- HELPERS CAMPANA ---------------------------------------------------------
+const normalizePhone = (value) => {
+  if (!value) return null;
+  return String(value)
+    .replace(/^p:/i, "")
+    .replace(/\s+/g, "")
+    .replace(/[^\d+]/g, "")
+    .trim() || null;
+};
+
+const parseDateMDY = (value) => {
+  if (!value) return null;
+  const parts = String(value).split("/");
+  if (parts.length !== 3) return null;
+  const [month, day, year] = parts;
+  if (!month || !day || !year) return null;
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+};
 
 let userProfileColumnsReady = false;
 async function ensureUserProfileColumns(client) {
@@ -7805,6 +7824,184 @@ export const handler = async (event) => {
     } catch (error) {
       console.error("Meta webhook error:", error);
       return json(200, { ok: true }); // Siempre 200 a Meta aunque falle
+    }
+  }
+
+  // POST /webhooks/meta-sheet — ingesta desde n8n/Google Sheets
+  if (method === "POST" && path.endsWith("/webhooks/meta-sheet")) {
+    try {
+      const body = safeParseBody(event);
+      if (!body) return json(200, { ok: true, skipped: true });
+
+      const defaultOrgId = process.env.DEFAULT_ORGANIZATION_ID || "9223d62d-f558-4f4c-b9bd-9dcea9888a0e";
+
+      // Parsear campos
+      const rawNombre = normalizeText(body?.full_name || body?.nombre || "");
+      const parts = rawNombre ? rawNombre.split(" ") : [];
+      const nombre = parts[0] || null;
+      const apellido = parts.slice(1).join(" ") || null;
+      const telefono = normalizePhone(body?.phone_number || body?.telefono);
+      const celular = normalizePhone(body?.celular);
+      const email = normalizeEmail(body?.email || body?.correo);
+      const fechaNacimiento = parseDateMDY(body?.date_of_birth || body?.fecha_nacimiento);
+      const origenDato = normalizeText(body?.origen_dato) || "facebook";
+      const campana = normalizeText(body?.campaign_name || body?.campana) || null;
+      const formulario = normalizeText(body?.form_name || body?.formulario) || null;
+
+      if (!nombre && !telefono && !email) {
+        return json(200, { ok: true, skipped: true, reason: "sin_datos" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        // -- Detectar duplicado en datos_para_trabajar --
+        let isDuplicate = false;
+        if (telefono || celular || email) {
+          const dupRes = await client.query(
+            `
+            SELECT id FROM datos_para_trabajar
+            WHERE organization_id = $1
+              AND (
+                ($2::text IS NOT NULL AND regexp_replace(telefono, '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g'))
+                OR ($3::text IS NOT NULL AND regexp_replace(celular, '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g'))
+                OR ($4::text IS NOT NULL AND lower(correo_electronico) = lower($4))
+              )
+            LIMIT 1
+            `,
+            [defaultOrgId, telefono, celular, email]
+          );
+          if (dupRes.rows.length) isDuplicate = true;
+        }
+
+        // -- Detectar si ya es cliente en contacts --
+        let isClient = false;
+        if (!isDuplicate && (telefono || celular || email)) {
+          const clientRes = await client.query(
+            `
+            SELECT id FROM contacts
+            WHERE organization_id = $1
+              AND (
+                ($2::text IS NOT NULL AND regexp_replace(telefono, '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g'))
+                OR ($3::text IS NOT NULL AND regexp_replace(celular, '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g'))
+                OR ($4::text IS NOT NULL AND lower(email) = lower($4))
+              )
+            LIMIT 1
+            `,
+            [defaultOrgId, telefono, celular, email]
+          );
+          if (clientRes.rows.length) isClient = true;
+        }
+
+        const estado = (isDuplicate || isClient) ? "bloqueado" : "nuevo";
+        const bloqueadoRazon = isDuplicate ? "duplicado" : isClient ? "ya_cliente" : null;
+
+        // -- Insertar en datos_para_trabajar --
+        const insertRes = await client.query(
+          `
+          INSERT INTO datos_para_trabajar (
+            nombre, apellido, telefono, celular,
+            correo_electronico, fecha_nacimiento,
+            origen_dato, estado, organization_id
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING id
+          `,
+          [
+            nombre, apellido, telefono, celular,
+            email, fechaNacimiento,
+            origenDato, estado, defaultOrgId
+          ]
+        );
+
+        const leadId = insertRes.rows[0]?.id;
+        if (!leadId) return json(200, { ok: true, skipped: true });
+
+        // -- Si es nuevo, asignar al lote Meta y distribuir --
+        if (estado === "nuevo") {
+          const batchRes = await client.query(
+            `
+            SELECT id FROM lead_batches
+            WHERE nombre = 'Meta'
+              AND estado IN ('activo', 'asignado')
+              AND organization_id = $1
+            ORDER BY created_at DESC LIMIT 1
+            `,
+            [defaultOrgId]
+          );
+
+          const batchId = batchRes.rows[0]?.id || null;
+
+          if (batchId) {
+            const sellersRes = await client.query(
+              `
+              SELECT seller_id FROM lead_batch_sellers
+              WHERE batch_id = $1 ORDER BY seller_id ASC
+              `,
+              [batchId]
+            );
+
+            const sellers = sellersRes.rows.map((r) => r.seller_id);
+
+            await client.query(
+              `
+              INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
+              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
+              `,
+              [batchId, leadId, defaultOrgId]
+            );
+
+            let assignedTo = null;
+            if (sellers.length) {
+              const countsRes = await client.query(
+                `
+                SELECT assigned_to, COUNT(*) AS total
+                FROM lead_contact_status
+                WHERE batch_id = $1
+                GROUP BY assigned_to
+                `,
+                [batchId]
+              );
+
+              const counts = {};
+              for (const row of countsRes.rows) {
+                counts[row.assigned_to] = parseInt(row.total, 10);
+              }
+              assignedTo = sellers.reduce((min, s) =>
+                (counts[s] || 0) < (counts[min] || 0) ? s : min
+              , sellers[0]);
+            }
+
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id, estado_venta, intentos,
+                batch_id, assigned_to, organization_id
+              ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
+              ON CONFLICT (contact_id) DO UPDATE SET
+                batch_id = $2, assigned_to = $3,
+                estado_venta = 'nuevo', updated_at = now()
+              `,
+              [leadId, batchId, assignedTo, defaultOrgId]
+            );
+          }
+        }
+
+        return json(200, {
+          ok: true,
+          id: leadId,
+          estado,
+          duplicado: isDuplicate,
+          ya_cliente: isClient,
+          bloqueado_razon: bloqueadoRazon,
+          campana,
+          formulario
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      console.error("meta-sheet webhook error:", error);
+      return json(200, { ok: true, error: error.message });
     }
   }
 
@@ -15480,6 +15677,121 @@ export const handler = async (event) => {
     }
   }
 
+  // GET /campanas/stats — métricas del dashboard de campañas
+  if (method === "GET" && path.endsWith("/campanas/stats")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "director", "supervisor"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+
+      const periodo = event.queryStringParameters?.periodo || "dia";
+      const origenDato = event.queryStringParameters?.origen_dato || "facebook";
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        // Definir rango de fechas
+        let dateFilter = "";
+        if (periodo === "dia") dateFilter = "AND d.created_at >= now() - interval '1 day'";
+        else if (periodo === "semana") dateFilter = "AND d.created_at >= now() - interval '7 days'";
+        else if (periodo === "mes") dateFilter = "AND d.created_at >= now() - interval '30 days'";
+
+        const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
+
+        // Métricas generales
+        const metricsRes = await client.query(
+          `
+          SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE d.estado = 'nuevo') AS nuevos,
+            COUNT(*) FILTER (WHERE d.estado = 'bloqueado') AS bloqueados,
+            COUNT(*) FILTER (WHERE d.estado = 'trabajado') AS trabajados,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'no_contesta') AS no_contesta,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'dato_erroneo') AS datos_erroneos,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rellamar') AS rellamar,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento
+          FROM datos_para_trabajar d
+          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
+          WHERE d.origen_dato = $1
+          ${orgFilter}
+          ${dateFilter}
+          `,
+          [origenDato]
+        );
+
+        // Ingresos por día (últimos 30 días)
+        const dailyRes = await client.query(
+          `
+          SELECT
+            DATE(d.created_at AT TIME ZONE 'America/Montevideo') AS fecha,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE d.estado = 'bloqueado') AS bloqueados,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos
+          FROM datos_para_trabajar d
+          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
+          WHERE d.origen_dato = $1
+            AND d.created_at >= now() - interval '30 days'
+            ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
+          GROUP BY DATE(d.created_at AT TIME ZONE 'America/Montevideo')
+          ORDER BY fecha DESC
+          `,
+          [origenDato]
+        );
+
+        // Distribución por vendedor
+        const vendedoresRes = await client.query(
+          `
+          SELECT
+            u.nombre,
+            u.apellido,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'no_contesta') AS no_contesta,
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados
+          FROM lead_contact_status lcs
+          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          JOIN users u ON u.id = lcs.assigned_to
+          WHERE d.origen_dato = $1
+            ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
+            ${dateFilter.replace("d.created_at", "d.created_at")}
+          GROUP BY u.id, u.nombre, u.apellido
+          ORDER BY total DESC
+          `,
+          [origenDato]
+        );
+
+        return json(200, {
+          ok: true,
+          periodo,
+          origen_dato: origenDato,
+          metricas: metricsRes.rows[0],
+          por_dia: dailyRes.rows,
+          por_vendedor: vendedoresRes.rows
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load campaign stats", error: error.message });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/api/supervisor/team-summary")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -18753,7 +19065,7 @@ export const handler = async (event) => {
         nombre: validation.data.nombre,
         apellido: validation.data.apellido,
         email: validation.data.email,
-        telefono: normalizePhone(validation.data.telefono),
+        telefono: normalizePhoneValidation(validation.data.telefono),
         role: validation.data.rol,
         status: validation.data.status,
         reason: validation.data.reason || undefined
@@ -18824,7 +19136,7 @@ export const handler = async (event) => {
         nombre: validation.data.nombre,
         apellido: validation.data.apellido,
         email: validation.data.email,
-        telefono: normalizePhone(validation.data.telefono),
+        telefono: normalizePhoneValidation(validation.data.telefono),
         role: validation.data.rol,
         status: validation.data.status,
         reason: validation.data.reason || undefined
