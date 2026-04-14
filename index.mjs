@@ -7874,44 +7874,6 @@ export const handler = async (event) => {
       await client.connect();
       console.log("[DEBUG_9]", "db connected");
       try {
-        // -- Detectar duplicado en datos_para_trabajar --
-        let isDuplicate = false;
-        if (telefono || celular || email) {
-          const dupRes = await client.query(
-            `SELECT id FROM datos_para_trabajar
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND telefono = $2)
-                 OR ($3::text IS NOT NULL AND celular = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [defaultOrgId, telefono, celular, email]
-          );
-          if (dupRes.rows.length) isDuplicate = true;
-        }
-
-        // -- Detectar si ya es cliente en contacts --
-        let isClient = false;
-        if (!isDuplicate && (telefono || celular || email)) {
-          const clientRes = await client.query(
-            `SELECT id FROM contacts
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND telefono = $2)
-                 OR ($3::text IS NOT NULL AND celular = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [defaultOrgId, telefono, celular, email]
-          );
-          if (clientRes.rows.length) isClient = true;
-        }
-
-        const estado = (isDuplicate || isClient) ? "bloqueado" : "nuevo";
-        const bloqueadoRazon = isDuplicate ? "duplicado" : isClient ? "ya_cliente" : null;
-
-        // -- Insertar en datos_para_trabajar --
         const insertRes = await client.query(
           `
           INSERT INTO datos_para_trabajar (
@@ -7924,93 +7886,11 @@ export const handler = async (event) => {
           [
             nombre, apellido, telefono, celular,
             email, fechaNacimiento,
-            origenDato, estado, defaultOrgId
+            origenDato, "nuevo", defaultOrgId
           ]
         );
-
-        const leadId = insertRes.rows[0]?.id;
-        if (!leadId) return json(200, { ok: true, skipped: true });
-
-        // -- Si es nuevo, asignar al lote Meta y distribuir --
-        if (estado === "nuevo") {
-          const batchRes = await client.query(
-            `
-            SELECT id FROM lead_batches
-            WHERE nombre = 'Meta'
-              AND estado IN ('activo', 'asignado')
-              AND organization_id = $1
-            ORDER BY created_at DESC LIMIT 1
-            `,
-            [defaultOrgId]
-          );
-
-          const batchId = batchRes.rows[0]?.id || null;
-
-          if (batchId) {
-            const sellersRes = await client.query(
-              `
-              SELECT seller_id FROM lead_batch_sellers
-              WHERE batch_id = $1 ORDER BY seller_id ASC
-              `,
-              [batchId]
-            );
-
-            const sellers = sellersRes.rows.map((r) => r.seller_id);
-
-            await client.query(
-              `
-              INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
-              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
-              `,
-              [batchId, leadId, defaultOrgId]
-            );
-
-            let assignedTo = null;
-            if (sellers.length) {
-              const countsRes = await client.query(
-                `
-                SELECT assigned_to, COUNT(*) AS total
-                FROM lead_contact_status
-                WHERE batch_id = $1
-                GROUP BY assigned_to
-                `,
-                [batchId]
-              );
-
-              const counts = {};
-              for (const row of countsRes.rows) {
-                counts[row.assigned_to] = parseInt(row.total, 10);
-              }
-              assignedTo = sellers.reduce((min, s) =>
-                (counts[s] || 0) < (counts[min] || 0) ? s : min
-              , sellers[0]);
-            }
-
-            await client.query(
-              `
-              INSERT INTO lead_contact_status (
-                contact_id, estado_venta, intentos,
-                batch_id, assigned_to, organization_id
-              ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
-              ON CONFLICT (contact_id) DO UPDATE SET
-                batch_id = $2, assigned_to = $3,
-                estado_venta = 'nuevo', updated_at = now()
-              `,
-              [leadId, batchId, assignedTo, defaultOrgId]
-            );
-          }
-        }
-
-        return json(200, {
-          ok: true,
-          id: leadId,
-          estado,
-          duplicado: isDuplicate,
-          ya_cliente: isClient,
-          bloqueado_razon: bloqueadoRazon,
-          campana,
-          formulario
-        });
+        console.log("[DEBUG_INSERT]", insertRes.rows[0]?.id);
+        return json(200, { ok: true, id: insertRes.rows[0]?.id });
       } finally {
         await client.end();
       }
