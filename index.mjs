@@ -7878,16 +7878,14 @@ export const handler = async (event) => {
         let isDuplicate = false;
         if (telefono || celular || email) {
           const dupRes = await client.query(
-            `
-            SELECT id FROM datos_para_trabajar
-            WHERE organization_id = $1
-              AND (
-                ($2::text IS NOT NULL AND regexp_replace(telefono, '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g'))
-                OR ($3::text IS NOT NULL AND regexp_replace(celular, '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g'))
-                OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-              )
-            LIMIT 1
-            `,
+            `SELECT id FROM datos_para_trabajar
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND telefono = $2)
+                 OR ($3::text IS NOT NULL AND celular = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
+               )
+             LIMIT 1`,
             [defaultOrgId, telefono, celular, email]
           );
           if (dupRes.rows.length) isDuplicate = true;
@@ -7897,16 +7895,14 @@ export const handler = async (event) => {
         let isClient = false;
         if (!isDuplicate && (telefono || celular || email)) {
           const clientRes = await client.query(
-            `
-            SELECT id FROM contacts
-            WHERE organization_id = $1
-              AND (
-                ($2::text IS NOT NULL AND regexp_replace(telefono, '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g'))
-                OR ($3::text IS NOT NULL AND regexp_replace(celular, '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g'))
-                OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-              )
-            LIMIT 1
-            `,
+            `SELECT id FROM contacts
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND telefono = $2)
+                 OR ($3::text IS NOT NULL AND celular = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
+               )
+             LIMIT 1`,
             [defaultOrgId, telefono, celular, email]
           );
           if (clientRes.rows.length) isClient = true;
