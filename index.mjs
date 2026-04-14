@@ -7623,12 +7623,6 @@ export const handler = async (event) => {
     ),
     authorizerKeys: Object.keys(event?.requestContext?.authorizer || {})
   });
-  console.log("[DEBUG_PATH]", JSON.stringify({
-    method,
-    path,
-    rawPath: event?.rawPath,
-    pathParameters: event?.pathParameters
-  }));
 
   if (method === "GET" && path.endsWith("/health")) {
     return json(200, {
@@ -7834,33 +7828,22 @@ export const handler = async (event) => {
   }
 
   // POST /webhooks/meta-sheet — ingesta desde n8n/Google Sheets
-  console.log("[DEBUG_REACH_METASHEET]", method, path.endsWith("/webhooks/meta-sheet"));
   if (method === "POST" && path.endsWith("/webhooks/meta-sheet")) {
-    console.log("[DEBUG_METASHEET_ENTER]", "entered block");
     try {
-      console.log("[DEBUG_METASHEET_BODY]", typeof event.body, String(event.body || "").slice(0, 100));
       const body = safeParseBody(event);
-      console.log("[DEBUG_METASHEET_PARSED]", JSON.stringify(body)?.slice(0, 100));
       if (!body) return json(200, { ok: true, skipped: true });
 
       const defaultOrgId = process.env.DEFAULT_ORGANIZATION_ID || "9223d62d-f558-4f4c-b9bd-9dcea9888a0e";
-      console.log("[DEBUG_1]", "defaultOrgId", defaultOrgId);
 
       // Parsear campos
       const rawNombre = normalizeText(body?.full_name || body?.nombre || "");
-      console.log("[DEBUG_2]", "rawNombre", rawNombre);
       const parts = rawNombre ? rawNombre.split(" ") : [];
       const nombre = parts[0] || null;
       const apellido = parts.slice(1).join(" ") || null;
-      console.log("[DEBUG_3]", "nombre", nombre, "apellido", apellido);
       const telefono = normalizePhone(body?.phone_number || body?.telefono);
-      console.log("[DEBUG_4]", "telefono", telefono);
       const celular = normalizePhone(body?.celular);
-      console.log("[DEBUG_5]", "celular", celular);
       const email = normalizeEmail(body?.email || body?.correo);
-      console.log("[DEBUG_6]", "email", email);
       const fechaNacimiento = parseDateMDY(body?.date_of_birth || body?.fecha_nacimiento);
-      console.log("[DEBUG_7]", "fechaNacimiento", fechaNacimiento);
       const origenDato = normalizeText(body?.origen_dato) || "facebook";
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
@@ -7870,9 +7853,7 @@ export const handler = async (event) => {
       }
 
       const client = createDbClient();
-      console.log("[DEBUG_8]", "connecting to db");
       await client.connect();
-      console.log("[DEBUG_9]", "db connected");
       let result;
       try {
         const insertRes = await client.query(
@@ -7890,14 +7871,13 @@ export const handler = async (event) => {
             origenDato, "nuevo", defaultOrgId
           ]
         );
-        console.log("[DEBUG_INSERT]", insertRes.rows[0]?.id);
         result = { ok: true, id: insertRes.rows[0]?.id };
       } finally {
         await client.end();
       }
       return json(200, result);
     } catch (error) {
-      console.error("[DEBUG_CATCH]", error?.message, error?.code);
+      console.error("meta-sheet webhook error:", error);
       return json(200, { ok: true, error: error.message });
     }
   }
