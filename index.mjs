@@ -7637,6 +7637,177 @@ export const handler = async (event) => {
     }
   }
 
+  // ─── WEBHOOK META LEADS ───────────────────────────────────────────────────
+  // GET /webhooks/meta — verificación del webhook por Meta
+  if (method === "GET" && path.endsWith("/webhooks/meta")) {
+    const params = event.queryStringParameters || {};
+    const mode = params["hub.mode"];
+    const token = params["hub.verify_token"];
+    const challenge = params["hub.challenge"];
+
+    if (mode === "subscribe" && token === process.env.META_VERIFY_TOKEN) {
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "text/plain" },
+        body: challenge
+      };
+    }
+    return json(403, { ok: false, message: "Forbidden" });
+  }
+
+  // POST /webhooks/meta — recibir leads
+  if (method === "POST" && path.endsWith("/webhooks/meta")) {
+    try {
+      const body = safeParseBody(event);
+      if (!body) return json(200, { ok: true }); // Siempre 200 a Meta
+
+      const entries = body?.entry || [];
+      const defaultOrgId = process.env.DEFAULT_ORGANIZATION_ID || "9223d62d-f558-4f4c-b9bd-9dcea9888a0e";
+
+      for (const entry of entries) {
+        const changes = entry?.changes || [];
+        for (const change of changes) {
+          if (change?.field !== "leadgen") continue;
+          const leadgenId = change?.value?.leadgen_id;
+          const pageId = change?.value?.page_id;
+          if (!leadgenId || !pageId) continue;
+
+          // Obtener datos del lead desde Meta Graph API
+          const pageToken = process.env.META_PAGE_ACCESS_TOKEN;
+          if (!pageToken || pageToken === "pendiente") continue;
+
+          const leadRes = await fetch(
+            `https://graph.facebook.com/v19.0/${leadgenId}?access_token=${pageToken}`
+          );
+          const leadData = await leadRes.json();
+          if (!leadData || leadData.error) continue;
+
+          // Parsear campos del formulario
+          const fieldData = leadData.field_data || [];
+          const getField = (name) => {
+            const f = fieldData.find((x) =>
+              String(x.name || "").toLowerCase().includes(name)
+            );
+            return f?.values?.[0] || null;
+          };
+
+          const nombre = normalizeText(getField("first_name") || getField("nombre") || getField("name")) || null;
+          const apellido = normalizeText(getField("last_name") || getField("apellido")) || null;
+          const telefono = normalizeText(getField("phone_number") || getField("telefono") || getField("phone")) || null;
+          const celular = normalizeText(getField("celular") || getField("mobile")) || null;
+          const email = normalizeEmail(getField("email") || getField("correo")) || null;
+
+          if (!nombre && !telefono && !email) continue;
+
+          const client = createDbClient();
+          await client.connect();
+          try {
+            // Buscar el lote "Meta" activo
+            const batchRes = await client.query(
+              `
+              SELECT id FROM lead_batches
+              WHERE nombre = 'Meta'
+                AND estado IN ('activo', 'asignado')
+                AND organization_id = $1
+              ORDER BY created_at DESC
+              LIMIT 1
+              `,
+              [defaultOrgId]
+            );
+
+            const batchId = batchRes.rows[0]?.id || null;
+            if (!batchId) continue; // Si no hay lote Meta, ignorar
+
+            // Obtener vendedores del lote para round-robin
+            const sellersRes = await client.query(
+              `
+              SELECT seller_id FROM lead_batch_sellers
+              WHERE batch_id = $1
+              ORDER BY seller_id ASC
+              `,
+              [batchId]
+            );
+
+            const sellers = sellersRes.rows.map((r) => r.seller_id);
+
+            // Insertar en datos_para_trabajar
+            const insertRes = await client.query(
+              `
+              INSERT INTO datos_para_trabajar (
+                nombre, apellido, telefono, celular,
+                correo_electronico, origen_dato, estado, organization_id
+              ) VALUES ($1, $2, $3, $4, $5, 'facebook', 'nuevo', $6)
+              RETURNING id
+              `,
+              [nombre, apellido, telefono, celular, email, defaultOrgId]
+            );
+
+            const leadId = insertRes.rows[0]?.id;
+            if (!leadId) continue;
+
+            // Insertar en lead_batch_contacts
+            await client.query(
+              `
+              INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
+              VALUES ($1, $2, $3)
+              ON CONFLICT DO NOTHING
+              `,
+              [batchId, leadId, defaultOrgId]
+            );
+
+            // Asignar vendedor round-robin
+            let assignedTo = null;
+            if (sellers.length) {
+              // Contar cuántos leads tiene cada vendedor en este lote
+              const countsRes = await client.query(
+                `
+                SELECT assigned_to, COUNT(*) AS total
+                FROM lead_contact_status
+                WHERE batch_id = $1
+                GROUP BY assigned_to
+                `,
+                [batchId]
+              );
+
+              const counts = {};
+              for (const row of countsRes.rows) {
+                counts[row.assigned_to] = parseInt(row.total, 10);
+              }
+
+              // Asignar al vendedor con menos leads
+              assignedTo = sellers.reduce((min, s) =>
+                (counts[s] || 0) < (counts[min] || 0) ? s : min
+              , sellers[0]);
+            }
+
+            // Insertar en lead_contact_status
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id, estado_venta, intentos,
+                batch_id, assigned_to, organization_id
+              ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
+              ON CONFLICT (contact_id) DO UPDATE SET
+                batch_id = $2,
+                assigned_to = $3,
+                estado_venta = 'nuevo',
+                updated_at = now()
+              `,
+              [leadId, batchId, assignedTo, defaultOrgId]
+            );
+          } finally {
+            await client.end();
+          }
+        }
+      }
+
+      return json(200, { ok: true });
+    } catch (error) {
+      console.error("Meta webhook error:", error);
+      return json(200, { ok: true }); // Siempre 200 a Meta aunque falle
+    }
+  }
+
   if (method === "GET" && (path.endsWith("/auth/me") || path.endsWith("/me"))) {
     const authUser = getAuthUser(event);
 
