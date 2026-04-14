@@ -7836,8 +7836,11 @@ export const handler = async (event) => {
   // POST /webhooks/meta-sheet — ingesta desde n8n/Google Sheets
   console.log("[DEBUG_REACH_METASHEET]", method, path.endsWith("/webhooks/meta-sheet"));
   if (method === "POST" && path.endsWith("/webhooks/meta-sheet")) {
+    console.log("[DEBUG_METASHEET_ENTER]", "entered block");
     try {
+      console.log("[DEBUG_METASHEET_BODY]", typeof event.body, String(event.body || "").slice(0, 100));
       const body = safeParseBody(event);
+      console.log("[DEBUG_METASHEET_PARSED]", JSON.stringify(body)?.slice(0, 100));
       if (!body) return json(200, { ok: true, skipped: true });
 
       const defaultOrgId = process.env.DEFAULT_ORGANIZATION_ID || "9223d62d-f558-4f4c-b9bd-9dcea9888a0e";
