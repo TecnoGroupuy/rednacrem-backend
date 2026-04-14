@@ -7870,7 +7870,9 @@ export const handler = async (event) => {
       }
 
       const client = createDbClient();
+      console.log("[DEBUG_8]", "connecting to db");
       await client.connect();
+      console.log("[DEBUG_9]", "db connected");
       try {
         // -- Detectar duplicado en datos_para_trabajar --
         let isDuplicate = false;
@@ -8017,7 +8019,7 @@ export const handler = async (event) => {
         await client.end();
       }
     } catch (error) {
-      console.error("meta-sheet webhook error:", error);
+      console.error("[DEBUG_CATCH]", error?.message, error?.code);
       return json(200, { ok: true, error: error.message });
     }
   }
