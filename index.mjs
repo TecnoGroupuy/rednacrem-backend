@@ -15629,8 +15629,9 @@ export const handler = async (event) => {
         throw error;
       }
 
+      const META_BATCH_ID = "159a3982-6dfe-48dd-9658-bc4fb54effc5";
       const periodo = event.queryStringParameters?.periodo || "dia";
-      const origenDato = event.queryStringParameters?.origen_dato || "facebook";
+      const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
 
       const client = createDbClient();
       await client.connect();
@@ -15659,11 +15660,17 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
-          WHERE d.origen_dato = $1
+          WHERE EXISTS (
+            SELECT 1
+            FROM lead_batch_contacts lbc
+            WHERE lbc.contact_id = d.id
+              AND lbc.batch_id = $1
+          )
+            AND lower(coalesce(d.origen_dato, '')) = $2
           ${orgFilter}
           ${dateFilter}
           `,
-          [origenDato]
+          [META_BATCH_ID, origenDato]
         );
 
         // Ingresos por día (últimos 30 días)
@@ -15676,13 +15683,19 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
-          WHERE d.origen_dato = $1
+          WHERE EXISTS (
+            SELECT 1
+            FROM lead_batch_contacts lbc
+            WHERE lbc.contact_id = d.id
+              AND lbc.batch_id = $1
+          )
+            AND lower(coalesce(d.origen_dato, '')) = $2
             AND d.created_at >= now() - interval '30 days'
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
           GROUP BY DATE(d.created_at AT TIME ZONE 'America/Montevideo')
           ORDER BY fecha DESC
           `,
-          [origenDato]
+          [META_BATCH_ID, origenDato]
         );
 
         // Distribución por vendedor
@@ -15698,13 +15711,19 @@ export const handler = async (event) => {
           FROM lead_contact_status lcs
           JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           JOIN users u ON u.id = lcs.assigned_to
-          WHERE d.origen_dato = $1
+          WHERE EXISTS (
+            SELECT 1
+            FROM lead_batch_contacts lbc
+            WHERE lbc.contact_id = d.id
+              AND lbc.batch_id = $1
+          )
+            AND lower(coalesce(d.origen_dato, '')) = $2
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
             ${dateFilter.replace("d.created_at", "d.created_at")}
           GROUP BY u.id, u.nombre, u.apellido
           ORDER BY total DESC
           `,
-          [origenDato]
+          [META_BATCH_ID, origenDato]
         );
 
         return json(200, {
