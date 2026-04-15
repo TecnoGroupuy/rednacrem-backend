@@ -7840,8 +7840,9 @@ export const handler = async (event) => {
       const parts = rawNombre ? rawNombre.split(" ") : [];
       const nombre = parts[0] || null;
       const apellido = parts.slice(1).join(" ") || null;
-      const telefono = normalizePhone(body?.phone_number || body?.telefono);
-      const celular = normalizePhone(body?.celular);
+      const stripUY = (n) => n ? n.replace(/^\+598/, '') : n;
+      const telefono = stripUY(normalizePhone(body?.phone_number || body?.telefono));
+      const celular = stripUY(normalizePhone(body?.celular));
       const email = normalizeEmail(body?.email || body?.correo);
       const fechaNacimiento = parseDateMDY(body?.date_of_birth || body?.fecha_nacimiento);
       const origenDato = normalizeText(body?.origen_dato) || "facebook";
