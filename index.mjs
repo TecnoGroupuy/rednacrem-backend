@@ -15671,6 +15671,88 @@ export const handler = async (event) => {
     }
   }
 
+  // GET /campanas/leads — tabla de leads de campaña
+  if (method === "GET" && path.endsWith("/campanas/leads")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "director", "supervisor"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+
+      const origenDato = event.queryStringParameters?.origen_dato || "facebook";
+      const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
+      const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
+      const offset = (page - 1) * limit;
+      const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const countRes = await client.query(
+          `
+          SELECT COUNT(*) AS total
+          FROM datos_para_trabajar d
+          WHERE d.origen_dato = $1 ${orgFilter}
+          `,
+          [origenDato]
+        );
+
+        const result = await client.query(
+          `
+          SELECT
+            d.id,
+            d.nombre,
+            d.apellido,
+            d.telefono,
+            d.celular,
+            d.email,
+            d.fecha_nacimiento,
+            d.estado,
+            d.origen_dato,
+            d.created_at,
+            lcs.estado_venta,
+            lcs.intentos,
+            lcs.ultimo_intento_at,
+            u.nombre AS vendedor_nombre,
+            u.apellido AS vendedor_apellido
+          FROM datos_para_trabajar d
+          LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
+          LEFT JOIN users u ON u.id = lcs.assigned_to
+          WHERE d.origen_dato = $1 ${orgFilter}
+          ORDER BY d.created_at DESC
+          LIMIT $2 OFFSET $3
+          `,
+          [origenDato, limit, offset]
+        );
+
+        return json(200, {
+          ok: true,
+          items: result.rows,
+          total: parseInt(countRes.rows[0].total, 10),
+          page,
+          limit
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load campaign leads", error: error.message });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/api/supervisor/team-summary")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
