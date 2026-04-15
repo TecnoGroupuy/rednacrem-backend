@@ -7840,7 +7840,12 @@ export const handler = async (event) => {
       const parts = rawNombre ? rawNombre.split(" ") : [];
       const nombre = parts[0] || null;
       const apellido = parts.slice(1).join(" ") || null;
-      const stripUY = (n) => n ? n.replace(/^\+598/, '') : n;
+      const stripUY = (n) => {
+        if (!n) return n;
+        n = n.replace(/^\+598/, '');
+        if (n.startsWith('9')) n = '0' + n;
+        return n;
+      };
       const telefono = stripUY(normalizePhone(body?.phone_number || body?.telefono));
       const celular = stripUY(normalizePhone(body?.celular));
       const email = normalizeEmail(body?.email || body?.correo);
