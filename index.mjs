@@ -7831,6 +7831,7 @@ export const handler = async (event) => {
   if (method === "POST" && path.endsWith("/webhooks/meta-sheet")) {
     try {
       const body = safeParseBody(event);
+      console.log("WEBHOOK BODY:", JSON.stringify(body));
       if (!body) return json(200, { ok: true, skipped: true });
 
       const defaultOrgId = process.env.DEFAULT_ORGANIZATION_ID || "9223d62d-f558-4f4c-b9bd-9dcea9888a0e";
@@ -7851,6 +7852,12 @@ export const handler = async (event) => {
       const email = normalizeEmail(body?.email || body?.correo);
       const parseDateFlexible = (val) => {
         if (!val) return null;
+        // Formato ISO 8601 con timezone: YYYY-MM-DDTHH:mm:ss-03:00
+        if (/^\d{4}-\d{2}-\d{2}T/.test(val)) {
+          const parsed = new Date(val);
+          if (Number.isNaN(parsed.getTime())) return null;
+          return parsed.toISOString();
+        }
         // Formato ISO: YYYY-MM-DD
         if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
         // Formato MDY: MM/DD/YYYY
@@ -7861,6 +7868,10 @@ export const handler = async (event) => {
         return null;
       };
       const fechaNacimiento = parseDateFlexible(body?.date_of_birth || body?.fecha_nacimiento);
+      const nota = normalizeText(body?.nota) || null;
+      const localidad = normalizeText(body?.localidad) || null;
+      const departamento = normalizeText(body?.departamento) || null;
+      const fechaLead = parseDateFlexible(body?.fecha_lead) || null;
       const origenDato = normalizeText(body?.origen_dato) || "facebook";
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
@@ -7927,13 +7938,18 @@ export const handler = async (event) => {
           `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
-            origen_dato, estado, organization_id
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            origen_dato, estado, organization_id,
+            nota, localidad, departamento, fecha_lead
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13
+          )
           RETURNING id`,
           [
             nombre, apellido, telefono, celular,
             email, fechaNacimiento,
-            origenDato, estado, defaultOrgId
+            origenDato, estado, defaultOrgId,
+            nota, localidad, departamento, fechaLead
           ]
         );
         const leadId = insertRes.rows[0]?.id;
