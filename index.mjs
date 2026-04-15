@@ -7853,18 +7853,16 @@ export const handler = async (event) => {
       }
 
       const client = createDbClient();
-      await client.connect();
-      let responseData;
+      let responseData = { ok: true, skipped: true };
       try {
+        await client.connect();
         const insertRes = await client.query(
-          `
-          INSERT INTO datos_para_trabajar (
+          `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
             origen_dato, estado, organization_id
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          RETURNING id
-          `,
+          RETURNING id`,
           [
             nombre, apellido, telefono, celular,
             email, fechaNacimiento,
@@ -7872,15 +7870,12 @@ export const handler = async (event) => {
           ]
         );
         const leadId = insertRes.rows[0]?.id;
-        responseData = {
-          ok: true,
-          id: leadId,
-          estado: "nuevo",
-          duplicado: false,
-          ya_cliente: false
-        };
+        responseData = { ok: true, id: leadId, estado: "nuevo" };
+      } catch (dbError) {
+        console.error("[DB_ERROR]", dbError?.message);
+        responseData = { ok: false, error: dbError?.message };
       } finally {
-        await client.end();
+        try { await client.end(); } catch {}
       }
       return json(200, responseData);
     } catch (error) {
