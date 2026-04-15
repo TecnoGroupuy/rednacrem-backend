@@ -15757,8 +15757,12 @@ export const handler = async (event) => {
           `
           SELECT COUNT(*) AS total
           FROM datos_para_trabajar d
-          JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
-          WHERE lbc.batch_id = $1
+          WHERE EXISTS (
+            SELECT 1
+            FROM lead_batch_contacts lbc
+            WHERE lbc.contact_id = d.id
+              AND lbc.batch_id = $1
+          )
             AND lower(coalesce(d.origen_dato, '')) = $2
           `,
           [META_BATCH_ID, origenDato]
@@ -15783,10 +15787,14 @@ export const handler = async (event) => {
             u.nombre AS vendedor_nombre,
             u.apellido AS vendedor_apellido
           FROM datos_para_trabajar d
-          JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
-          WHERE lbc.batch_id = $1
+          WHERE EXISTS (
+            SELECT 1
+            FROM lead_batch_contacts lbc
+            WHERE lbc.contact_id = d.id
+              AND lbc.batch_id = $1
+          )
             AND lower(coalesce(d.origen_dato, '')) = $2
           ORDER BY d.created_at DESC
           LIMIT $3 OFFSET $4
