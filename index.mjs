@@ -7870,6 +7870,58 @@ export const handler = async (event) => {
           ]
         );
         const leadId = insertRes.rows[0]?.id;
+        if (leadId) {
+          const batchRes = await client.query(
+            `SELECT id FROM lead_batches
+             WHERE nombre = 'Meta'
+               AND estado IN ('activo', 'asignado')
+               AND organization_id = $1
+             ORDER BY created_at DESC LIMIT 1`,
+            [defaultOrgId]
+          );
+          const batchId = batchRes.rows[0]?.id || null;
+
+          if (batchId) {
+            await client.query(
+              `INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
+               VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+              [batchId, leadId, defaultOrgId]
+            );
+
+            const sellersRes = await client.query(
+              `SELECT seller_id FROM lead_batch_sellers
+               WHERE batch_id = $1 ORDER BY seller_id ASC`,
+              [batchId]
+            );
+            const sellers = sellersRes.rows.map((r) => r.seller_id);
+
+            let assignedTo = null;
+            if (sellers.length) {
+              const countsRes = await client.query(
+                `SELECT assigned_to, COUNT(*) AS total
+                 FROM lead_contact_status
+                 WHERE batch_id = $1
+                 GROUP BY assigned_to`,
+                [batchId]
+              );
+              const counts = {};
+              for (const row of countsRes.rows) counts[row.assigned_to] = parseInt(row.total, 10);
+              assignedTo = sellers.reduce((min, s) =>
+                (counts[s] || 0) < (counts[min] || 0) ? s : min, sellers[0]);
+            }
+
+            await client.query(
+              `INSERT INTO lead_contact_status (
+                 contact_id, estado_venta, intentos,
+                 batch_id, assigned_to, organization_id
+               ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
+               ON CONFLICT (contact_id) DO UPDATE SET
+                 batch_id = $2, assigned_to = $3,
+                 estado_venta = 'nuevo', updated_at = now()`,
+              [leadId, batchId, assignedTo, defaultOrgId]
+            );
+          }
+        }
         responseData = { ok: true, id: leadId, estado: "nuevo" };
       } catch (dbError) {
         console.error("[DB_ERROR]", dbError?.message);
