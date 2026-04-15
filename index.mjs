@@ -15696,22 +15696,21 @@ export const handler = async (event) => {
       const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
       const offset = (page - 1) * limit;
-      const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
+      const orgFilter = organizationId ? "AND d.organization_id = $2" : "";
 
       const client = createDbClient();
       await client.connect();
       try {
-        const countRes = await client.query(
-          `
+        const countSql = `
           SELECT COUNT(*) AS total
           FROM datos_para_trabajar d
-          WHERE d.origen_dato = $1 ${orgFilter}
-          `,
-          [origenDato]
-        );
+          WHERE d.origen_dato = $1
+          ${orgFilter}
+        `;
+        const countParams = organizationId ? [origenDato, organizationId] : [origenDato];
+        const countRes = await client.query(countSql, countParams);
 
-        const result = await client.query(
-          `
+        const leadsSql = `
           SELECT
             d.id,
             d.nombre,
@@ -15731,12 +15730,15 @@ export const handler = async (event) => {
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
-          WHERE d.origen_dato = $1 ${orgFilter}
+          WHERE d.origen_dato = $1
+          ${orgFilter}
           ORDER BY d.created_at DESC
-          LIMIT $2 OFFSET $3
-          `,
-          [origenDato, limit, offset]
-        );
+          LIMIT $${organizationId ? "3" : "2"} OFFSET $${organizationId ? "4" : "3"}
+        `;
+        const leadsParams = organizationId
+          ? [origenDato, organizationId, limit, offset]
+          : [origenDato, limit, offset];
+        const result = await client.query(leadsSql, leadsParams);
 
         return json(200, {
           ok: true,
