@@ -7849,7 +7849,18 @@ export const handler = async (event) => {
       const telefono = stripUY(normalizePhone(body?.phone_number || body?.telefono));
       const celular = stripUY(normalizePhone(body?.celular));
       const email = normalizeEmail(body?.email || body?.correo);
-      const fechaNacimiento = parseDateMDY(body?.date_of_birth || body?.fecha_nacimiento);
+      const parseDateFlexible = (val) => {
+        if (!val) return null;
+        // Formato ISO: YYYY-MM-DD
+        if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+        // Formato MDY: MM/DD/YYYY
+        if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(val)) {
+          const [m, d, y] = val.split('/');
+          return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+        }
+        return null;
+      };
+      const fechaNacimiento = parseDateFlexible(body?.date_of_birth || body?.fecha_nacimiento);
       const origenDato = normalizeText(body?.origen_dato) || "facebook";
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
