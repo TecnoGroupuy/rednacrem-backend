@@ -15629,7 +15629,6 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const META_BATCH_ID = "159a3982-6dfe-48dd-9658-bc4fb54effc5";
       const periodo = event.queryStringParameters?.periodo || "dia";
       const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
 
@@ -15663,14 +15662,16 @@ export const handler = async (event) => {
           WHERE EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lbc.batch_id = $1
+              AND lb.nombre = 'Meta'
+              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
-            AND lower(coalesce(d.origen_dato, '')) = $2
+            AND lower(coalesce(d.origen_dato, '')) = $1
           ${orgFilter}
           ${dateFilter}
           `,
-          [META_BATCH_ID, origenDato]
+          [origenDato]
         );
 
         // Ingresos por día (últimos 30 días)
@@ -15686,16 +15687,18 @@ export const handler = async (event) => {
           WHERE EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lbc.batch_id = $1
+              AND lb.nombre = 'Meta'
+              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
-            AND lower(coalesce(d.origen_dato, '')) = $2
+            AND lower(coalesce(d.origen_dato, '')) = $1
             AND d.created_at >= now() - interval '30 days'
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
           GROUP BY DATE(d.created_at AT TIME ZONE 'America/Montevideo')
           ORDER BY fecha DESC
           `,
-          [META_BATCH_ID, origenDato]
+          [origenDato]
         );
 
         // Distribución por vendedor
@@ -15714,16 +15717,18 @@ export const handler = async (event) => {
           WHERE EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lbc.batch_id = $1
+              AND lb.nombre = 'Meta'
+              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
-            AND lower(coalesce(d.origen_dato, '')) = $2
+            AND lower(coalesce(d.origen_dato, '')) = $1
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
             ${dateFilter.replace("d.created_at", "d.created_at")}
           GROUP BY u.id, u.nombre, u.apellido
           ORDER BY total DESC
           `,
-          [META_BATCH_ID, origenDato]
+          [origenDato]
         );
 
         return json(200, {
@@ -15763,7 +15768,6 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const META_BATCH_ID = "159a3982-6dfe-48dd-9658-bc4fb54effc5";
       const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
       const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
@@ -15779,12 +15783,14 @@ export const handler = async (event) => {
           WHERE EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lbc.batch_id = $1
+              AND lb.nombre = 'Meta'
+              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
-            AND lower(coalesce(d.origen_dato, '')) = $2
+            AND lower(coalesce(d.origen_dato, '')) = $1
           `,
-          [META_BATCH_ID, origenDato]
+          [origenDato]
         );
 
         const result = await client.query(
@@ -15811,14 +15817,16 @@ export const handler = async (event) => {
           WHERE EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
+            JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lbc.batch_id = $1
+              AND lb.nombre = 'Meta'
+              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
-            AND lower(coalesce(d.origen_dato, '')) = $2
+            AND lower(coalesce(d.origen_dato, '')) = $1
           ORDER BY d.created_at DESC
-          LIMIT $3 OFFSET $4
+          LIMIT $2 OFFSET $3
           `,
-          [META_BATCH_ID, origenDato, limit, offset]
+          [origenDato, limit, offset]
         );
 
         return json(200, {
