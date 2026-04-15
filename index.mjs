@@ -7854,7 +7854,7 @@ export const handler = async (event) => {
 
       const client = createDbClient();
       await client.connect();
-      let result;
+      let responseData;
       try {
         const insertRes = await client.query(
           `
@@ -7871,11 +7871,18 @@ export const handler = async (event) => {
             origenDato, "nuevo", defaultOrgId
           ]
         );
-        result = { ok: true, id: insertRes.rows[0]?.id };
+        const leadId = insertRes.rows[0]?.id;
+        responseData = {
+          ok: true,
+          id: leadId,
+          estado: "nuevo",
+          duplicado: false,
+          ya_cliente: false
+        };
       } finally {
         await client.end();
       }
-      return json(200, result);
+      return json(200, responseData);
     } catch (error) {
       console.error("meta-sheet webhook error:", error);
       return json(200, { ok: true, error: error.message });
