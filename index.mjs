@@ -7840,7 +7840,7 @@ export const handler = async (event) => {
       const rawNombre = normalizeText(body?.full_name || body?.nombre || "");
       const parts = rawNombre ? rawNombre.split(" ") : [];
       const nombre = parts[0] || null;
-      const apellido = parts.slice(1).join(" ") || null;
+      const apellido = normalizeText(body?.apellido) || parts.slice(1).join(" ") || null;
       const stripUY = (n) => {
         if (!n) return n;
         n = n.replace(/^\+598/, '');
