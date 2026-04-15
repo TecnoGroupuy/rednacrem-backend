@@ -15744,25 +15744,26 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const origenDato = event.queryStringParameters?.origen_dato || "facebook";
+      const META_BATCH_ID = "159a3982-6dfe-48dd-9658-bc4fb54effc5";
       const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
       const offset = (page - 1) * limit;
-      const orgFilter = organizationId ? "AND d.organization_id = $2" : "";
 
       const client = createDbClient();
       await client.connect();
       try {
-        const countSql = `
+        const countRes = await client.query(
+          `
           SELECT COUNT(*) AS total
           FROM datos_para_trabajar d
-          WHERE d.origen_dato = $1
-          ${orgFilter}
-        `;
-        const countParams = organizationId ? [origenDato, organizationId] : [origenDato];
-        const countRes = await client.query(countSql, countParams);
+          JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
+          WHERE lbc.batch_id = $1
+          `,
+          [META_BATCH_ID]
+        );
 
-        const leadsSql = `
+        const result = await client.query(
+          `
           SELECT
             d.id,
             d.nombre,
@@ -15780,17 +15781,15 @@ export const handler = async (event) => {
             u.nombre AS vendedor_nombre,
             u.apellido AS vendedor_apellido
           FROM datos_para_trabajar d
+          JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
-          WHERE d.origen_dato = $1
-          ${orgFilter}
+          WHERE lbc.batch_id = $1
           ORDER BY d.created_at DESC
-          LIMIT $${organizationId ? "3" : "2"} OFFSET $${organizationId ? "4" : "3"}
-        `;
-        const leadsParams = organizationId
-          ? [origenDato, organizationId, limit, offset]
-          : [origenDato, limit, offset];
-        const result = await client.query(leadsSql, leadsParams);
+          LIMIT $2 OFFSET $3
+          `,
+          [META_BATCH_ID, limit, offset]
+        );
 
         return json(200, {
           ok: true,
