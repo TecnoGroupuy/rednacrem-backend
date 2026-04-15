@@ -7874,34 +7874,45 @@ export const handler = async (event) => {
       try {
         await client.connect();
 
+        // Normalizar teléfono para comparación — quitar +598, 598, y 0 inicial
+        const normalizeForCompare = (n) => {
+          if (!n) return null;
+          return n.replace(/^\+598/, '').replace(/^598/, '').replace(/^0/, '');
+        };
+
+        const telefonoNorm = normalizeForCompare(telefono);
+        const celularNorm = normalizeForCompare(celular);
+
         // Detectar duplicado en datos_para_trabajar
         let isDuplicate = false;
-        if (telefono || email) {
+        if (telefonoNorm || celularNorm || email) {
           const dupRes = await client.query(
             `SELECT id FROM datos_para_trabajar
              WHERE organization_id = $1
                AND (
-                 ($2::text IS NOT NULL AND telefono = $2)
-                 OR ($3::text IS NOT NULL AND lower(email) = lower($3))
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(celular, '^\\+598', ''), '^0', '') = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
                )
              LIMIT 1`,
-            [defaultOrgId, telefono, email]
+            [defaultOrgId, telefonoNorm, celularNorm, email]
           );
           if (dupRes.rows.length) isDuplicate = true;
         }
 
         // Detectar si ya es cliente en contacts
         let isClient = false;
-        if (!isDuplicate && (telefono || email)) {
+        if (!isDuplicate && (telefonoNorm || celularNorm || email)) {
           const clientRes = await client.query(
             `SELECT id FROM contacts
              WHERE organization_id = $1
                AND (
-                 ($2::text IS NOT NULL AND telefono = $2)
-                 OR ($3::text IS NOT NULL AND lower(email) = lower($3))
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(celular, '^\\+598', ''), '^0', '') = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
                )
              LIMIT 1`,
-            [defaultOrgId, telefono, email]
+            [defaultOrgId, telefonoNorm, celularNorm, email]
           );
           if (clientRes.rows.length) isClient = true;
         }
