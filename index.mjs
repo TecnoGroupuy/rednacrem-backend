@@ -15745,6 +15745,7 @@ export const handler = async (event) => {
       }
 
       const META_BATCH_ID = "159a3982-6dfe-48dd-9658-bc4fb54effc5";
+      const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
       const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
       const offset = (page - 1) * limit;
@@ -15758,8 +15759,9 @@ export const handler = async (event) => {
           FROM datos_para_trabajar d
           JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
           WHERE lbc.batch_id = $1
+            AND lower(coalesce(d.origen_dato, '')) = $2
           `,
-          [META_BATCH_ID]
+          [META_BATCH_ID, origenDato]
         );
 
         const result = await client.query(
@@ -15785,10 +15787,11 @@ export const handler = async (event) => {
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE lbc.batch_id = $1
+            AND lower(coalesce(d.origen_dato, '')) = $2
           ORDER BY d.created_at DESC
-          LIMIT $2 OFFSET $3
+          LIMIT $3 OFFSET $4
           `,
-          [META_BATCH_ID, limit, offset]
+          [META_BATCH_ID, origenDato, limit, offset]
         );
 
         return json(200, {
