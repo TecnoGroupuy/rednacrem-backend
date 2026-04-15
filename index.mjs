@@ -7890,8 +7890,10 @@ export const handler = async (event) => {
             `SELECT id FROM datos_para_trabajar
              WHERE organization_id = $1
                AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(celular, '^\\+598', ''), '^0', '') = $3)
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
                  OR ($4::text IS NOT NULL AND lower(email) = lower($4))
                )
              LIMIT 1`,
@@ -7907,8 +7909,10 @@ export const handler = async (event) => {
             `SELECT id FROM contacts
              WHERE organization_id = $1
                AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(celular, '^\\+598', ''), '^0', '') = $3)
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
                  OR ($4::text IS NOT NULL AND lower(email) = lower($4))
                )
              LIMIT 1`,
