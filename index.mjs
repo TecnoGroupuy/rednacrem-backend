@@ -7856,6 +7856,41 @@ export const handler = async (event) => {
       let responseData = { ok: true, skipped: true };
       try {
         await client.connect();
+
+        // Detectar duplicado en datos_para_trabajar
+        let isDuplicate = false;
+        if (telefono || email) {
+          const dupRes = await client.query(
+            `SELECT id FROM datos_para_trabajar
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND telefono = $2)
+                 OR ($3::text IS NOT NULL AND lower(email) = lower($3))
+               )
+             LIMIT 1`,
+            [defaultOrgId, telefono, email]
+          );
+          if (dupRes.rows.length) isDuplicate = true;
+        }
+
+        // Detectar si ya es cliente en contacts
+        let isClient = false;
+        if (!isDuplicate && (telefono || email)) {
+          const clientRes = await client.query(
+            `SELECT id FROM contacts
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND telefono = $2)
+                 OR ($3::text IS NOT NULL AND lower(email) = lower($3))
+               )
+             LIMIT 1`,
+            [defaultOrgId, telefono, email]
+          );
+          if (clientRes.rows.length) isClient = true;
+        }
+
+        const estado = (isDuplicate || isClient) ? "bloqueado" : "nuevo";
+
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
@@ -7866,11 +7901,11 @@ export const handler = async (event) => {
           [
             nombre, apellido, telefono, celular,
             email, fechaNacimiento,
-            origenDato, "nuevo", defaultOrgId
+            origenDato, estado, defaultOrgId
           ]
         );
         const leadId = insertRes.rows[0]?.id;
-        if (leadId) {
+        if (leadId && estado === "nuevo") {
           const batchRes = await client.query(
             `SELECT id FROM lead_batches
              WHERE nombre = 'Meta'
@@ -7922,7 +7957,7 @@ export const handler = async (event) => {
             );
           }
         }
-        responseData = { ok: true, id: leadId, estado: "nuevo" };
+        responseData = { ok: true, id: leadId, estado, isDuplicate, isClient };
       } catch (dbError) {
         console.error("[DB_ERROR]", dbError?.message);
         responseData = { ok: false, error: dbError?.message };
