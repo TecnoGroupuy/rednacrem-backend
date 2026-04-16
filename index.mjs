@@ -11620,6 +11620,7 @@ export const handler = async (event) => {
             COALESCE(${dDireccion}, ${cDireccion})  AS direccion,
             COALESCE(d.departamento, ${cDepartamento}) AS departamento,
             ${dLocalidad}                           AS localidad,
+            d.nota                                  AS nota,
             COALESCE(d.origen_dato, 'recupero')     AS origen_dato,
             lb.tipo                                 AS lote_tipo,
             lcs.estado_venta,
