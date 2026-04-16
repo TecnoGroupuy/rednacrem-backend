@@ -7933,23 +7933,24 @@ export const handler = async (event) => {
         }
 
         const estado = (isDuplicate || isClient) ? "bloqueado" : "nuevo";
+        const motivoBloqueo = isDuplicate ? "duplicado" : isClient ? "cliente_existente" : null;
 
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
             origen_dato, estado, organization_id,
-            nota, localidad, departamento, fecha_lead
+            nota, localidad, departamento, fecha_lead, motivo_bloqueo
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13
+            $10, $11, $12, $13, $14
           )
           RETURNING id`,
           [
             nombre, apellido, telefono, celular,
             email, fechaNacimiento,
             origenDato, estado, defaultOrgId,
-            nota, localidad, departamento, fechaLead
+            nota, localidad, departamento, fechaLead, motivoBloqueo
           ]
         );
         const leadId = insertRes.rows[0]?.id;
@@ -10583,6 +10584,7 @@ export const handler = async (event) => {
             d.localidad,
             d.origen_dato,
             d.estado,
+            d.motivo_bloqueo,
             d.created_at,
             d.email,
             d.fecha_nacimiento,
@@ -10638,6 +10640,7 @@ export const handler = async (event) => {
             localidad: row.localidad,
             origen_dato: row.origen_dato,
             estado: row.estado || "nuevo",
+            motivo_bloqueo: row.motivo_bloqueo || null,
             created_at: row.created_at,
             email: row.email || null,
             fecha_nacimiento: row.fecha_nacimiento || null,
