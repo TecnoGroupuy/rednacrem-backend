@@ -11537,7 +11537,7 @@ export const handler = async (event) => {
       } else if (tabNormalized === "seguimiento") {
         tabWhere = "AND lcs.estado_venta IN ('seguimiento', 'interesado')";
       } else if (tabNormalized === "no_contesta") {
-        tabWhere = "AND lcs.estado_venta IN ('no_contesta', 'rellamar', 'volver_a_llamar')";
+        tabWhere = "AND lcs.estado_venta IN ('no_contesta')";
       } else if (tabNormalized === "no_contacto") {
         tabWhere = "AND lcs.estado_venta IN ('no_contesta')";
       } else if (tabNormalized === "rechazo") {
