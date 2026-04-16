@@ -11610,6 +11610,7 @@ export const handler = async (event) => {
             COALESCE(d.apellido, c.apellido)        AS apellido,
             COALESCE(d.documento, c.documento)      AS documento,
             COALESCE(d.fecha_nacimiento, c.fecha_nacimiento) AS fecha_nacimiento,
+            COALESCE(d.created_at, c.created_at)    AS created_at,
             DATE_PART('year', AGE(
               COALESCE(d.fecha_nacimiento, c.fecha_nacimiento)
             ))::int                                 AS edad,
