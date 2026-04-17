@@ -13230,6 +13230,8 @@ export const handler = async (event) => {
             d.departamento,
             d.localidad,
             d.email AS correo_electronico,
+            d.origen_dato,
+            d.created_at,
             lcs.intentos,
             lcs.estado_venta,
             (
