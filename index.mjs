@@ -11937,24 +11937,30 @@ export const handler = async (event) => {
         const statsResult = await client.query(
           `
           SELECT
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado <> 'dato_erroneo') AS tocados,
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'no_contesta') AS no_contesta,
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'rellamar') AS rellamar,
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'seguimiento') AS seguimiento,
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'rechazo') AS rechazos,
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta') AS ventas,
-            COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'dato_erroneo') AS dato_erroneo,
+            COUNT(*) FILTER (WHERE resultado <> 'dato_erroneo')::int AS tocados,
+            COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS rellamar,
+            COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS seguimiento,
+            COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS rechazos,
+            COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas,
+            COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS dato_erroneo,
             ROUND(
               100.0
-              * COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado = 'venta')
-              / NULLIF(COUNT(DISTINCT lmh.contact_id) FILTER (WHERE lmh.resultado <> 'dato_erroneo'), 0),
+              * COUNT(*) FILTER (WHERE resultado = 'venta')
+              / NULLIF(COUNT(*) FILTER (WHERE resultado <> 'dato_erroneo'), 0),
               1
             ) AS efectividad_pct
-          FROM lead_management_history lmh
-          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
-          WHERE lmh.user_id = $1
-            AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-            AND ($3::text IS NULL OR lb.tipo = $3)
+          FROM (
+            SELECT DISTINCT ON (lmh.contact_id)
+              lmh.contact_id,
+              lmh.resultado
+            FROM lead_management_history lmh
+            LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.user_id = $1
+              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+              AND ($3::text IS NULL OR lb.tipo = $3)
+            ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
+          ) last_gestiones
           `,
           [sellerId, fecha, batchTipo]
         );
