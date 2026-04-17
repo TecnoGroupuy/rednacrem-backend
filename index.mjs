@@ -7894,28 +7894,9 @@ export const handler = async (event) => {
         const telefonoNorm = normalizeForCompare(telefono);
         const celularNorm = normalizeForCompare(celular);
 
-        // Detectar duplicado en datos_para_trabajar
-        let isDuplicate = false;
-        if (telefonoNorm || celularNorm || email) {
-          const dupRes = await client.query(
-            `SELECT id FROM datos_para_trabajar
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [defaultOrgId, telefonoNorm, celularNorm, email]
-          );
-          if (dupRes.rows.length) isDuplicate = true;
-        }
-
-        // Detectar si ya es cliente en contacts
+        // 1. Detectar si ya es cliente en contacts
         let isClient = false;
-        if (!isDuplicate && (telefonoNorm || celularNorm || email)) {
+        if (telefonoNorm || celularNorm || email) {
           const clientRes = await client.query(
             `SELECT id FROM contacts
              WHERE organization_id = $1
@@ -7932,8 +7913,27 @@ export const handler = async (event) => {
           if (clientRes.rows.length) isClient = true;
         }
 
+        // 2. Detectar duplicado solo si no es cliente
+        let isDuplicate = false;
+        if (!isClient && (telefonoNorm || celularNorm || email)) {
+          const dupRes = await client.query(
+            `SELECT id FROM datos_para_trabajar
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
+               )
+             LIMIT 1`,
+            [defaultOrgId, telefonoNorm, celularNorm, email]
+          );
+          if (dupRes.rows.length) isDuplicate = true;
+        }
+
         const estado = (isDuplicate || isClient) ? "bloqueado" : "nuevo";
-        const motivoBloqueo = isDuplicate ? "duplicado" : isClient ? "cliente_existente" : null;
+        const motivoBloqueo = isClient ? "cliente_existente" : isDuplicate ? "duplicado" : null;
 
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
