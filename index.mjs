@@ -2785,9 +2785,16 @@ async function getTeamSummary(client, fecha, now = new Date()) {
         user_id,
         COUNT(*)::int AS total_llamadas,
         COUNT(*) FILTER (WHERE resultado = 'venta')::int AS total_ventas
-      FROM lead_management_history
-      WHERE (fecha_gestion AT TIME ZONE $3)::date = $1::date
-        AND user_id = ANY($2::uuid[])
+      FROM (
+        SELECT DISTINCT ON (contact_id, user_id)
+          user_id,
+          contact_id,
+          resultado
+        FROM lead_management_history
+        WHERE (fecha_gestion AT TIME ZONE $3)::date = $1::date
+          AND user_id = ANY($2::uuid[])
+        ORDER BY contact_id, user_id, fecha_gestion DESC
+      ) last_gestiones
       GROUP BY user_id
       `,
       [fecha, sellerIds, LOCAL_TZ]
