@@ -13390,11 +13390,22 @@ export const handler = async (event) => {
                   'id', u.id,
                   'nombre', u.nombre,
                   'apellido', u.apellido,
-                  'email', u.email
+                  'email', u.email,
+                  'total_contactos', COALESCE(vc.total, 0),
+                  'gestionados', COALESCE(vc.gestionados, 0)
                 )
               ) AS vendedores
             FROM lead_batch_sellers lbs
             JOIN users u ON u.id = lbs.seller_id
+            LEFT JOIN (
+              SELECT
+                batch_id,
+                assigned_to,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE estado_venta != 'nuevo') AS gestionados
+              FROM lead_contact_status
+              GROUP BY batch_id, assigned_to
+            ) vc ON vc.batch_id = lbs.batch_id AND vc.assigned_to = lbs.seller_id
             GROUP BY lbs.batch_id
           ) vnd ON vnd.batch_id = lb.id
           ${orgFilter}
@@ -14744,6 +14755,87 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: error.message });
+    }
+  }
+
+  // POST /lead-batches/:id/add-seller
+  // Body: { seller_id: uuid }
+  if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/add-seller$/)) {
+    const match = path.match(/\/lead-batches\/([^/]+)\/add-seller$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    const sellerId = body?.seller_id || null;
+    if (!sellerId) {
+      return json(400, { ok: false, message: "seller_id es requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const batchParams = [batchId];
+        let orgBatchClause = "";
+        if (organizationId) {
+          batchParams.push(organizationId);
+          orgBatchClause = " AND organization_id = $2";
+        }
+        const batchRes = await client.query(
+          `SELECT id FROM lead_batches WHERE id = $1${orgBatchClause}`,
+          batchParams
+        );
+        if (!batchRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
+        await client.query(
+          `INSERT INTO lead_batch_sellers (batch_id, seller_id)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [batchId, sellerId]
+        );
+        return json(200, { ok: true, message: "Vendedor agregado al lote" });
+      } catch (err) {
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to add seller to lead batch",
+        error: error.message
+      });
     }
   }
 
