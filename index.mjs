@@ -14639,6 +14639,114 @@ export const handler = async (event) => {
     }
   }
 
+  // POST /lead-batches/:id/remove-seller
+  // Body: { seller_id: uuid, new_seller_id: uuid }
+  if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/remove-seller$/)) {
+    const match = path.match(/\/lead-batches\/([^/]+)\/remove-seller$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const sellerId = body?.seller_id || null;
+    const newSellerId = body?.new_seller_id || null;
+
+    if (!sellerId || !newSellerId) {
+      return json(400, { ok: false, message: "seller_id y new_seller_id son requeridos" });
+    }
+    if (sellerId === newSellerId) {
+      return json(400, { ok: false, message: "El vendedor destino debe ser distinto al vendedor a retirar" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const paramsBase = [newSellerId, batchId, sellerId];
+        let orgLcsClause = "";
+        if (organizationId) {
+          paramsBase.push(organizationId);
+          orgLcsClause = ` AND organization_id = $4`;
+        }
+
+        // Reasignar contactos del vendedor saliente al nuevo vendedor
+        await client.query(
+          `UPDATE lead_contact_status
+           SET assigned_to = $1, updated_at = now()
+           WHERE batch_id = $2 AND assigned_to = $3${orgLcsClause}`,
+          paramsBase
+        );
+
+        // Agregar nuevo vendedor a lead_batch_sellers si no está
+        await client.query(
+          `INSERT INTO lead_batch_sellers (batch_id, seller_id)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [batchId, newSellerId]
+        );
+
+        const deleteParams = [batchId, sellerId];
+        let orgLbsClause = "";
+        if (organizationId) {
+          deleteParams.push(organizationId);
+          orgLbsClause = ` AND EXISTS (
+            SELECT 1 FROM lead_batches lb
+            WHERE lb.id = lead_batch_sellers.batch_id
+              AND lb.organization_id = $3
+          )`;
+        }
+
+        // Retirar vendedor saliente del lote
+        await client.query(
+          `DELETE FROM lead_batch_sellers
+           WHERE batch_id = $1 AND seller_id = $2${orgLbsClause}`,
+          deleteParams
+        );
+
+        await client.query("COMMIT");
+        return json(200, { ok: true, message: "Vendedor reasignado correctamente" });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: error.message });
+    }
+  }
+
   if (method === "POST" && path.endsWith("/lead-batches/assign")) {
     const body = safeParseBody(event);
     if (body === null) {
