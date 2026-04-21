@@ -170,7 +170,8 @@ const VALID_USER_STATUSES = [
   "approved",
   "rejected",
   "blocked",
-  "inactive"
+  "inactive",
+  "pausado"
 ];
 
 const VALID_VENDOR_REQUEST_STATUSES = [
