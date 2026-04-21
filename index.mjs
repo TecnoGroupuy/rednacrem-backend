@@ -14676,51 +14676,35 @@ export const handler = async (event) => {
   }
 
   // POST /lead-batches/:id/remove-seller
-  // Body: { seller_id: uuid, new_seller_id: uuid }
+  // Body: { seller_id, mode: "specific"|"roundrobin"|"pool", new_seller_id? }
   if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/remove-seller$/)) {
     const match = path.match(/\/lead-batches\/([^/]+)\/remove-seller$/);
     const batchId = match?.[1];
-    if (!batchId) {
-      return json(400, { ok: false, message: "Batch id requerido" });
-    }
+    if (!batchId) return json(400, { ok: false, message: "Batch id requerido" });
 
     const body = safeParseBody(event);
-    if (body === null) {
-      return json(400, { ok: false, message: "Invalid JSON body" });
-    }
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
 
     const sellerId = body?.seller_id || null;
+    const mode = body?.mode || "specific";
     const newSellerId = body?.new_seller_id || null;
 
-    if (!sellerId || !newSellerId) {
-      return json(400, { ok: false, message: "seller_id y new_seller_id son requeridos" });
-    }
-    if (sellerId === newSellerId) {
-      return json(400, { ok: false, message: "El vendedor destino debe ser distinto al vendedor a retirar" });
-    }
+    if (!sellerId) return json(400, { ok: false, message: "seller_id es requerido" });
+    if (mode === "specific" && !newSellerId) return json(400, { ok: false, message: "new_seller_id es requerido para mode=specific" });
+    if (mode === "specific" && sellerId === newSellerId) return json(400, { ok: false, message: "El vendedor destino debe ser distinto al vendedor a retirar" });
 
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
+      let authError = requireAuthenticated(event, authUser); if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser); if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser); if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES); if (roleError) return roleError;
 
       let organizationId = null;
       try {
         organizationId = await resolveOrganizationIdForRequest(dbUser, event);
       } catch (error) {
-        if (error?.status) {
-          return json(error.status, { ok: false, message: error.message });
-        }
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
         throw error;
       }
 
@@ -14729,49 +14713,92 @@ export const handler = async (event) => {
       try {
         await client.query("BEGIN");
 
-        const paramsBase = [newSellerId, batchId, sellerId];
-        let orgLcsClause = "";
-        if (organizationId) {
-          paramsBase.push(organizationId);
-          orgLcsClause = ` AND organization_id = $4`;
+        const orgClause = organizationId ? ` AND organization_id = $4` : "";
+        const orgParams = organizationId ? [organizationId] : [];
+
+        // SIEMPRE: rellamar y seguimiento van al vendedor destino específico (tienen contexto)
+        // Solo aplica si hay new_seller_id (mode specific o roundrobin con destino)
+        if (newSellerId) {
+          await client.query(
+            `UPDATE lead_contact_status
+             SET assigned_to = $1, updated_at = now()
+             WHERE batch_id = $2 AND assigned_to = $3
+               AND estado_venta IN ('rellamar', 'seguimiento')${orgClause}`,
+            [newSellerId, batchId, sellerId, ...orgParams]
+          );
         }
 
-        // Reasignar contactos del vendedor saliente al nuevo vendedor
-        await client.query(
-          `UPDATE lead_contact_status
-           SET assigned_to = $1, updated_at = now()
-           WHERE batch_id = $2 AND assigned_to = $3${orgLcsClause}`,
-          paramsBase
-        );
+        // nuevo y no_contesta según el mode elegido
+        if (mode === "specific") {
+          // Van al vendedor destino
+          await client.query(
+            `UPDATE lead_contact_status
+             SET assigned_to = $1, updated_at = now()
+             WHERE batch_id = $2 AND assigned_to = $3
+               AND estado_venta IN ('nuevo', 'no_contesta')${orgClause}`,
+            [newSellerId, batchId, sellerId, ...orgParams]
+          );
+        } else if (mode === "roundrobin") {
+          // Distribuir en round-robin entre vendedores restantes del lote
+          const sellersRes = await client.query(
+            `SELECT lbs.seller_id FROM lead_batch_sellers lbs
+             JOIN users u ON u.id = lbs.seller_id
+             WHERE lbs.batch_id = $1
+               AND lbs.seller_id != $2
+               AND lower(coalesce(u.status, 'approved')) != 'pausado'
+             ORDER BY lbs.seller_id ASC`,
+            [batchId, sellerId]
+          );
+          const sellerIds = sellersRes.rows.map((r) => r.seller_id);
+          if (sellerIds.length > 0) {
+            const contactsRes = await client.query(
+              `SELECT id FROM lead_contact_status
+               WHERE batch_id = $1 AND assigned_to = $2
+                 AND estado_venta IN ('nuevo', 'no_contesta')
+               ORDER BY id ASC`,
+              [batchId, sellerId]
+            );
+            for (let i = 0; i < contactsRes.rows.length; i += 1) {
+              const destSeller = sellerIds[i % sellerIds.length];
+              await client.query(
+                `UPDATE lead_contact_status SET assigned_to = $1, updated_at = now() WHERE id = $2`,
+                [destSeller, contactsRes.rows[i].id]
+              );
+            }
+          }
+        } else if (mode === "pool") {
+          // Dejar sin asignar (assigned_to = null)
+          await client.query(
+            `UPDATE lead_contact_status
+             SET assigned_to = NULL, updated_at = now()
+             WHERE batch_id = $1 AND assigned_to = $2
+               AND estado_venta IN ('nuevo', 'no_contesta')${orgClause.replace("$4", "$3")}`,
+            [batchId, sellerId, ...orgParams]
+          );
+        }
 
-        // Agregar nuevo vendedor a lead_batch_sellers si no está
-        await client.query(
-          `INSERT INTO lead_batch_sellers (batch_id, seller_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [batchId, newSellerId]
-        );
+        // Agregar nuevo vendedor a lead_batch_sellers si aplica
+        if (newSellerId) {
+          await client.query(
+            `INSERT INTO lead_batch_sellers (batch_id, seller_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [batchId, newSellerId]
+          );
+        }
 
+        // Retirar vendedor saliente
         const deleteParams = [batchId, sellerId];
         let orgLbsClause = "";
         if (organizationId) {
           deleteParams.push(organizationId);
-          orgLbsClause = ` AND EXISTS (
-            SELECT 1 FROM lead_batches lb
-            WHERE lb.id = lead_batch_sellers.batch_id
-              AND lb.organization_id = $3
-          )`;
+          orgLbsClause = ` AND EXISTS (SELECT 1 FROM lead_batches lb WHERE lb.id = lead_batch_sellers.batch_id AND lb.organization_id = $3)`;
         }
-
-        // Retirar vendedor saliente del lote
         await client.query(
-          `DELETE FROM lead_batch_sellers
-           WHERE batch_id = $1 AND seller_id = $2${orgLbsClause}`,
+          `DELETE FROM lead_batch_sellers WHERE batch_id = $1 AND seller_id = $2${orgLbsClause}`,
           deleteParams
         );
 
         await client.query("COMMIT");
-        return json(200, { ok: true, message: "Vendedor reasignado correctamente" });
+        return json(200, { ok: true, message: "Vendedor retirado correctamente" });
       } catch (err) {
         await client.query("ROLLBACK");
         return json(500, { ok: false, message: err.message });
