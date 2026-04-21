@@ -2150,7 +2150,7 @@ function isValidEmail(email) {
 }
 
 function isActiveFromStatus(status) {
-  return !["inactive", "blocked", "rejected"].includes(status);
+  return !["inactive", "blocked", "rejected", "pausado"].includes(status);
 }
 
 function statusFromActivo(activo) {
@@ -5689,8 +5689,25 @@ async function listSuperadminUsers() {
 
     const result = await client.query(
       `
-      ${buildUserSelect(metadata)}
-      ORDER BY created_at DESC
+      SELECT
+        u.id,
+        ${metadata.hasCognitoSub ? "u.cognito_sub" : "NULL::text AS cognito_sub"},
+        u.email,
+        u.nombre,
+        u.apellido,
+        u.telefono,
+        u.role_key,
+        u.status,
+        u.created_at,
+        u.updated_at,
+        COALESCE(et.ultimo_acceso, u.last_login_at) AS last_login_at
+      FROM users u
+      LEFT JOIN (
+        SELECT agente_id, MAX(inicio) AS ultimo_acceso
+        FROM eventos_turno
+        GROUP BY agente_id
+      ) et ON et.agente_id = u.id
+      ORDER BY u.created_at DESC
       `
     );
 
