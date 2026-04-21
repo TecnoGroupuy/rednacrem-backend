@@ -7747,8 +7747,11 @@ export const handler = async (event) => {
             // Obtener vendedores del lote para round-robin
             const sellersRes = await client.query(
               `
-              SELECT seller_id FROM lead_batch_sellers
-              WHERE batch_id = $1
+              SELECT lbs.seller_id
+              FROM lead_batch_sellers lbs
+              JOIN users u ON u.id = lbs.seller_id
+              WHERE lbs.batch_id = $1
+                AND lower(coalesce(u.status, 'approved')) <> 'pausado'
               ORDER BY seller_id ASC
               `,
               [batchId]
@@ -7980,8 +7983,12 @@ export const handler = async (event) => {
             );
 
             const sellersRes = await client.query(
-              `SELECT seller_id FROM lead_batch_sellers
-               WHERE batch_id = $1 ORDER BY seller_id ASC`,
+              `SELECT lbs.seller_id
+               FROM lead_batch_sellers lbs
+               JOIN users u ON u.id = lbs.seller_id
+               WHERE lbs.batch_id = $1
+                 AND lower(coalesce(u.status, 'approved')) <> 'pausado'
+               ORDER BY seller_id ASC`,
               [batchId]
             );
             const sellers = sellersRes.rows.map((r) => r.seller_id);
@@ -19527,6 +19534,142 @@ export const handler = async (event) => {
   }
 
   // ─── ORGANIZATIONS ENDPOINTS ──────────────────────────────────────────────
+  // PATCH /api/users/:id/pausar
+  if (method === "PATCH" && path.match(/\/api\/users\/([^/]+)\/pausar$/)) {
+    const match = path.match(/\/api\/users\/([^/]+)\/pausar$/);
+    const userId = match?.[1];
+    if (!userId) {
+      return json(400, { ok: false, message: "User id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const values = [userId];
+        let orgClause = "";
+        if (organizationId) {
+          values.push(organizationId);
+          orgClause = `
+            AND EXISTS (
+              SELECT 1
+              FROM organization_users ou
+              WHERE ou.user_id = users.id
+                AND ou.organization_id = $2
+                AND ou.activo = true
+            )
+          `;
+        }
+
+        const res = await client.query(
+          `UPDATE users
+           SET status = 'pausado', updated_at = NOW()
+           WHERE id = $1
+           ${orgClause}
+           RETURNING id, nombre, apellido, status`,
+          values
+        );
+        if (!res.rows.length) return json(404, { ok: false, message: "Usuario no encontrado" });
+        return json(200, { ok: true, user: res.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (err) {
+      return json(500, { ok: false, message: err.message });
+    }
+  }
+
+  // PATCH /api/users/:id/reactivar
+  if (method === "PATCH" && path.match(/\/api\/users\/([^/]+)\/reactivar$/)) {
+    const match = path.match(/\/api\/users\/([^/]+)\/reactivar$/);
+    const userId = match?.[1];
+    if (!userId) {
+      return json(400, { ok: false, message: "User id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const values = [userId];
+        let orgClause = "";
+        if (organizationId) {
+          values.push(organizationId);
+          orgClause = `
+            AND EXISTS (
+              SELECT 1
+              FROM organization_users ou
+              WHERE ou.user_id = users.id
+                AND ou.organization_id = $2
+                AND ou.activo = true
+            )
+          `;
+        }
+
+        const res = await client.query(
+          `UPDATE users
+           SET status = 'approved', updated_at = NOW()
+           WHERE id = $1
+           ${orgClause}
+           RETURNING id, nombre, apellido, status`,
+          values
+        );
+        if (!res.rows.length) return json(404, { ok: false, message: "Usuario no encontrado" });
+        return json(200, { ok: true, user: res.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (err) {
+      return json(500, { ok: false, message: err.message });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/organizations")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
