@@ -16,7 +16,7 @@ export const ROLE_PRIORITY = {
   atencion_cliente: 50,
 };
 
-export const USER_STATUSES = ["pending", "approved", "rejected", "blocked", "inactive"];
+export const USER_STATUSES = ["pending", "approved", "rejected", "blocked", "inactive", "pausado"];
 export const REGISTRATION_STATUSES = ["pending", "approved", "rejected"];
 
 export function isValidRole(role) {
