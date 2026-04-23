@@ -1296,7 +1296,7 @@ async function fetchRecuperoContactos({
     console.log("[recupero] starting itemsRes query");
     itemsRes = await client.query(
       `
-      SELECT DISTINCT ON (c.telefono)
+      SELECT DISTINCT ON (c.id)
         c.id,
         c.nombre,
         c.apellido,
@@ -1355,7 +1355,7 @@ async function fetchRecuperoContactos({
         LIMIT 1
       ) gestion ON true
       WHERE ${where}
-      ORDER BY c.telefono, ${orderBy}
+      ORDER BY c.id, cp.fecha_baja DESC, ${orderBy}
       LIMIT $${idx} OFFSET $${idx + 1}
       `,
       [...values, limit, offset]
