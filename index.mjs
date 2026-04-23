@@ -880,12 +880,20 @@ async function fetchRecuperoContactos({
   const conditions = [
     "cp.estado = 'baja'",
     "(COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) IS NOT NULL)",
-    `COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) NOT IN (
-      SELECT COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, ''))
+    `NOT EXISTS (
+      SELECT 1
       FROM contacts c2
       JOIN contact_products cp2 ON cp2.contact_id = c2.id
       WHERE cp2.estado = 'alta'
-        AND COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, '')) IS NOT NULL
+      AND (
+        (c.documento IS NOT NULL AND c.documento != '' AND c2.documento = c.documento)
+        OR (
+          (c.documento IS NULL OR c.documento = '')
+          AND COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, ''))
+            = COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, ''))
+          AND COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) IS NOT NULL
+        )
+      )
     )`,
     "cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'"
   ];
