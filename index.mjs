@@ -10583,7 +10583,6 @@ export const handler = async (event) => {
         }
 
         const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-        const orgParamIndex = null;
         const paramMatches = whereClause.match(/\$(\d+)/g) || [];
         const maxParam = paramMatches.reduce((max, token) => Math.max(max, Number(token.slice(1))), 0);
         if (values.length < maxParam) {
@@ -15268,6 +15267,14 @@ export const handler = async (event) => {
         const whereParts = [];
         const values = [];
         let idx = 1;
+
+        // Definir orgParamIndex ANTES de usarlo en los SQL templates
+        let orgParamIndex = null;
+        if (organizationId) {
+          orgParamIndex = idx;
+          values.push(organizationId);
+          idx += 1;
+        }
 
         if (search) {
           whereParts.push(`file_name ILIKE $${idx}`);
