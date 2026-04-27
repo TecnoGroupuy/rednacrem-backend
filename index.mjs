@@ -19588,6 +19588,90 @@ export const handler = async (event) => {
     }
   }
 
+  // GET /module-states — carga estados para el rol del usuario
+  if (method === "GET" && path.endsWith("/module-states")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `SELECT role_key, module_path, estado
+           FROM module_states
+           ORDER BY role_key, module_path`
+        );
+        const states = {};
+        for (const row of result.rows) {
+          if (!states[row.role_key]) states[row.role_key] = {};
+          states[row.role_key][row.module_path] = row.estado;
+        }
+        return json(200, { ok: true, states });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load module states",
+        error: error.message
+      });
+    }
+  }
+
+  // PUT /module-states — actualiza un estado (solo superadmin)
+  if (method === "PUT" && path.endsWith("/module-states")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const role_key = normalizeText(body?.role_key || "").toLowerCase();
+      const module_path = normalizeText(body?.module_path || "");
+      const estado = normalizeText(body?.estado || "");
+      if (!role_key || !module_path || !estado) {
+        return json(422, { ok: false, message: "role_key, module_path y estado son obligatorios" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `INSERT INTO module_states (role_key, module_path, estado, updated_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (role_key, module_path)
+           DO UPDATE SET estado = EXCLUDED.estado, updated_at = now()
+           RETURNING role_key, module_path, estado`,
+          [role_key, module_path, estado]
+        );
+        return json(200, { ok: true, item: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to update module state",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/superadmin/users")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
