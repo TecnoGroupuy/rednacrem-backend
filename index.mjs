@@ -18376,6 +18376,8 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 20));
       const search = normalizeText(getQueryParam(event, "search") || "");
@@ -18394,6 +18396,12 @@ export const handler = async (event) => {
         const whereParts = [];
         const values = [];
         let idx = 1;
+
+        if (organizationId) {
+          whereParts.push(`d.organization_id = $${idx}`);
+          values.push(organizationId);
+          idx += 1;
+        }
 
         if (search) {
           whereParts.push(`(
