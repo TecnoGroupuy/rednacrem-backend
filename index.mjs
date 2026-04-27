@@ -10548,14 +10548,6 @@ export const handler = async (event) => {
         const values = [];
         let idx = 1;
 
-        // Definir orgParamIndex ANTES de usarlo en los SQL templates
-        let orgParamIndex = null;
-        if (organizationId) {
-          orgParamIndex = idx;
-          values.push(organizationId);
-          idx += 1;
-        }
-
         if (search) {
           whereParts.push(`(
             d.nombre ILIKE $${idx}
@@ -15979,6 +15971,7 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      console.log("STATS_ORG_ID", organizationId, event.queryStringParameters);
       const client = createDbClient();
       await client.connect();
       try {
