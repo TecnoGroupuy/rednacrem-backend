@@ -2773,6 +2773,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
     FROM users
     WHERE role_key = 'vendedor'
       AND status = 'approved'
+      AND (is_test IS NULL OR is_test = false)
     ORDER BY nombre
     `
   );
