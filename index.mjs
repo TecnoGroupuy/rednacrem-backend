@@ -15967,6 +15967,118 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/superadmin/stats")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const orgFilter = organizationId ? "AND organization_id = $1" : "";
+        const orgFilterAlias = organizationId ? "AND s.organization_id = $1" : "";
+        const orgValues = organizationId ? [organizationId] : [];
+
+        const safeCount = async (queryText, values = []) => {
+          try {
+            const res = await client.query(queryText, values);
+            return Number(res.rows[0]?.total || 0);
+          } catch {
+            return 0;
+          }
+        };
+
+        const [
+          ventasHoy,
+          lotesActivos,
+          usuariosActivos,
+          importacionesHoy,
+          ticketsAbiertos,
+          solicitudesEnCurso
+        ] = await Promise.all([
+          safeCount(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM sales s
+            WHERE s.fecha_venta >= now() - interval '1 day'
+            ${orgFilterAlias}
+            `,
+            orgValues
+          ),
+          safeCount(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM lead_batches
+            WHERE estado NOT IN ('finalizado', 'cancelado')
+            ${orgFilter}
+            `,
+            orgValues
+          ),
+          safeCount(
+            `
+            SELECT COUNT(DISTINCT agente_id)::int AS total
+            FROM eventos_turno
+            WHERE inicio >= now() - interval '1 day'
+            `
+          ),
+          safeCount(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM contact_import_batches
+            WHERE created_at >= now() - interval '1 day'
+            ${orgFilter}
+            `,
+            orgValues
+          ),
+          safeCount(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM manual_tickets
+            WHERE estado = 'nuevo'
+            ${orgFilter}
+            `,
+            orgValues
+          ),
+          safeCount(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM manual_tickets
+            WHERE estado IN ('en_proceso', 'pendiente')
+            ${orgFilter}
+            `,
+            orgValues
+          )
+        ]);
+
+        return json(200, {
+          ok: true,
+          ventas_hoy: ventasHoy,
+          lotes_activos: lotesActivos,
+          usuarios_activos: usuariosActivos,
+          importaciones_hoy: importacionesHoy,
+          tickets_abiertos: ticketsAbiertos,
+          solicitudes_en_curso: solicitudesEnCurso
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load superadmin stats",
+        error: error.message
+      });
+    }
+  }
+
   // GET /campanas/stats â€” mÃ©tricas del dashboard de campaÃ±as
   if (method === "GET" && path.endsWith("/campanas/stats")) {
     try {
