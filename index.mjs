@@ -19534,6 +19534,60 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/org/users")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, [
+        "superadministrador", "director", "supervisor"
+      ]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      if (!organizationId) {
+        return json(403, { ok: false, message: "Sin organizacion activa" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `SELECT
+             u.id,
+             u.nombre,
+             u.apellido,
+             u.email,
+             u.telefono,
+             u.role_key,
+             u.status,
+             u.created_at,
+             ou.role_in_org
+           FROM organization_users ou
+           JOIN users u ON u.id = ou.user_id
+           WHERE ou.organization_id = $1
+             AND ou.activo = true
+             AND u.role_key IN ('vendedor', 'atencion_cliente')
+           ORDER BY u.nombre ASC`,
+          [organizationId]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list org users",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/superadmin/users")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
