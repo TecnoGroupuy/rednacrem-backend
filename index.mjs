@@ -18525,7 +18525,7 @@ export const handler = async (event) => {
         let idx = 1;
 
         if (organizationId) {
-          whereParts.push(`d.organization_id = $${idx}`);
+          whereParts.push(`organization_id = $${idx}`);
           values.push(organizationId);
           idx += 1;
         }
