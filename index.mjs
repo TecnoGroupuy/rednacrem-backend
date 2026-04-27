@@ -1,4 +1,4 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import crypto from "node:crypto";
 import { Client } from "pg";
 import {
@@ -1462,15 +1462,15 @@ function getDepartamentoFromFixed(numero) {
   if (n.startsWith("444")) return "Lavalleja";
   if (n.startsWith("477")) return "Artigas";
   if (n.startsWith("473")) return "Salto";
-  if (n.startsWith("472")) return "Paysand�";
-  if (n.startsWith("456")) return "R�o Negro";
+  if (n.startsWith("472")) return "Paysandï¿½";
+  if (n.startsWith("456")) return "Rï¿½o Negro";
   if (n.startsWith("453")) return "Soriano";
-  if (n.startsWith("434")) return "San Jos�";
+  if (n.startsWith("434")) return "San Josï¿½";
   if (n.startsWith("447")) return "Rocha";
   if (n.startsWith("445")) return "Treinta y Tres";
   if (n.startsWith("464")) return "Cerro Largo";
   if (n.startsWith("462")) return "Rivera";
-  if (n.startsWith("463")) return "Tacuaremb�";
+  if (n.startsWith("463")) return "Tacuarembï¿½";
   return null;
 }
 
@@ -1526,10 +1526,10 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2314": "Cerro",
   "2601": "Carrasco",
   "2916": "Ciudad Vieja",
-  "2320": "Col�n",
+  "2320": "Colï¿½n",
   "2222": "Piedras Blancas",
-  "2401": "Cord�n",
-  "2487": "Hosp. Cl�nicas",
+  "2401": "Cordï¿½n",
+  "2487": "Hosp. Clï¿½nicas",
   "2292": "Pando",
   "2294": "Sauce",
   "2295": "Empalme Olmos",
@@ -1539,51 +1539,51 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "2312": "Paso de la Arena",
   "2355": "Sayago",
   "2409": "Tres Cruces",
-  "2506": "Uni�n",
-  "2347": "Aut�dromo",
+  "2506": "Uniï¿½n",
+  "2347": "Autï¿½dromo",
   "2362": "La Paz",
   "2364": "Las Piedras",
   "2369": "Progreso",
-  "2372": "Atl�ntida",
+  "2372": "Atlï¿½ntida",
   "2682": "Lagomar",
   "2696": "Solymar",
   "4332": "Canelones",
-  "4530": "Ca�ada Nieto",
+  "4530": "Caï¿½ada Nieto",
   "4222": "Maldonado",
   "4223": "Maldonado",
   "4224": "Maldonado",
   "4225": "Maldonado",
-  "4244": "Punta del Este (Pen�nsula)",
+  "4244": "Punta del Este (Penï¿½nsula)",
   "4248": "Punta del Este Parada 5",
   "4249": "Punta del Este Parada 5",
   "4255": "Laguna del Sauce",
   "4257": "Portezuelo",
   "4266": "San Carlos",
   "4277": "La Barra",
-  "4311": "Casup�",
-  "4312": "San Ram�n",
+  "4311": "Casupï¿½",
+  "4312": "San Ramï¿½n",
   "4313": "San Antonio",
   "4315": "Tala",
   "4317": "Miguez",
   "4318": "Cerro Colorado",
   "4319": "Chamizo",
-  "4334": "Santa Luc�a",
-  "4335": "Juanic�",
+  "4334": "Santa Lucï¿½a",
+  "4335": "Juanicï¿½",
   "4336": "Los Cerrillos",
   "4338": "Colonia Etchepare",
   "4339": "Cardal",
-  "4342": "San Jos�",
-  "4345": "Kiy�",
+  "4342": "San Josï¿½",
+  "4345": "Kiyï¿½",
   "4346": "Rafael Peraza",
   "4348": "Villa Rodriguez",
   "4349": "Colonia Agra.Delta",
   "4352": "Florida",
-  "4354": "Sarand� Grande",
+  "4354": "Sarandï¿½ Grande",
   "4360": "Blanquillo",
   "4362": "Durazno",
   "4364": "Trinidad",
   "4365": "Carmen",
-  "4367": "Sarand� del Yi",
+  "4367": "Sarandï¿½ del Yi",
   "4368": "Carlos Reyles",
   "4369": "La Paloma",
   "4373": "La Floresta",
@@ -1594,77 +1594,77 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "4378": "Cuchilla Alta",
   "4399": "San Jacinto",
   "4430": "Gregorio Aznarez",
-  "4432": "Piri�polis",
-  "4434": "Pan de Az�car",
-  "4438": "Balneario Sol�s",
+  "4432": "Piriï¿½polis",
+  "4434": "Pan de Azï¿½car",
+  "4438": "Balneario Solï¿½s",
   "4442": "Minas",
-  "4446": "Aigu�",
-  "4447": "Sol�s de Mataojo",
-  "4448": "Piraraj�",
+  "4446": "Aiguï¿½",
+  "4447": "Solï¿½s de Mataojo",
+  "4448": "Pirarajï¿½",
   "4449": "Mariscala",
   "4452": "Treinta y Tres",
-  "4455": "Jos� P. Varela",
+  "4455": "Josï¿½ P. Varela",
   "4456": "Lascano",
-  "4457": "Vel�zquez",
+  "4457": "Velï¿½zquez",
   "4458": "Vergara",
-  "4459": "Cebollat�",
-  "4463": "Zapic�n",
+  "4459": "Cebollatï¿½",
+  "4463": "Zapicï¿½n",
   "4464": "Santa Clara de Olimar",
   "4466": "Cerro Chato",
-  "4469": "Batlle y Ordo�ez",
+  "4469": "Batlle y Ordoï¿½ez",
   "4472": "Rocha",
   "4474": "Barra del Chuy",
   "4475": "Aguas Dulces",
   "4476": "La Coronilla",
   "4477": "Santa Teresa",
   "4479": "La Paloma (Rocha)",
-  "4486": "Faro Jos� Ignacio",
+  "4486": "Faro Josï¿½ Ignacio",
   "4522": "Colonia",
   "4534": "Dolores",
   "4536": "Cardona",
   "4537": "Palmitas",
-  "4538": "Jos� E. Rod�",
+  "4538": "Josï¿½ E. Rodï¿½",
   "4539": "Ismael Cortinas",
-  "4542": "Balneario Zagaraz�",
+  "4542": "Balneario Zagarazï¿½",
   "4544": "Nueva Palmira",
   "4552": "Rosario",
   "4554": "Nueva Helvecia",
   "4558": "Colonia Valdense",
   "4562": "Fray Bentos",
   "4567": "Young",
-  "4568": "Nuevo Berl�n",
+  "4568": "Nuevo Berlï¿½n",
   "4569": "San Javier",
   "4574": "Semillero",
   "4575": "Colonia Miguelete",
-  "4576": "Omb�es de Lavalle",
+  "4576": "Ombï¿½es de Lavalle",
   "4577": "Conchillas",
   "4586": "Juan Lacaze",
   "4587": "Playa Fomento",
   "4588": "Santa Ana",
   "4622": "Rivera",
-  "4632": "Tacuaremb�",
-  "4640": "Acegu�",
+  "4632": "Tacuarembï¿½",
+  "4640": "Aceguï¿½",
   "4642": "Melo",
   "4654": "Vichadero",
   "4656": "Tranqueras",
   "4658": "Minas de Corrales",
   "4664": "Paso de los Toros",
-  "4675": "R�o Branco",
-  "4679": "Lago Mer�n",
-  "4722": "Paysand�",
+  "4675": "Rï¿½o Branco",
+  "4679": "Lago Merï¿½n",
+  "4722": "Paysandï¿½",
   "4730": "Defensa (Salto)",
   "4732": "Pueblo Lavalleja",
   "4733": "Cuchilla de Salto",
-  "4742": "Guich�n",
+  "4742": "Guichï¿½n",
   "4747": "Piedras Coloradas",
   "4754": "Quebracho",
-  "4764": "Constituci�n",
-  "4766": "Bel�n",
+  "4764": "Constituciï¿½n",
+  "4766": "Belï¿½n",
   "4772": "Artigas",
   "4776": "Baltasar Brum",
-  "4777": "Tom�s Gomensoro",
+  "4777": "Tomï¿½s Gomensoro",
   "4778": "Mones Quintela",
-  "4779": "Bella Uni�n",
+  "4779": "Bella Uniï¿½n",
   "4888": "Fraile Muerto",
   "5432": "Mercedes"
 };
@@ -1832,7 +1832,7 @@ function normalizeMotivoBaja(value) {
     normalized.includes("tarjeta") ||
     normalized.includes("cobro") ||
     normalized.includes("debito") ||
-    normalized.includes("débito")
+    normalized.includes("dÃ©bito")
   )
     return "error_medio_pago";
   if (normalized.includes("auditor")) return "no_pasa_auditoria";
@@ -2336,7 +2336,7 @@ function mapProductRowToApi(row) {
 const IMPORT_TYPE_LABEL = {
   clientes: "CSV de clientes",
   no_llamar: "CSV Base No llamar",
-  resultados: "CSV de resultados telef�nicos",
+  resultados: "CSV de resultados telefï¿½nicos",
   datos_para_trabajar: "CSV Datos para trabajar"
 };
 
@@ -3253,7 +3253,7 @@ async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
   if (conversion < config.conversion_minima_porcentaje) {
     alertas.push({
       tipo: "conversion_baja",
-      descripcion: `${conversion}% actual vs m�nimo ${config.conversion_minima_porcentaje}%`,
+      descripcion: `${conversion}% actual vs mï¿½nimo ${config.conversion_minima_porcentaje}%`,
       severidad: "alta"
     });
   }
@@ -3471,10 +3471,10 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "telefono": "telefono",
   "celular": "celular",
   "correo electronico": "correo_electronico",
-  "correo electr�nico": "correo_electronico",
+  "correo electrï¿½nico": "correo_electronico",
   "email": "correo_electronico",
   "direccion": "direccion",
-  "direcci�n": "direccion",
+  "direcciï¿½n": "direccion",
   "departamento": "departamento",
   "localidad": "localidad",
   "pais": "pais",
@@ -3847,7 +3847,7 @@ export async function processRecuperoImportJob(jobId) {
       (h) => h === "motivo de la baja" || h === "motivo de baja"
     );
     const idxEstado = headers.findIndex(
-      (h) => h === "ultimo estado" || h === "último estado"
+      (h) => h === "ultimo estado" || h === "Ãºltimo estado"
     );
 
     if (idxDocumento === -1 || idxMotivo === -1 || idxEstado === -1) {
@@ -4627,10 +4627,10 @@ async function processClientImportBatch(
               FROM contacts
               WHERE (telefono = $1 OR celular = $1)
                 AND translate(lower(coalesce(nombre, '')),
-                  'áéíóúäëïöüàèìòùâêîôûñÁÉÍÓÚÄËÏÖÜÀÈÌÒÙÂÊÎÔÛÑ',
+                  'Ã¡Ã©Ã­Ã³ÃºÃ¤Ã«Ã¯Ã¶Ã¼Ã Ã¨Ã¬Ã²Ã¹Ã¢ÃªÃ®Ã´Ã»Ã±ÃÃ‰ÃÃ“ÃšÃ„Ã‹ÃÃ–ÃœÃ€ÃˆÃŒÃ’Ã™Ã‚ÃŠÃŽÃ”Ã›Ã‘',
                   'aeiouaeiouaeiouaeiounAEIOUAEIOUAEIOUAEIOUN') = $2
                 AND translate(lower(coalesce(apellido, '')),
-                  'áéíóúäëïöüàèìòùâêîôûñÁÉÍÓÚÄËÏÖÜÀÈÌÒÙÂÊÎÔÛÑ',
+                  'Ã¡Ã©Ã­Ã³ÃºÃ¤Ã«Ã¯Ã¶Ã¼Ã Ã¨Ã¬Ã²Ã¹Ã¢ÃªÃ®Ã´Ã»Ã±ÃÃ‰ÃÃ“ÃšÃ„Ã‹ÃÃ–ÃœÃ€ÃˆÃŒÃ’Ã™Ã‚ÃŠÃŽÃ”Ã›Ã‘',
                   'aeiouaeiouaeiouaeiounAEIOUAEIOUAEIOUAEIOUN') = $3
               LIMIT 1
               `,
@@ -4981,7 +4981,7 @@ function buildImportSampleCsv(type) {
     "telefono",
     "Celular",
     "Correo electronico",
-    "Direcci�n",
+    "Direcciï¿½n",
     "Departamento",
     "Pais",
     "Nombre del familiar",
@@ -5005,7 +5005,7 @@ function buildImportSampleCsv(type) {
     "telefono": "099123456",
     "Celular": "099123456",
     "Correo electronico": "ana.pereira@example.com",
-    "Direcci�n": "18 de Julio 1234",
+    "Direcciï¿½n": "18 de Julio 1234",
     "Departamento": "Montevideo",
     "Pais": "Uruguay",
     "Nombre del familiar": "Luis",
@@ -5047,7 +5047,7 @@ function validateProductPayload(body, options = {}) {
 
   const parsedPrecio = Number(String(precio || 0).replace(/[^0-9.-]/g, ""));
   if (Number.isNaN(parsedPrecio)) {
-    errors.precio = ["precio inv�lido"];
+    errors.precio = ["precio invï¿½lido"];
   }
 
   if (Object.keys(errors).length > 0) {
@@ -5266,13 +5266,13 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!email) {
       errors.email = "El email es obligatorio";
     } else if (!isValidEmail(email)) {
-      errors.email = "El email no es v�lido";
+      errors.email = "El email no es vï¿½lido";
     }
   }
 
   if (!options.partial || body?.telefono !== undefined) {
     if (!telefono) {
-      errors.telefono = "El tel�fono es obligatorio";
+      errors.telefono = "El telï¿½fono es obligatorio";
     }
   }
 
@@ -5280,7 +5280,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!rol) {
       errors.rol = "El rol es obligatorio";
     } else if (!VALID_ROLES.includes(rol)) {
-      errors.rol = "El rol no es v�lido";
+      errors.rol = "El rol no es vï¿½lido";
     }
   }
 
@@ -5288,7 +5288,7 @@ function validateSuperadminUserPayload(body, options = {}) {
     if (!status) {
       errors.status = "El estado es obligatorio";
     } else if (!VALID_USER_STATUSES.includes(status)) {
-      errors.status = "El estado no es v�lido";
+      errors.status = "El estado no es vï¿½lido";
     }
   }
 
@@ -5326,7 +5326,7 @@ function validateVendorRegistrationPayload(body) {
   if (!nombre) errors.nombre = "El nombre es obligatorio";
   if (!apellido) errors.apellido = "El apellido es obligatorio";
   if (!email) errors.email = "El email es obligatorio";
-  if (!telefono) errors.telefono = "El tel�fono es obligatorio";
+  if (!telefono) errors.telefono = "El telï¿½fono es obligatorio";
 
   return {
     valid: Object.keys(errors).length === 0,
@@ -5661,7 +5661,7 @@ async function resolveOrganizationId(client, dbUser, event) {
     [dbUser.id]
   );
   if (!orgUser.rows[0]) {
-    throw { status: 403, message: "Usuario no asociado a una organización activa" };
+    throw { status: 403, message: "Usuario no asociado a una organizaciÃ³n activa" };
   }
   return orgUser.rows[0].organization_id;
 }
@@ -7101,7 +7101,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.role_key,
           updatedUser.role_key,
           actorUserId,
-          "Actualizaci�n desde superadmin/users"
+          "Actualizaciï¿½n desde superadmin/users"
         ]
       );
     }
@@ -7124,7 +7124,7 @@ async function updateSuperadminUserRecord(userId, input, actorUserId) {
           existingUser.status,
           updatedUser.status,
           actorUserId,
-          "Actualizaci�n desde superadmin/users"
+          "Actualizaciï¿½n desde superadmin/users"
         ]
       );
     }
@@ -7185,7 +7185,7 @@ function requireApproved(event, dbUser) {
 function requireRole(event, dbUser, allowedRoles) {
   console.log("[role-check] roles requeridos:", allowedRoles);
   console.log("[role-check] rol del usuario:", dbUser?.role_key);
-  console.log("[role-check] �tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
+  console.log("[role-check] ï¿½tiene acceso?:", allowedRoles.includes(dbUser?.role_key));
   if (!dbUser || !allowedRoles.includes(dbUser.role_key)) {
     return json(403, {
       ok: false,
@@ -7413,7 +7413,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
     if (requestRow.status !== "pending") {
       return {
         invalidState: true,
-        message: "La solicitud ya no est� pendiente"
+        message: "La solicitud ya no estï¿½ pendiente"
       };
     }
 
@@ -7486,7 +7486,7 @@ async function approveVendorRequest({ requestId, reviewerUserId }) {
         null,
         "vendedor",
         reviewerUserId,
-        "Aprobaci�n de solicitud de vendedor"
+        "Aprobaciï¿½n de solicitud de vendedor"
       ]
     );
 
@@ -7554,7 +7554,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
       await client.query("ROLLBACK");
       return {
         invalidState: true,
-        message: "La solicitud ya no est� pendiente"
+        message: "La solicitud ya no estï¿½ pendiente"
       };
     }
 
@@ -7681,8 +7681,8 @@ export const handler = async (event) => {
     }
   }
 
-  // ─── WEBHOOK META LEADS ───────────────────────────────────────────────────
-  // GET /webhooks/meta — verificación del webhook por Meta
+  // â”€â”€â”€ WEBHOOK META LEADS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // GET /webhooks/meta â€” verificaciÃ³n del webhook por Meta
   if (method === "GET" && path.endsWith("/webhooks/meta")) {
     const params = event.queryStringParameters || {};
     const mode = params["hub.mode"];
@@ -7699,7 +7699,7 @@ export const handler = async (event) => {
     return json(403, { ok: false, message: "Forbidden" });
   }
 
-  // POST /webhooks/meta — recibir leads
+  // POST /webhooks/meta â€” recibir leads
   if (method === "POST" && path.endsWith("/webhooks/meta")) {
     try {
       const body = safeParseBody(event);
@@ -7805,7 +7805,7 @@ export const handler = async (event) => {
             // Asignar vendedor round-robin
             let assignedTo = null;
             if (sellers.length) {
-              // Contar cuántos leads tiene cada vendedor en este lote
+              // Contar cuÃ¡ntos leads tiene cada vendedor en este lote
               const countsRes = await client.query(
                 `
                 SELECT assigned_to, COUNT(*) AS total
@@ -7855,7 +7855,7 @@ export const handler = async (event) => {
     }
   }
 
-  // POST /webhooks/meta-sheet — ingesta desde n8n/Google Sheets
+  // POST /webhooks/meta-sheet â€” ingesta desde n8n/Google Sheets
   if (method === "POST" && path.endsWith("/webhooks/meta-sheet")) {
     try {
       const body = safeParseBody(event);
@@ -7913,7 +7913,7 @@ export const handler = async (event) => {
       try {
         await client.connect();
 
-        // Normalizar teléfono para comparación — quitar +598, 598, y 0 inicial
+        // Normalizar telÃ©fono para comparaciÃ³n â€” quitar +598, 598, y 0 inicial
         const normalizeForCompare = (n) => {
           if (!n) return null;
           return n.replace(/^\+598/, '').replace(/^598/, '').replace(/^0/, '');
@@ -11762,7 +11762,7 @@ export const handler = async (event) => {
             ok: true,
             success: true,
             data: null,
-            message: "No ten�s lotes activos asignados",
+            message: "No tenï¿½s lotes activos asignados",
             error: null
           });
         }
@@ -11876,8 +11876,8 @@ export const handler = async (event) => {
               success: true,
               data: { gestion_id: existingGestionId },
               message: enOla2
-                ? `No hay contactos disponibles en esta franja. Volv� a las ${ola1Inicio}`
-                : `No hay contactos disponibles en esta franja. Volv� a las ${ola2Inicio}`,
+                ? `No hay contactos disponibles en esta franja. Volvï¿½ a las ${ola1Inicio}`
+                : `No hay contactos disponibles en esta franja. Volvï¿½ a las ${ola2Inicio}`,
               error: null
             });
           }
@@ -11886,7 +11886,7 @@ export const handler = async (event) => {
             ok: true,
             success: true,
             data: null,
-            message: "Todos los contactos del lote fueron gestionados. �Buen trabajo!",
+            message: "Todos los contactos del lote fueron gestionados. ï¿½Buen trabajo!",
             error: null
           });
         }
@@ -12261,7 +12261,7 @@ export const handler = async (event) => {
           );
           if (batchRes.rows[0]?.id) return batchRes.rows[0].id;
 
-          // Fallback 2: lote más reciente asignado al vendedor vía lead_contact_status
+          // Fallback 2: lote mÃ¡s reciente asignado al vendedor vÃ­a lead_contact_status
           const lcsRes = await client.query(
             `SELECT lcs.batch_id
              FROM lead_contact_status lcs
@@ -12954,12 +12954,12 @@ export const handler = async (event) => {
         const validationErrors = [];
 
         if (!resultadoInput || resultadoInput === "nuevo") {
-          validationErrors.push({ field: "estado_venta", message: "Estado inv�lido" });
+          validationErrors.push({ field: "estado_venta", message: "Estado invï¿½lido" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
-          validationErrors.push({ field: "estado_venta", message: "Estado no existe en cat�logo" });
+          validationErrors.push({ field: "estado_venta", message: "Estado no existe en catï¿½logo" });
         }
 
         if (resultadoInput === "seguimiento" && !fechaAgenda) {
@@ -12987,13 +12987,13 @@ export const handler = async (event) => {
               success: false,
               data: { gestion_id: existingGestionId },
               error: {
-                message: "Contacto ya est� en estado final",
+                message: "Contacto ya estï¿½ en estado final",
                 estado_actual: currentEstadoVenta
               }
             });
           }
 
-          // Rechazo solo se puede corregir el mismo d�a
+          // Rechazo solo se puede corregir el mismo dï¿½a
           if (currentEstadoVenta === "rechazo") {
             const ultimaGestionRes = await client.query(
               `
@@ -13017,7 +13017,7 @@ export const handler = async (event) => {
                 success: false,
                 data: null,
                 error: {
-                  message: "El rechazo solo puede corregirse el mismo d�a",
+                  message: "El rechazo solo puede corregirse el mismo dï¿½a",
                   estado_actual: currentEstadoVenta
                 }
               });
@@ -13032,7 +13032,7 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "Validaci�n",
+              message: "Validaciï¿½n",
               errors: validationErrors
             }
           });
@@ -13971,7 +13971,7 @@ export const handler = async (event) => {
           i += 1;
         }
       } else {
-        // Por defecto, excluir datos de recupero en creación de lotes (solo CSV / guía telefónica)
+        // Por defecto, excluir datos de recupero en creaciÃ³n de lotes (solo CSV / guÃ­a telefÃ³nica)
         conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
       }
 
@@ -14111,7 +14111,7 @@ export const handler = async (event) => {
           i += 1;
         }
       } else {
-        // Por defecto, excluir datos de recupero en creación de lotes (solo CSV / guía telefónica)
+        // Por defecto, excluir datos de recupero en creaciÃ³n de lotes (solo CSV / guÃ­a telefÃ³nica)
         conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
       }
 
@@ -14716,7 +14716,7 @@ export const handler = async (event) => {
         const orgClause = organizationId ? ` AND organization_id = $4` : "";
         const orgParams = organizationId ? [organizationId] : [];
 
-        // SIEMPRE: rellamar y seguimiento van al vendedor destino específico (tienen contexto)
+        // SIEMPRE: rellamar y seguimiento van al vendedor destino especÃ­fico (tienen contexto)
         // Solo aplica si hay new_seller_id (mode specific o roundrobin con destino)
         if (newSellerId) {
           await client.query(
@@ -14728,7 +14728,7 @@ export const handler = async (event) => {
           );
         }
 
-        // nuevo y no_contesta según el mode elegido
+        // nuevo y no_contesta segÃºn el mode elegido
         if (mode === "specific") {
           // Van al vendedor destino
           await client.query(
@@ -14995,7 +14995,7 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "Contactos inv�lidos para asignar",
+              message: "Contactos invï¿½lidos para asignar",
               errors
             }
           });
@@ -15942,7 +15942,7 @@ export const handler = async (event) => {
       try {
         const config = await getConfigMap(client);
 
-        // Agregar logo_url de la organización del usuario
+        // Agregar logo_url de la organizaciÃ³n del usuario
         const orgId = await resolveOrganizationIdForRequest(dbUser, event).catch(() => null);
         if (orgId) {
           const orgResult = await client.query(
@@ -15967,7 +15967,7 @@ export const handler = async (event) => {
     }
   }
 
-  // GET /campanas/stats — métricas del dashboard de campañas
+  // GET /campanas/stats â€” mÃ©tricas del dashboard de campaÃ±as
   if (method === "GET" && path.endsWith("/campanas/stats")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -16002,7 +16002,7 @@ export const handler = async (event) => {
 
         const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
 
-        // Métricas generales
+        // MÃ©tricas generales
         const metricsRes = await client.query(
           `
           SELECT
@@ -16033,7 +16033,7 @@ export const handler = async (event) => {
           [origenDato]
         );
 
-        // Ingresos por día (últimos 30 días)
+        // Ingresos por dÃ­a (Ãºltimos 30 dÃ­as)
         const dailyRes = await client.query(
           `
           SELECT
@@ -16060,7 +16060,7 @@ export const handler = async (event) => {
           [origenDato]
         );
 
-        // Distribución por vendedor
+        // DistribuciÃ³n por vendedor
         const vendedoresRes = await client.query(
           `
           SELECT
@@ -16106,7 +16106,7 @@ export const handler = async (event) => {
     }
   }
 
-  // GET /campanas/leads — tabla de leads de campaña
+  // GET /campanas/leads â€” tabla de leads de campaÃ±a
   if (method === "GET" && path.endsWith("/campanas/leads")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -16344,7 +16344,7 @@ export const handler = async (event) => {
         (h) => h === "motivo de la baja" || h === "motivo de baja"
       );
       const hasEstado = headers.some(
-        (h) => h === "ultimo estado" || h === "último estado"
+        (h) => h === "ultimo estado" || h === "Ãºltimo estado"
       );
       if (!hasDocumento || !hasMotivo || !hasEstado) {
         return json(400, { ok: false, message: "Headers invalidos" });
@@ -16758,7 +16758,7 @@ export const handler = async (event) => {
 
         const management = managementRes.rows[0];
         if (!management) {
-          return json(404, { ok: false, message: "Gesti�n no encontrada" });
+          return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
         }
 
         const auditsRes = await client.query(
@@ -16863,7 +16863,7 @@ export const handler = async (event) => {
 
         const detail = detailRes.rows[0];
         if (!detail) {
-          return json(404, { ok: false, message: "Gesti�n no encontrada" });
+          return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
         }
 
         return json(200, {
@@ -16896,7 +16896,7 @@ export const handler = async (event) => {
       return json(400, { ok: false, message: "management_id requerido" });
     }
     if (!isValidUuid(managementId)) {
-      return json(400, { ok: false, message: "management_id inv�lido" });
+      return json(400, { ok: false, message: "management_id invï¿½lido" });
     }
     if (body === null) {
       return json(400, { ok: false, message: "Invalid JSON body" });
@@ -16942,13 +16942,13 @@ export const handler = async (event) => {
         const management = managementRes.rows[0];
         if (!management) {
           await client.query("ROLLBACK");
-          return json(404, { ok: false, message: "Gesti�n no encontrada" });
+          return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
         if (!desiredCatalog) {
           await client.query("ROLLBACK");
-          return json(400, { ok: false, message: "resultado_corregido no existe en cat�logo" });
+          return json(400, { ok: false, message: "resultado_corregido no existe en catï¿½logo" });
         }
 
         const insertRes = await client.query(
@@ -17814,7 +17814,7 @@ export const handler = async (event) => {
             createdAlert = await createAlert(client, {
               agente_id: agenteId,
               tipo: "conversion_baja",
-              descripcion: `${conversion}% actual vs m�nimo ${config.conversion_minima_porcentaje}%`,
+              descripcion: `${conversion}% actual vs mï¿½nimo ${config.conversion_minima_porcentaje}%`,
               hora_evento: now,
               fecha
             });
@@ -18019,7 +18019,7 @@ export const handler = async (event) => {
         }
         const status = statusRes.rows[0]?.status || "";
         if (status === "processing") {
-          return json(409, { ok: false, message: "El job est� en proceso" });
+          return json(409, { ok: false, message: "El job estï¿½ en proceso" });
         }
         const deleted = await client.query(
           `
@@ -18703,7 +18703,7 @@ export const handler = async (event) => {
         console.log("analyze-diff: content-type", event?.headers?.["content-type"]);
         console.log("analyze-diff: body length", event?.body?.length);
         console.log("analyze-diff: isBase64", event?.isBase64Encoded);
-        console.log("analyze-diff: rawCsv length después de decode", rawCsv?.length);
+        console.log("analyze-diff: rawCsv length despuÃ©s de decode", rawCsv?.length);
         console.log("analyze-diff: csvText length desde JSON:", rawCsv?.length);
         console.log(
           "analyze-diff: multipart fields",
@@ -18717,9 +18717,9 @@ export const handler = async (event) => {
           "analyze-diff: file content length",
           parsedMultipart?.files?.file?.content?.length
         );
-        console.log("analyze-diff: líneas detectadas", lines?.length);
+        console.log("analyze-diff: lÃ­neas detectadas", lines?.length);
         console.log("analyze-diff: separador detectado", separator);
-        console.log("analyze-diff: primera línea", lines?.[0]?.substring(0, 100));
+        console.log("analyze-diff: primera lÃ­nea", lines?.[0]?.substring(0, 100));
         console.log("analyze-diff rows:", rows.length);
         return json(200, {
           resumen: {
@@ -19483,6 +19483,24 @@ export const handler = async (event) => {
       };
 
       const createdUser = await createManualUser(payload, dbUser);
+
+      // AUTO-ASIGNACIÃ“N: si el superadmin tiene una org activa, asignar el usuario a ella
+      const orgIdParam = getQueryParam(event, "organization_id");
+      if (orgIdParam) {
+        const clientOrg = createDbClient();
+        await clientOrg.connect();
+        try {
+          await clientOrg.query(
+            `INSERT INTO organization_users (organization_id, user_id, role_in_org, activo, created_at)
+             VALUES ($1, $2, $3, true, now())
+             ON CONFLICT (organization_id, user_id) DO UPDATE SET activo = true, role_in_org = EXCLUDED.role_in_org`,
+            [orgIdParam, createdUser.id, payload.role]
+          );
+        } finally {
+          await clientOrg.end();
+        }
+      }
+
       return json(201, mapUserRowToApi(createdUser));
     } catch (error) {
       if (error instanceof AppError) {
@@ -19578,7 +19596,7 @@ export const handler = async (event) => {
     }
   }
 
-  // ─── ORGANIZATIONS ENDPOINTS ──────────────────────────────────────────────
+  // â”€â”€â”€ ORGANIZATIONS ENDPOINTS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // PATCH /api/users/:id/pausar
   if (method === "PATCH" && path.match(/\/api\/users\/([^/]+)\/pausar$/)) {
     const match = path.match(/\/api\/users\/([^/]+)\/pausar$/);
@@ -19779,16 +19797,21 @@ export const handler = async (event) => {
           [nombre]
         );
         if (existing.rows.length) {
-          return json(409, { ok: false, message: "Ya existe una organización con ese nombre" });
+          return json(409, { ok: false, message: "Ya existe una organizaciÃ³n con ese nombre" });
         }
+
+        const rut = String(body?.rut || '').trim() || null;
+        const email_admin = String(body?.email_admin || '').trim().toLowerCase() || null;
+        const telefono = String(body?.telefono || '').trim() || null;
+        const pais = String(body?.pais || 'UY').trim() || 'UY';
 
         const result = await client.query(
           `
-          INSERT INTO organizations (nombre, created_at, updated_at)
-          VALUES ($1, now(), now())
-          RETURNING id, nombre, logo_url, created_at, updated_at
+          INSERT INTO organizations (nombre, rut, email_admin, telefono, pais, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, now(), now())
+          RETURNING id, nombre, rut, email_admin, telefono, pais, logo_url, created_at, updated_at
           `,
-          [nombre]
+          [nombre, rut, email_admin, telefono, pais]
         );
 
         return json(201, { ok: true, item: result.rows[0] });
@@ -19825,7 +19848,7 @@ export const handler = async (event) => {
           [orgId]
         );
         if (!check.rows.length) {
-          return json(404, { ok: false, message: "Organización no encontrada" });
+          return json(404, { ok: false, message: "OrganizaciÃ³n no encontrada" });
         }
         currentLogoUrl = check.rows[0].logo_url || null;
       } finally {
@@ -19918,10 +19941,18 @@ export const handler = async (event) => {
 
       const orgId = orgDetailMatch[1];
       const nombre = body?.nombre !== undefined ? normalizeText(body.nombre) : undefined;
+      const rut = body?.rut !== undefined ? String(body.rut || '').trim() : undefined;
+      const email_admin = body?.email_admin !== undefined ? String(body.email_admin || '').trim().toLowerCase() : undefined;
+      const telefono = body?.telefono !== undefined ? String(body.telefono || '').trim() : undefined;
+      const pais = body?.pais !== undefined ? String(body.pais || '').trim() : undefined;
       const updates = [];
       const values = [];
       let idx = 1;
       if (nombre !== undefined) { updates.push(`nombre = $${idx}`); values.push(nombre); idx += 1; }
+      if (rut !== undefined) { updates.push(`rut = $${idx}`); values.push(rut); idx += 1; }
+      if (email_admin !== undefined) { updates.push(`email_admin = $${idx}`); values.push(email_admin); idx += 1; }
+      if (telefono !== undefined) { updates.push(`telefono = $${idx}`); values.push(telefono); idx += 1; }
+      if (pais !== undefined) { updates.push(`pais = $${idx}`); values.push(pais); idx += 1; }
       if (!updates.length) return json(400, { ok: false, message: "Sin campos para actualizar" });
 
       const client = createDbClient();
@@ -19938,13 +19969,155 @@ export const handler = async (event) => {
           values
         );
 
-        if (!result.rows.length) return json(404, { ok: false, message: "Organización no encontrada" });
+        if (!result.rows.length) return json(404, { ok: false, message: "OrganizaciÃ³n no encontrada" });
         return json(200, { ok: true, item: result.rows[0] });
       } finally {
         await client.end();
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to update organization", error: error.message });
+    }
+  }
+
+  // GET /organizations/:id/users â€” listar usuarios de una organizaciÃ³n
+  const orgUsersMatch = path.match(/\/organizations\/([^/]+)\/users$/);
+
+  if (method === "GET" && orgUsersMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const orgId = orgUsersMatch[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `SELECT
+             u.id,
+             u.nombre,
+             u.apellido,
+             u.email,
+             u.telefono,
+             u.role_key,
+             u.status,
+             u.created_at,
+             ou.role_in_org,
+             ou.activo AS activo_en_org,
+             ou.created_at AS asignado_en
+           FROM organization_users ou
+           JOIN users u ON u.id = ou.user_id
+           WHERE ou.organization_id = $1
+           ORDER BY u.nombre ASC`,
+          [orgId]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to list org users", error: error.message });
+    }
+  }
+
+  // POST /organizations/:id/users â€” asignar usuario a una organizaciÃ³n
+  if (method === "POST" && orgUsersMatch) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const orgId = orgUsersMatch[1];
+      const userId = body?.user_id;
+      const roleInOrg = body?.role_in_org || "operaciones";
+
+      if (!userId) return json(422, { ok: false, message: "user_id es obligatorio" });
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        // Verificar que la org existe
+        const orgCheck = await client.query(
+          `SELECT id FROM organizations WHERE id = $1 LIMIT 1`, [orgId]
+        );
+        if (!orgCheck.rows.length) {
+          return json(404, { ok: false, message: "OrganizaciÃ³n no encontrada" });
+        }
+
+        // Verificar que el usuario existe
+        const userCheck = await client.query(
+          `SELECT id, nombre, apellido, email, role_key FROM users WHERE id = $1 LIMIT 1`, [userId]
+        );
+        if (!userCheck.rows.length) {
+          return json(404, { ok: false, message: "Usuario no encontrado" });
+        }
+
+        // Upsert: si ya existe lo reactiva, si no lo crea
+        const result = await client.query(
+          `INSERT INTO organization_users (organization_id, user_id, role_in_org, activo, created_at)
+           VALUES ($1, $2, $3, true, now())
+           ON CONFLICT (organization_id, user_id)
+           DO UPDATE SET activo = true, role_in_org = EXCLUDED.role_in_org
+           RETURNING *`,
+          [orgId, userId, roleInOrg]
+        );
+
+        return json(201, { ok: true, item: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to assign user to org", error: error.message });
+    }
+  }
+
+  // DELETE /organizations/:id/users/:userId â€” desasociar usuario de una organizaciÃ³n
+  const orgUserItemMatch = path.match(/\/organizations\/([^/]+)\/users\/([^/]+)$/);
+
+  if (method === "DELETE" && orgUserItemMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const orgId = orgUserItemMatch[1];
+      const targetUserId = orgUserItemMatch[2];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query(
+          `UPDATE organization_users SET activo = false
+           WHERE organization_id = $1 AND user_id = $2`,
+          [orgId, targetUserId]
+        );
+        return json(200, { ok: true });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to remove user from org", error: error.message });
     }
   }
 
@@ -20107,6 +20280,9 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
+
+
+
 
 
 
