@@ -5650,12 +5650,25 @@ async function resolveOrganizationId(client, dbUser, event) {
   if (dbUser.role_key === "superadministrador") {
     return getQueryParam(event, "organization_id") || null;
   }
+  const orgIdParam = getQueryParam(event, "organization_id");
+  if (orgIdParam) {
+    const check = await client.query(
+      `SELECT organization_id FROM organization_users
+       WHERE user_id = $1 AND organization_id = $2 AND activo = true
+       LIMIT 1`,
+      [dbUser.id, orgIdParam]
+    );
+    if (check.rows[0]) {
+      return check.rows[0].organization_id;
+    }
+  }
   const orgUser = await client.query(
     `
     SELECT organization_id
     FROM organization_users
     WHERE user_id = $1
       AND activo = true
+    ORDER BY created_at ASC
     LIMIT 1
     `,
     [dbUser.id]
@@ -19846,6 +19859,53 @@ export const handler = async (event) => {
       }
     } catch (err) {
       return json(500, { ok: false, message: err.message });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/me/organizations")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `SELECT
+             o.id,
+             o.nombre,
+             o.logo_url,
+             o.status,
+             ou.role_in_org,
+             ou.activo AS activo_en_org,
+             COUNT(ou2.user_id)::int AS total_usuarios
+           FROM organization_users ou
+           JOIN organizations o ON o.id = ou.organization_id
+           LEFT JOIN organization_users ou2
+             ON ou2.organization_id = o.id AND ou2.activo = true
+           WHERE ou.user_id = $1
+             AND ou.activo = true
+             AND o.status != 'inactivo'
+           GROUP BY o.id, o.nombre, o.logo_url, o.status,
+                    ou.role_in_org, ou.activo
+           ORDER BY o.nombre ASC`,
+          [dbUser.id]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list user organizations",
+        error: error.message
+      });
     }
   }
 
