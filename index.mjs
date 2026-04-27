@@ -19662,7 +19662,8 @@ export const handler = async (event) => {
         telefono: normalizePhoneValidation(validation.data.telefono),
         role: validation.data.rol,
         status: validation.data.status,
-        reason: validation.data.reason || undefined
+        reason: validation.data.reason || undefined,
+        temporaryPassword: body?.temporaryPassword || undefined
       };
 
       const createdUser = await createManualUser(payload, dbUser);
