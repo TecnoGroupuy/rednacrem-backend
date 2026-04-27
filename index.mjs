@@ -16016,10 +16016,14 @@ export const handler = async (event) => {
           ),
           safeCount(
             `
-            SELECT COUNT(DISTINCT agente_id)::int AS total
-            FROM eventos_turno
-            WHERE inicio >= now() - interval '1 day'
-            `
+            SELECT COUNT(DISTINCT et.agente_id)::int AS total
+            FROM eventos_turno et
+            JOIN organization_users ou ON ou.user_id = et.agente_id
+              AND ou.activo = true
+            WHERE et.inicio >= now() - interval '1 day'
+            ${organizationId ? "AND ou.organization_id = $1" : ""}
+            `,
+            orgValues
           ),
           safeCount(
             `
