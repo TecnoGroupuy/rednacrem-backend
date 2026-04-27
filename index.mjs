@@ -16024,7 +16024,7 @@ export const handler = async (event) => {
             SELECT COUNT(*)::int AS total
             FROM sales s
             WHERE s.fecha_venta >= now() - interval '1 day'
-            ${orgFilterAlias}
+            ${organizationId ? "AND s.organization_id = $1" : ""}
             `,
             orgValues
           ),
