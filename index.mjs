@@ -13456,6 +13456,7 @@ export const handler = async (event) => {
           `,
           values
         );
+        console.log('[lead-batches] primer item tipo:', result.rows[0]?.tipo);
         const items = result.rows.map((row) => {
           const totalContactos = Number.parseInt(row.total_contactos, 10) || 0;
           let vendedores = row.vendedores || [];
@@ -13469,6 +13470,7 @@ export const handler = async (event) => {
           return {
             id: row.id,
             nombre: row.nombre,
+            tipo: row.tipo,
             estado: row.estado,
             seller_id: row.seller_id,
             max_intentos: row.max_intentos,
