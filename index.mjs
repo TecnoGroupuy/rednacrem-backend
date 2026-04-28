@@ -3111,6 +3111,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     LEFT JOIN session_count sc ON sc.agente_id = u.id
     WHERE u.role_key = 'vendedor'
       AND u.status = 'approved'
+      AND (u.is_test IS NULL OR u.is_test = false)
       AND ($4::uuid IS NULL OR u.id = $4::uuid)
     ORDER BY u.nombre
     `,
