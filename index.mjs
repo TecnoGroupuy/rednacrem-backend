@@ -19633,6 +19633,8 @@ export const handler = async (event) => {
         });
       }
 
+      const DEFAULT_VENDOR_PASSWORD = 'Rednacrem@2026';
+
       const payload = {
         nombre: validation.data.nombre,
         apellido: validation.data.apellido,
@@ -19641,7 +19643,7 @@ export const handler = async (event) => {
         role: rol,
         status: validation.data.status,
         reason: validation.data.reason || 'Alta desde modulo equipo',
-        temporaryPassword: body?.temporaryPassword || undefined
+        temporaryPassword: body?.temporaryPassword || DEFAULT_VENDOR_PASSWORD
       };
 
       const createdUser = await createManualUser(payload, dbUser);
