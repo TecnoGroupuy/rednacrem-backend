@@ -11574,6 +11574,8 @@ export const handler = async (event) => {
       const tipo = getQueryParam(event, "tipo") || null;
       const searchRaw = String(getQueryParam(event, "search") || "").trim();
       const search = searchRaw ? `%${searchRaw}%` : null;
+      const origenDatoRaw = String(getQueryParam(event, "origen_dato") || "").trim();
+      const origenDato = origenDatoRaw ? `%${origenDatoRaw}%` : null;
       let tabNormalized = tab;
       if (tabNormalized === "nuevos") tabNormalized = "nuevo";
 
@@ -11630,6 +11632,7 @@ export const handler = async (event) => {
             AND lb.estado IN ('activo', 'asignado')
             AND lcs.estado_venta != 'dato_erroneo'
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
                 COALESCE(d.nombre, c.nombre, '') ILIKE $3
@@ -11646,7 +11649,7 @@ export const handler = async (event) => {
             )
             ${countExtra}
           `,
-          [sellerId, tipo, search]
+          [sellerId, tipo, search, origenDato]
         );
         const result = await client.query(
           `
@@ -11684,6 +11687,7 @@ export const handler = async (event) => {
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
                 COALESCE(d.nombre, c.nombre, '') ILIKE $3
@@ -11700,9 +11704,9 @@ export const handler = async (event) => {
             )
             ${tabWhere}
           ORDER BY lcs.intentos ASC, lcs.updated_at DESC, lcs.contact_id ASC
-          LIMIT $4 OFFSET $5
+          LIMIT $5 OFFSET $6
           `,
-          [sellerId, tipo, search, limit, offset]
+          [sellerId, tipo, search, origenDato, limit, offset]
         );
         const total = parseInt(countResult.rows[0]?.count || "0", 10);
 
