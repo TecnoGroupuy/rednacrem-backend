@@ -19590,6 +19590,95 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "POST" && path.endsWith("/org/users")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, [
+        "superadministrador", "director", "supervisor"
+      ]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      if (!organizationId) {
+        return json(403, { ok: false, message: "Sin organizacion activa" });
+      }
+
+      const rol = String(body?.role || body?.rol || '').trim();
+      if (!['vendedor', 'atencion_cliente'].includes(rol)) {
+        return json(422, {
+          ok: false,
+          message: "Solo se pueden crear usuarios con rol vendedor o atencion_cliente"
+        });
+      }
+
+      const validation = validateSuperadminUserPayload({
+        ...body,
+        rol,
+        status: body?.status || 'approved'
+      });
+      if (!validation.valid) {
+        return json(422, {
+          ok: false,
+          message: "Validation failed",
+          errors: validation.errors
+        });
+      }
+
+      const payload = {
+        nombre: validation.data.nombre,
+        apellido: validation.data.apellido,
+        email: validation.data.email,
+        telefono: normalizePhoneValidation(validation.data.telefono),
+        role: rol,
+        status: validation.data.status,
+        reason: validation.data.reason || 'Alta desde modulo equipo',
+        temporaryPassword: body?.temporaryPassword || undefined
+      };
+
+      const createdUser = await createManualUser(payload, dbUser);
+
+      const clientOrg = createDbClient();
+      await clientOrg.connect();
+      try {
+        await clientOrg.query(
+          `INSERT INTO organization_users
+             (organization_id, user_id, role_in_org, activo, created_at)
+           VALUES ($1, $2, $3, true, now())
+           ON CONFLICT (organization_id, user_id)
+           DO UPDATE SET activo = true, role_in_org = EXCLUDED.role_in_org`,
+          [organizationId, createdUser.id, rol]
+        );
+      } finally {
+        await clientOrg.end();
+      }
+
+      return json(201, mapUserRowToApi(createdUser));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return json(error.statusCode, {
+          ok: false,
+          message: error.message,
+          code: error.code,
+          details: error.details
+        });
+      }
+      return json(500, {
+        ok: false,
+        message: "Failed to create org user",
+        error: error.message
+      });
+    }
+  }
+
   // GET /module-states — carga estados para el rol del usuario
   if (method === "GET" && path.endsWith("/module-states")) {
     try {
