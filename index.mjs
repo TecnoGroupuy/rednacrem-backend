@@ -7998,13 +7998,15 @@ export const handler = async (event) => {
         );
         const leadId = insertRes.rows[0]?.id;
         if (leadId && estado === "nuevo") {
+          const batchName = body?.batch_name || 'Meta';
+          const orgId = body?.organization_id || defaultOrgId;
           const batchRes = await client.query(
             `SELECT id FROM lead_batches
-             WHERE nombre = 'Meta'
+             WHERE nombre = $1
                AND estado IN ('activo', 'asignado')
-               AND organization_id = $1
+               AND organization_id = $2
              ORDER BY created_at DESC LIMIT 1`,
-            [defaultOrgId]
+            [batchName, orgId]
           );
           const batchId = batchRes.rows[0]?.id || null;
 
@@ -8012,7 +8014,7 @@ export const handler = async (event) => {
             await client.query(
               `INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
                VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-              [batchId, leadId, defaultOrgId]
+              [batchId, leadId, orgId]
             );
 
             const sellersRes = await client.query(
@@ -8049,7 +8051,7 @@ export const handler = async (event) => {
                ON CONFLICT (contact_id) DO UPDATE SET
                  batch_id = $2, assigned_to = $3,
                  estado_venta = 'nuevo', updated_at = now()`,
-              [leadId, batchId, assignedTo, defaultOrgId]
+              [leadId, batchId, assignedTo, orgId]
             );
           }
         }
