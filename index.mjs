@@ -17421,15 +17421,16 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-        const sellersRes = await client.query(
-          `
-          SELECT id, nombre, apellido
-          FROM users
-          WHERE role_key = 'vendedor'
-            AND status = 'approved'
-          ORDER BY nombre
-          `
-        );
+      const sellersRes = await client.query(
+        `
+        SELECT id, nombre, apellido
+        FROM users
+        WHERE role_key = 'vendedor'
+          AND status = 'approved'
+          AND (is_test IS NULL OR is_test = false)
+        ORDER BY nombre
+        `
+      );
         const sellers = sellersRes.rows || [];
         const sellerIds = sellers.map((row) => row.id);
         if (!sellerIds.length) {
