@@ -3750,7 +3750,7 @@ async function ensureDatosTrabajarJobTable(client) {
   );
 }
 
-function buildDatosTrabajarInsertBatch(batchRows, organizationId = null) {
+function buildDatosTrabajarInsertBatch(batchRows, organizationId = null, importJobId = null) {
   const columns = [
     "nombre",
     "apellido",
@@ -3764,11 +3764,12 @@ function buildDatosTrabajarInsertBatch(batchRows, organizationId = null) {
     "localidad",
     "origen_dato",
     "estado",
-    "organization_id"
+    "organization_id",
+    "import_job_id"
   ];
   const values = [];
   const placeholders = batchRows.map((row, index) => {
-    values.push(...row, organizationId);
+    values.push(...row, organizationId, importJobId);
     const base = index * columns.length;
     const params = columns.map((_, colIndex) => `$${base + colIndex + 1}`);
     return `(${params.join(", ")})`;
@@ -4157,6 +4158,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
     const job = jobRes.rows[0];
     const orgId = job.organization_id || null;
+    const importJobId = job.id || null;
     const csvText = job.csv_text || "";
     const { rows } = mapDatosParaTrabajarCsv(csvText);
     const totalRows = rows.length;
@@ -4247,14 +4249,14 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
       index += 1;
 
       if (buffer.length >= batchSize) {
-        const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId);
+        const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId);
         await client.query(sql, values);
         buffer = [];
       }
 
       if (maxMillis && Date.now() - startedAt > maxMillis) {
         if (buffer.length) {
-          const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId);
+          const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId);
           await client.query(sql, values);
         }
         await client.query(
@@ -4279,7 +4281,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     }
 
     if (buffer.length) {
-      const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId);
+      const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId);
       await client.query(sql, values);
     }
 
@@ -13928,6 +13930,63 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.endsWith("/datos-para-trabajar/import-jobs")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const values = [];
+        let whereClause = "WHERE status = 'completed'";
+        if (organizationId) {
+          values.push(organizationId);
+          whereClause += " AND organization_id = $1";
+        }
+        const res = await client.query(
+          `
+          SELECT id, file_name, created_at
+          FROM datos_para_trabajar_import_jobs
+          ${whereClause}
+          ORDER BY created_at DESC
+          `,
+          values
+        );
+        return json(200, { ok: true, items: res.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list datos para trabajar import jobs",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && (path.endsWith("/datos-para-trabajar/preview") || path.endsWith("/preview"))) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -14030,6 +14089,13 @@ export const handler = async (event) => {
         } else if (telefonoTipo === "ambos") {
           conditions.push("celular IS NOT NULL AND celular <> '' AND telefono IS NOT NULL AND telefono <> ''");
         }
+      }
+
+      const importJobId = getQueryParam(event, "import_job_id");
+      if (importJobId) {
+        conditions.push(`import_job_id = $${i}`);
+        params.push(importJobId);
+        i += 1;
       }
 
       const diasSinGestion = getQueryParam(event, "dias_sin_gestion");
@@ -14170,6 +14236,13 @@ export const handler = async (event) => {
         } else if (telefonoTipo === "ambos") {
           conditions.push("celular IS NOT NULL AND celular <> '' AND telefono IS NOT NULL AND telefono <> ''");
         }
+      }
+
+      const importJobId = getQueryParam(event, "import_job_id");
+      if (importJobId) {
+        conditions.push(`import_job_id = $${i}`);
+        params.push(importJobId);
+        i += 1;
       }
 
       const diasSinGestion = getQueryParam(event, "dias_sin_gestion");
