@@ -3750,7 +3750,7 @@ async function ensureDatosTrabajarJobTable(client) {
   );
 }
 
-function buildDatosTrabajarInsertBatch(batchRows) {
+function buildDatosTrabajarInsertBatch(batchRows, organizationId = null) {
   const columns = [
     "nombre",
     "apellido",
@@ -3763,10 +3763,12 @@ function buildDatosTrabajarInsertBatch(batchRows) {
     "departamento",
     "localidad",
     "origen_dato",
-    "estado"
+    "estado",
+    "organization_id"
   ];
   const values = [];
   const placeholders = batchRows.map((row, index) => {
+    values.push(...row, organizationId);
     const base = index * columns.length;
     const params = columns.map((_, colIndex) => `$${base + colIndex + 1}`);
     return `(${params.join(", ")})`;
@@ -4144,7 +4146,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
   try {
     const jobRes = await client.query(
       `
-      SELECT id, batch_id, csv_text, processed_rows, inserted_rows, blocked_rows, skipped_rows
+      SELECT id, batch_id, csv_text, processed_rows, inserted_rows, blocked_rows, skipped_rows, organization_id
       FROM datos_para_trabajar_import_jobs
       WHERE id = $1
       LIMIT 1
@@ -4154,6 +4156,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     if (!jobRes.rows.length) return;
 
     const job = jobRes.rows[0];
+    const orgId = job.organization_id || null;
     const csvText = job.csv_text || "";
     const { rows } = mapDatosParaTrabajarCsv(csvText);
     const totalRows = rows.length;
@@ -4244,14 +4247,14 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
       index += 1;
 
       if (buffer.length >= batchSize) {
-        const { sql, values } = buildDatosTrabajarInsertBatch(buffer);
+        const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId);
         await client.query(sql, values);
         buffer = [];
       }
 
       if (maxMillis && Date.now() - startedAt > maxMillis) {
         if (buffer.length) {
-          const { sql, values } = buildDatosTrabajarInsertBatch(buffer);
+          const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId);
           await client.query(sql, values);
         }
         await client.query(
@@ -4276,7 +4279,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     }
 
     if (buffer.length) {
-      const { sql, values } = buildDatosTrabajarInsertBatch(buffer);
+      const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId);
       await client.query(sql, values);
     }
 
