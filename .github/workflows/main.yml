@@ -21,20 +21,36 @@ jobs:
 
       - name: Deploy a Lambda
         run: |
-          aws lambda update-function-code \
+          VERSION=$(aws lambda update-function-code \
             --function-name rednacrem-api \
             --zip-file fileb://function.zip \
-            --region us-east-2
+            --region us-east-2 \
+            --publish \
+            --query Version --output text)
+          echo "Published version: ${VERSION}"
+          aws lambda update-alias \
+            --function-name rednacrem-api \
+            --name prod \
+            --function-version "${VERSION}" \
+            --region us-east-2 || true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Deploy worker Lambda
         run: |
-          aws lambda update-function-code \
+          VERSION=$(aws lambda update-function-code \
             --function-name no-call-import-worker \
             --zip-file fileb://function.zip \
-            --region us-east-2
+            --region us-east-2 \
+            --publish \
+            --query Version --output text)
+          echo "Published version: ${VERSION}"
+          aws lambda update-alias \
+            --function-name no-call-import-worker \
+            --name prod \
+            --function-version "${VERSION}" \
+            --region us-east-2 || true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

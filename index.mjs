@@ -11290,9 +11290,10 @@ export const handler = async (event) => {
               NULL,
               now(),
               now()
-            ON CONFLICT (contact_id, batch_id) DO UPDATE
+            ON CONFLICT (contact_id) DO UPDATE
             SET
               assigned_to = COALESCE(EXCLUDED.assigned_to, lead_contact_status.assigned_to),
+              batch_id = EXCLUDED.batch_id,
               estado_venta = COALESCE(lead_contact_status.estado_venta, 'nuevo'),
               intentos = COALESCE(lead_contact_status.intentos, 0),
               updated_at = now()
