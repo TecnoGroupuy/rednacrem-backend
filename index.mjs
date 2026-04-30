@@ -8885,46 +8885,31 @@ export const handler = async (event) => {
             }
           }
 
-          const statusRes = await client.query(
+          await client.query(
             `
-            SELECT 1
-            FROM lead_contact_status
-            WHERE contact_id = $1 AND batch_id = $2
-            LIMIT 1
+            INSERT INTO lead_contact_status (
+              contact_id,
+              estado_venta,
+              intentos,
+              proxima_accion,
+              batch_id,
+              assigned_to,
+              ola_actual,
+              ultimo_intento_at
+            )
+            VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
+            ON CONFLICT (contact_id) DO UPDATE
+            SET
+              estado_venta = 'venta',
+              intentos = COALESCE(lead_contact_status.intentos, 0) + 1,
+              batch_id = EXCLUDED.batch_id,
+              assigned_to = EXCLUDED.assigned_to,
+              ola_actual = 1,
+              ultimo_intento_at = now(),
+              updated_at = now()
             `,
-            [leadId, principal.batchId]
+            [leadId, principal.batchId, safeSellerId]
           );
-          if (statusRes.rows.length) {
-            await client.query(
-            `
-            UPDATE lead_contact_status
-            SET estado_venta = 'venta',
-                intentos = COALESCE(intentos, 0) + 1,
-                assigned_to = $3,
-                ultimo_intento_at = now(),
-                updated_at = now()
-            WHERE contact_id = $1 AND batch_id = $2
-            `,
-              [leadId, principal.batchId, safeSellerId]
-            );
-          } else {
-            await client.query(
-              `
-              INSERT INTO lead_contact_status (
-                contact_id,
-                estado_venta,
-                intentos,
-                proxima_accion,
-                batch_id,
-                assigned_to,
-                ola_actual,
-                ultimo_intento_at
-              )
-              VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
-              `,
-              [leadId, principal.batchId, safeSellerId]
-            );
-          }
 
           if (!createManagementInContacts) {
             return {
@@ -12422,6 +12407,16 @@ export const handler = async (event) => {
               ultimo_intento_at
             )
             VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
+            ON CONFLICT (contact_id) DO UPDATE
+            SET
+              estado_venta = 'nuevo',
+              intentos = COALESCE(lead_contact_status.intentos, 0),
+              proxima_accion = NULL,
+              batch_id = EXCLUDED.batch_id,
+              assigned_to = EXCLUDED.assigned_to,
+              ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
+              ultimo_intento_at = now(),
+              updated_at = now()
             `,
             [leadId, batchId, dbUser?.id || null]
           );
@@ -13117,6 +13112,16 @@ export const handler = async (event) => {
               ultimo_intento_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+            ON CONFLICT (contact_id) DO UPDATE
+            SET
+              estado_venta = EXCLUDED.estado_venta,
+              intentos = EXCLUDED.intentos,
+              proxima_accion = EXCLUDED.proxima_accion,
+              batch_id = EXCLUDED.batch_id,
+              assigned_to = EXCLUDED.assigned_to,
+              ola_actual = EXCLUDED.ola_actual,
+              ultimo_intento_at = now(),
+              updated_at = now()
             `,
             [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
           );
@@ -15167,6 +15172,14 @@ export const handler = async (event) => {
                 organization_id
               )
               VALUES ($1, 'nuevo', 0, $2, $3, $4)
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = EXCLUDED.assigned_to,
+                organization_id = COALESCE(EXCLUDED.organization_id, lead_contact_status.organization_id),
+                estado_venta = 'nuevo',
+                intentos = 0,
+                updated_at = now()
               `,
               [contactId, batchId, assignedTo, organizationId]
             );
