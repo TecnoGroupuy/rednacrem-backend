@@ -16380,7 +16380,7 @@ export const handler = async (event) => {
   }
 
   // GET /campanas/origenes â€” lista de origenes disponibles para filtros del dashboard
-  if (method === "GET" && path.endsWith("/campanas/origenes")) {
+  if (method === "GET" && (path.endsWith("/campanas/origenes") || path.endsWith("/api/campanas/origenes"))) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
@@ -16428,7 +16428,7 @@ export const handler = async (event) => {
   }
 
   // GET /campanas/stats â€” mÃ©tricas del dashboard de campaÃ±as
-  if (method === "GET" && path.endsWith("/campanas/stats")) {
+  if (method === "GET" && (path.endsWith("/campanas/stats") || path.endsWith("/api/campanas/stats"))) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
@@ -16578,7 +16578,7 @@ export const handler = async (event) => {
   }
 
   // GET /campanas/leads â€” tabla de leads de campaÃ±a
-  if (method === "GET" && path.endsWith("/campanas/leads")) {
+  if (method === "GET" && (path.endsWith("/campanas/leads") || path.endsWith("/api/campanas/leads"))) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
