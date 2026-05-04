@@ -16449,14 +16449,9 @@ export const handler = async (event) => {
       }
 
       const periodo = event.queryStringParameters?.periodo || "dia";
-      const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
-      const loteNombre = {
-        facebook: "Meta",
-        "discado auto": "Discado auto",
-        recupero: "Recupero",
-        "guia telefonica": "Guia telefonica",
-        captacion: "Captacion"
-      }[origenDato] || null;
+      const origenDatoRaw = event.queryStringParameters?.origen_dato;
+      const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
+      const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
 
       const client = createDbClient();
       await client.connect();
@@ -16468,6 +16463,8 @@ export const handler = async (event) => {
         else if (periodo === "mes") dateFilter = "AND d.created_at >= now() - interval '30 days'";
 
         const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
+        const origenFilter = origenDatoFilter ? "AND lower(coalesce(d.origen_dato, '')) = $1" : "";
+        const origenValues = origenDatoFilter ? [origenDatoFilter] : [];
 
         // MÃ©tricas generales
         const metricsRes = await client.query(
@@ -16487,19 +16484,12 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
-          WHERE EXISTS (
-            SELECT 1
-            FROM lead_batch_contacts lbc
-            JOIN lead_batches lb ON lb.id = lbc.batch_id
-            WHERE lbc.contact_id = d.id
-              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
-              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
-          )
-            AND lower(coalesce(d.origen_dato, '')) = $1
+          WHERE 1=1
+          ${origenFilter}
           ${orgFilter}
           ${dateFilter}
           `,
-          [origenDato]
+          origenValues
         );
 
         // Ingresos por dÃ­a (Ãºltimos 30 dÃ­as)
@@ -16512,21 +16502,14 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
-          WHERE EXISTS (
-            SELECT 1
-            FROM lead_batch_contacts lbc
-            JOIN lead_batches lb ON lb.id = lbc.batch_id
-            WHERE lbc.contact_id = d.id
-              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
-              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
-          )
-            AND lower(coalesce(d.origen_dato, '')) = $1
+          WHERE 1=1
+            ${origenFilter}
             AND d.created_at >= now() - interval '30 days'
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
           GROUP BY DATE(d.created_at AT TIME ZONE 'America/Montevideo')
           ORDER BY fecha DESC
           `,
-          [origenDato]
+          origenValues
         );
 
         // DistribuciÃ³n por vendedor
@@ -16543,28 +16526,21 @@ export const handler = async (event) => {
           FROM lead_contact_status lcs
           JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           JOIN users u ON u.id = lcs.assigned_to
-          WHERE EXISTS (
-            SELECT 1
-            FROM lead_batch_contacts lbc
-            JOIN lead_batches lb ON lb.id = lbc.batch_id
-            WHERE lbc.contact_id = d.id
-              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
-              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
-          )
-            AND lower(coalesce(d.origen_dato, '')) = $1
+          WHERE 1=1
+            ${origenFilter}
             AND u.status = 'activo'
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
             ${dateFilter.replace("d.created_at", "d.created_at")}
           GROUP BY u.id, u.nombre, u.apellido
           ORDER BY total DESC
           `,
-          [origenDato]
+          origenValues
         );
 
         return json(200, {
           ok: true,
           periodo,
-          origen_dato: origenDato,
+          origen_dato: origenDatoFilter || "todos",
           metricas: metricsRes.rows[0],
           por_dia: dailyRes.rows,
           por_vendedor: vendedoresRes.rows
@@ -16598,14 +16574,9 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
-      const loteNombre = {
-        facebook: "Meta",
-        "discado auto": "Discado auto",
-        recupero: "Recupero",
-        "guia telefonica": "Guia telefonica",
-        captacion: "Captacion"
-      }[origenDato] || null;
+      const origenDatoRaw = event.queryStringParameters?.origen_dato;
+      const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
+      const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
       const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
       const offset = (page - 1) * limit;
@@ -16613,21 +16584,22 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
+        const origenFilter = origenDatoFilter ? "AND lower(coalesce(d.origen_dato, '')) = $1" : "";
+        const origenValues = origenDatoFilter ? [origenDatoFilter] : [];
+        const limitParam = origenDatoFilter ? 2 : 1;
+        const offsetParam = origenDatoFilter ? 3 : 2;
+        const limitValues = origenDatoFilter ? [origenDatoFilter, limit, offset] : [limit, offset];
+
         const countRes = await client.query(
           `
           SELECT COUNT(*) AS total
           FROM datos_para_trabajar d
-          WHERE EXISTS (
-            SELECT 1
-            FROM lead_batch_contacts lbc
-            JOIN lead_batches lb ON lb.id = lbc.batch_id
-            WHERE lbc.contact_id = d.id
-              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
-              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
-          )
-            AND lower(coalesce(d.origen_dato, '')) = $1
+          WHERE 1=1
+          ${origenFilter}
+          ${orgFilter}
           `,
-          [origenDato]
+          origenValues
         );
 
         const result = await client.query(
@@ -16651,19 +16623,13 @@ export const handler = async (event) => {
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
-          WHERE EXISTS (
-            SELECT 1
-            FROM lead_batch_contacts lbc
-            JOIN lead_batches lb ON lb.id = lbc.batch_id
-            WHERE lbc.contact_id = d.id
-              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
-              ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
-          )
-            AND lower(coalesce(d.origen_dato, '')) = $1
+          WHERE 1=1
+          ${origenFilter}
+          ${orgFilter}
           ORDER BY d.created_at DESC
-          LIMIT $2 OFFSET $3
+          LIMIT $${limitParam} OFFSET $${offsetParam}
           `,
-          [origenDato, limit, offset]
+          limitValues
         );
 
         return json(200, {
