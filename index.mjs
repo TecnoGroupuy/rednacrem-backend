@@ -16481,6 +16481,8 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'no_contesta') AS no_contesta,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'dato_erroneo') AS datos_erroneos,
+            COUNT(*) FILTER (WHERE lcs.estado_venta IS NULL OR lcs.estado_venta = 'nuevo') AS sin_gestion,
+            COUNT(*) FILTER (WHERE lcs.estado_venta IN ('seguimiento', 'rellamar')) AS en_proceso,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'rellamar') AS rellamar,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento
           FROM datos_para_trabajar d
