@@ -16379,6 +16379,54 @@ export const handler = async (event) => {
     }
   }
 
+  // GET /campanas/origenes â€” lista de origenes disponibles para filtros del dashboard
+  if (method === "GET" && path.endsWith("/campanas/origenes")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "director", "supervisor"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `
+          SELECT DISTINCT origen_dato, COUNT(*) as total
+          FROM datos_para_trabajar
+          WHERE organization_id = $1
+            AND origen_dato IS NOT NULL AND origen_dato != ''
+          GROUP BY origen_dato
+          ORDER BY total DESC
+          `,
+          [organizationId]
+        );
+        return json(200, { ok: true, origenes: result.rows.map((r) => r.origen_dato) });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load campaign origins", error: error.message });
+    }
+  }
+
   // GET /campanas/stats â€” mÃ©tricas del dashboard de campaÃ±as
   if (method === "GET" && path.endsWith("/campanas/stats")) {
     try {
