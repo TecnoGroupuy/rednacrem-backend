@@ -16584,22 +16584,29 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-        const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
-        const origenFilter = origenDatoFilter ? "AND lower(coalesce(d.origen_dato, '')) = $1" : "";
-        const origenValues = origenDatoFilter ? [origenDatoFilter] : [];
-        const limitParam = origenDatoFilter ? 2 : 1;
-        const offsetParam = origenDatoFilter ? 3 : 2;
-        const limitValues = origenDatoFilter ? [origenDatoFilter, limit, offset] : [limit, offset];
+        const filters = [];
+        const filterValues = [];
+        let filterIdx = 1;
+        if (origenDatoFilter) {
+          filters.push(`lower(coalesce(d.origen_dato, '')) = $${filterIdx}`);
+          filterValues.push(origenDatoFilter);
+          filterIdx += 1;
+        }
+        if (organizationId) {
+          filters.push(`d.organization_id = $${filterIdx}`);
+          filterValues.push(organizationId);
+          filterIdx += 1;
+        }
+        const whereClause = filters.length ? `AND ${filters.join(" AND ")}` : "";
 
         const countRes = await client.query(
           `
           SELECT COUNT(*) AS total
           FROM datos_para_trabajar d
           WHERE 1=1
-          ${origenFilter}
-          ${orgFilter}
+          ${whereClause}
           `,
-          origenValues
+          filterValues
         );
 
         const result = await client.query(
@@ -16624,12 +16631,11 @@ export const handler = async (event) => {
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE 1=1
-          ${origenFilter}
-          ${orgFilter}
+          ${whereClause}
           ORDER BY d.created_at DESC
-          LIMIT $${limitParam} OFFSET $${offsetParam}
+          LIMIT $${filterIdx} OFFSET $${filterIdx + 1}
           `,
-          limitValues
+          [...filterValues, limit, offset]
         );
 
         return json(200, {
