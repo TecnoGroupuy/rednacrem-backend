@@ -16290,7 +16290,8 @@ export const handler = async (event) => {
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos,
             COUNT(*) FILTER (WHERE lcs.estado_venta = 'no_contesta') AS no_contesta,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados
+            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados,
+            COUNT(*) FILTER (WHERE lcs.estado_venta IS NULL OR lcs.estado_venta = 'nuevo') AS sin_gestion
           FROM lead_contact_status lcs
           JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           JOIN users u ON u.id = lcs.assigned_to
@@ -16303,6 +16304,7 @@ export const handler = async (event) => {
               ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
             AND lower(coalesce(d.origen_dato, '')) = $1
+            AND u.status = 'activo'
             ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
             ${dateFilter.replace("d.created_at", "d.created_at")}
           GROUP BY u.id, u.nombre, u.apellido
