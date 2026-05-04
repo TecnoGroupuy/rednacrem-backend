@@ -16450,6 +16450,13 @@ export const handler = async (event) => {
 
       const periodo = event.queryStringParameters?.periodo || "dia";
       const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
+      const loteNombre = {
+        facebook: "Meta",
+        "discado auto": "Discado auto",
+        recupero: "Recupero",
+        "guia telefonica": "Guia telefonica",
+        captacion: "Captacion"
+      }[origenDato] || null;
 
       const client = createDbClient();
       await client.connect();
@@ -16483,7 +16490,7 @@ export const handler = async (event) => {
             FROM lead_batch_contacts lbc
             JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lb.nombre = 'Meta'
+              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
               ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
             AND lower(coalesce(d.origen_dato, '')) = $1
@@ -16508,7 +16515,7 @@ export const handler = async (event) => {
             FROM lead_batch_contacts lbc
             JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lb.nombre = 'Meta'
+              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
               ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
             AND lower(coalesce(d.origen_dato, '')) = $1
@@ -16539,7 +16546,7 @@ export const handler = async (event) => {
             FROM lead_batch_contacts lbc
             JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lb.nombre = 'Meta'
+              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
               ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
             AND lower(coalesce(d.origen_dato, '')) = $1
@@ -16590,6 +16597,13 @@ export const handler = async (event) => {
       }
 
       const origenDato = (event.queryStringParameters?.origen_dato || "facebook").trim().toLowerCase();
+      const loteNombre = {
+        facebook: "Meta",
+        "discado auto": "Discado auto",
+        recupero: "Recupero",
+        "guia telefonica": "Guia telefonica",
+        captacion: "Captacion"
+      }[origenDato] || null;
       const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
       const offset = (page - 1) * limit;
@@ -16606,7 +16620,7 @@ export const handler = async (event) => {
             FROM lead_batch_contacts lbc
             JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lb.nombre = 'Meta'
+              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
               ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
             AND lower(coalesce(d.origen_dato, '')) = $1
@@ -16640,7 +16654,7 @@ export const handler = async (event) => {
             FROM lead_batch_contacts lbc
             JOIN lead_batches lb ON lb.id = lbc.batch_id
             WHERE lbc.contact_id = d.id
-              AND lb.nombre = 'Meta'
+              ${loteNombre ? `AND lb.nombre = '${loteNombre}'` : ""}
               ${organizationId ? `AND lb.organization_id = '${organizationId}'` : ""}
           )
             AND lower(coalesce(d.origen_dato, '')) = $1
