@@ -8074,6 +8074,197 @@ export const handler = async (event) => {
     }
   }
 
+  // POST /webhooks/discado — recibir contactos que contestaron desde discador (AMI / n8n)
+  if (method === "POST" && path.endsWith("/webhooks/discado")) {
+    const bodyRaw = safeParseBody(event);
+    const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const organizationId = isValidUuid(body?.organization_id) ? body.organization_id : null;
+    if (!organizationId) {
+      return json(400, { ok: false, message: "organization_id requerido" });
+    }
+
+    const rawNombre = normalizeText(body?.nombre || "");
+    const parts = rawNombre ? rawNombre.split(" ") : [];
+    const nombre = normalizeText(parts[0] || "") || null;
+    const apellido = normalizeText(parts.slice(1).join(" ") || "") || null;
+
+    const telefono = sanitizePhone(normalizeUyNumber(body?.telefono || ""));
+    const direccion = normalizeText(body?.direccion || "") || null;
+    const departamento = normalizeText(body?.departamento || "") || null;
+    const origenDato = "Discado auto";
+
+    const parseDiscadoFecha = (val) => {
+      if (!val) return null;
+      const raw = String(val).trim();
+      const [datePart, timePart] = raw.split(" ");
+      if (!datePart || !timePart) return null;
+      const dateBits = datePart.split("/").map((x) => x.trim()).filter(Boolean);
+      const timeBits = timePart.split(":").map((x) => x.trim()).filter(Boolean);
+      if (dateBits.length !== 3 || timeBits.length < 2) return null;
+      const day = parseInt(dateBits[0], 10);
+      const month = parseInt(dateBits[1], 10);
+      const year = parseInt(dateBits[2], 10);
+      const hours = parseInt(timeBits[0], 10);
+      const minutes = parseInt(timeBits[1], 10);
+      if (
+        !Number.isFinite(day) ||
+        !Number.isFinite(month) ||
+        !Number.isFinite(year) ||
+        !Number.isFinite(hours) ||
+        !Number.isFinite(minutes)
+      ) {
+        return null;
+      }
+      if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+      const mm = String(month).padStart(2, "0");
+      const dd = String(day).padStart(2, "0");
+      const hh = String(hours).padStart(2, "0");
+      const mi = String(minutes).padStart(2, "0");
+      // Guardamos en formato ISO local (sin timezone) para timestamp sin tz.
+      return `${year}-${mm}-${dd} ${hh}:${mi}:00`;
+    };
+
+    const fechaLead = parseDiscadoFecha(body?.fecha_llamada) || null;
+
+    if (!telefono && !nombre) {
+      return json(422, { ok: false, message: "telefono o nombre requerido" });
+    }
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      const columnsInfo = await getLeadContactColumns(client);
+      const dCols = columnsInfo.d;
+
+      const columns = [];
+      const placeholders = [];
+      const values = [];
+      let idx = 1;
+      const pushCol = (col, val) => {
+        if (!dCols.has(col)) return;
+        columns.push(col);
+        placeholders.push(`$${idx}`);
+        values.push(val);
+        idx += 1;
+      };
+
+      pushCol("nombre", nombre);
+      pushCol("apellido", apellido);
+      pushCol("telefono", telefono);
+      pushCol("direccion", direccion);
+      pushCol("departamento", departamento);
+      pushCol("origen_dato", origenDato);
+      pushCol("estado", "nuevo");
+      pushCol("organization_id", organizationId);
+      pushCol("fecha_lead", fechaLead);
+
+      const conflictTarget = `ON CONFLICT (organization_id, telefono) WHERE origen_dato = 'Discado auto'`;
+      const insertRes = await client.query(
+        `
+        INSERT INTO datos_para_trabajar (${columns.join(", ")})
+        VALUES (${placeholders.join(", ")})
+        ${conflictTarget}
+        DO UPDATE SET
+          nombre = COALESCE(EXCLUDED.nombre, datos_para_trabajar.nombre),
+          apellido = COALESCE(EXCLUDED.apellido, datos_para_trabajar.apellido),
+          direccion = COALESCE(EXCLUDED.direccion, datos_para_trabajar.direccion),
+          departamento = COALESCE(EXCLUDED.departamento, datos_para_trabajar.departamento),
+          estado = 'nuevo',
+          fecha_lead = COALESCE(EXCLUDED.fecha_lead, datos_para_trabajar.fecha_lead),
+          updated_at = now()
+        RETURNING id
+        `,
+        values
+      );
+
+      const leadId = insertRes.rows[0]?.id || null;
+      if (!leadId) {
+        return json(500, { ok: false, message: "No se pudo crear lead" });
+      }
+
+      let assignedTo = null;
+      const batchRes = await client.query(
+        `SELECT id FROM lead_batches
+         WHERE nombre = 'Discado auto'
+           AND estado IN ('activo', 'asignado')
+           AND organization_id = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [organizationId]
+      );
+      const batchId = batchRes.rows[0]?.id || null;
+
+      if (batchId) {
+        await client.query(
+          `INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [batchId, leadId, organizationId]
+        );
+
+        const sellersRes = await client.query(
+          `SELECT lbs.seller_id
+           FROM lead_batch_sellers lbs
+           JOIN users u ON u.id = lbs.seller_id
+           WHERE lbs.batch_id = $1
+             AND lower(coalesce(u.status, 'approved')) = 'approved'
+           ORDER BY seller_id ASC`,
+          [batchId]
+        );
+        const sellers = sellersRes.rows.map((r) => r.seller_id);
+
+        if (sellers.length) {
+          const countsRes = await client.query(
+            `SELECT assigned_to, COUNT(*) AS total
+             FROM lead_contact_status
+             WHERE batch_id = $1
+               AND assigned_to = ANY($2::uuid[])
+               AND estado_venta IN ('no_contesta', 'seguimiento', 'nuevo')
+             GROUP BY assigned_to`,
+            [batchId, sellers]
+          );
+          const counts = {};
+          for (const row of countsRes.rows) counts[row.assigned_to] = parseInt(row.total, 10);
+          assignedTo = sellers.reduce((min, s) =>
+            (counts[s] || 0) < (counts[min] || 0) ? s : min, sellers[0]);
+
+          await client.query(
+            `
+            INSERT INTO lead_contact_status (
+              contact_id,
+              estado_venta,
+              intentos,
+              batch_id,
+              assigned_to,
+              organization_id
+            )
+            VALUES ($1, 'nuevo', 0, $2, $3, $4)
+            ON CONFLICT (contact_id) DO UPDATE
+            SET
+              batch_id = EXCLUDED.batch_id,
+              assigned_to = EXCLUDED.assigned_to,
+              organization_id = COALESCE(EXCLUDED.organization_id, lead_contact_status.organization_id),
+              estado_venta = 'nuevo',
+              intentos = COALESCE(lead_contact_status.intentos, 0),
+              updated_at = now()
+            `,
+            [leadId, batchId, assignedTo, organizationId]
+          );
+        }
+      }
+
+      return json(200, { ok: true, id: leadId, asignado_a: assignedTo });
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to process discado webhook", error: error.message });
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
   if (method === "GET" && (path.endsWith("/auth/me") || path.endsWith("/me"))) {
     const authUser = getAuthUser(event);
 
