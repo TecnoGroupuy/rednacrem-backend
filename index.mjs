@@ -20118,7 +20118,56 @@ export const handler = async (event) => {
           values
         );
         if (!res.rows.length) return json(404, { ok: false, message: "Usuario no encontrado" });
-        return json(200, { ok: true, user: res.rows[0] });
+
+        const pausedUser = res.rows[0];
+
+        // Reasignar leads activos (no_contesta, seguimiento, nuevo) a vendedores activos del mismo lote
+        const leadsToReassign = await client.query(
+          `SELECT lcs.contact_id, lbc.batch_id
+           FROM lead_contact_status lcs
+           JOIN lead_batch_contacts lbc ON lbc.contact_id = lcs.contact_id
+           WHERE lcs.assigned_to = $1
+           AND lcs.estado_venta IN ('no_contesta', 'seguimiento', 'nuevo')`,
+          [userId]
+        );
+
+        if (leadsToReassign.rows.length > 0) {
+          // Obtener vendedores activos por lote
+          const batchIds = [...new Set(leadsToReassign.rows.map((r) => r.batch_id))];
+
+          for (const batchId of batchIds) {
+            const activeVendors = await client.query(
+              `SELECT DISTINCT lcs2.assigned_to
+               FROM lead_contact_status lcs2
+               JOIN lead_batch_contacts lbc2 ON lbc2.contact_id = lcs2.contact_id
+               JOIN users u ON u.id = lcs2.assigned_to
+               WHERE lbc2.batch_id = $1
+               AND u.status = 'approved'
+               AND lcs2.assigned_to != $2`,
+              [batchId, userId]
+            );
+
+            if (activeVendors.rows.length === 0) continue;
+
+            const vendors = activeVendors.rows.map((r) => r.assigned_to);
+            const batchLeads = leadsToReassign.rows.filter((r) => r.batch_id === batchId);
+
+            // Round-robin
+            for (let i = 0; i < batchLeads.length; i++) {
+              const newVendor = vendors[i % vendors.length];
+              await client.query(
+                `UPDATE lead_contact_status SET assigned_to = $1 WHERE contact_id = $2`,
+                [newVendor, batchLeads[i].contact_id]
+              );
+            }
+          }
+        }
+
+        return json(200, {
+          ok: true,
+          user: pausedUser,
+          leads_reasignados: leadsToReassign.rows.length
+        });
       } finally {
         await client.end();
       }
