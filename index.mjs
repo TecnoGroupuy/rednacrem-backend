@@ -16648,11 +16648,29 @@ export const handler = async (event) => {
             lcs.estado_venta,
             lcs.intentos,
             lcs.ultimo_intento_at,
-            u.nombre AS vendedor_nombre,
-            u.apellido AS vendedor_apellido
+            lcs.assigned_to,
+            CONCAT_WS(' ', u.nombre, u.apellido) AS assigned_to_name,
+            last_m.fecha_gestion AS last_gestion_at,
+            last_m.resultado AS last_resultado,
+            last_m.nota AS last_nota,
+            last_m.user_nombre AS last_user_nombre,
+            last_m.user_apellido AS last_user_apellido
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           LEFT JOIN users u ON u.id = lcs.assigned_to
+          LEFT JOIN LATERAL (
+            SELECT
+              lm.fecha_gestion,
+              lm.resultado,
+              lm.nota,
+              u2.nombre AS user_nombre,
+              u2.apellido AS user_apellido
+            FROM lead_management_history lm
+            LEFT JOIN users u2 ON u2.id = lm.user_id
+            WHERE lm.contact_id = d.id
+            ORDER BY lm.fecha_gestion DESC
+            LIMIT 1
+          ) last_m ON true
           WHERE 1=1
           ${whereClause}
           ${dateFilter}
@@ -16666,7 +16684,13 @@ export const handler = async (event) => {
           ok: true,
           periodo,
           origen_dato: origenDatoFilter || "todos",
-          items: result.rows,
+          items: result.rows.map((row) => {
+            const lastBy = [row.last_user_nombre, row.last_user_apellido].filter(Boolean).join(" ").trim();
+            return {
+              ...row,
+              last_by: lastBy || ""
+            };
+          }),
           total: parseInt(countRes.rows[0].total, 10),
           page,
           limit
