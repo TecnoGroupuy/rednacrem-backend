@@ -13476,21 +13476,35 @@ export const handler = async (event) => {
       console.log("[agenda] sellerIdParam:", sellerIdParam);
       console.log("[agenda] sellerId usado en query:", sellerId);
 
+      const client = createDbClient();
+      await client.connect();
+      const organizationId = await resolveOrganizationId(client, dbUser, event);
+
       const values = [sellerId];
       const whereParts = ["a.seller_id = $1"];
       let idx = 2;
 
       if (dateParam) {
         whereParts.push(`a.fecha_agenda::date = $${idx}::date`);
+        values.push(dateParam);
+        idx += 1;
       }
       if (!incluirCumplidas) {
         whereParts.push("a.cumplida = false");
       }
 
-      const whereClause = `WHERE ${whereParts.join(" AND ")}`;
+      whereParts.push(`
+        EXISTS (
+          SELECT 1 FROM organization_users ou
+          WHERE ou.user_id = a.seller_id
+            AND ou.organization_id = $${idx}::uuid
+            AND ou.activo = true
+        )
+      `);
+      values.push(organizationId);
+      idx += 1;
 
-      const client = createDbClient();
-      await client.connect();
+      const whereClause = `WHERE ${whereParts.join(" AND ")}`;
       try {
         const res = await client.query(
           `
@@ -13590,6 +13604,27 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const checkRes = await client.query(
+          `
+          SELECT a.id
+          FROM lead_agenda a
+          WHERE a.id = $1
+            AND EXISTS (
+              SELECT 1 FROM organization_users ou
+              WHERE ou.user_id = a.seller_id
+                AND ou.organization_id = $2::uuid
+                AND ou.activo = true
+            )
+          LIMIT 1
+          `,
+          [agendaId, organizationId]
+        );
+        if (!checkRes.rows.length) {
+          return json(403, { ok: false, message: "Forbidden" });
+        }
+
         await client.query(
           `
           UPDATE lead_agenda
