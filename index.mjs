@@ -16448,9 +16448,9 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const periodo = event.queryStringParameters?.periodo || "dia";
-      const origenDatoRaw = event.queryStringParameters?.origen_dato;
-      const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
+      const periodo = getQueryParam(event, "periodo") || "mes";
+      const origenDatoRaw = getQueryParam(event, "origen_dato");
+      const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
 
       const client = createDbClient();
@@ -16574,11 +16574,11 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const origenDatoRaw = event.queryStringParameters?.origen_dato;
-      const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
+      const origenDatoRaw = getQueryParam(event, "origen_dato");
+      const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
-      const page = Math.max(1, parseInt(event.queryStringParameters?.page || "1", 10));
-      const limit = Math.min(100, Math.max(1, parseInt(event.queryStringParameters?.limit || "50", 10)));
+      const page = Math.max(1, parseInt(getQueryParam(event, "page") || "1", 10));
+      const limit = Math.min(100, Math.max(1, parseInt(getQueryParam(event, "limit") || "50", 10)));
       const offset = (page - 1) * limit;
 
       const client = createDbClient();
