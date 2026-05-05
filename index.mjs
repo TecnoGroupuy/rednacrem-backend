@@ -17806,16 +17806,22 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-      const sellersRes = await client.query(
-        `
-        SELECT id, nombre, apellido
-        FROM users
-        WHERE role_key = 'vendedor'
-          AND status = 'approved'
-          AND (is_test IS NULL OR is_test = false)
-        ORDER BY nombre
-        `
-      );
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const sellersRes = await client.query(
+          `
+          SELECT u.id, u.nombre, u.apellido
+          FROM users u
+          JOIN organization_users ou ON ou.user_id = u.id
+          WHERE u.role_key = 'vendedor'
+            AND u.status = 'approved'
+            AND (u.is_test IS NULL OR u.is_test = false)
+            AND ou.organization_id = $1
+            AND ou.activo = true
+          ORDER BY u.nombre
+          `,
+          [organizationId]
+        );
         const sellers = sellersRes.rows || [];
         const sellerIds = sellers.map((row) => row.id);
         if (!sellerIds.length) {
@@ -17827,10 +17833,6 @@ export const handler = async (event) => {
           });
         }
 
-        const columnsInfo = await getLeadContactColumns(client);
-        const dCols = columnsInfo?.d || new Set();
-        const hasDptContactId = dCols.has("contact_id");
-
         const assignedRes = await client.query(
           `
           SELECT lcs.assigned_to AS user_id,
@@ -17840,9 +17842,10 @@ export const handler = async (event) => {
           WHERE lcs.assigned_to = ANY($1::uuid[])
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND lb.organization_id = $3
           GROUP BY lcs.assigned_to
           `,
-          [sellerIds, batchTipo]
+          [sellerIds, batchTipo, organizationId]
         );
         const assignedMap = new Map(assignedRes.rows.map((row) => [row.user_id, Number(row.asignados || 0)]));
 
@@ -17861,6 +17864,7 @@ export const handler = async (event) => {
                 $3::text IS NULL
                 OR lb.tipo = $3
               )
+              AND lb.organization_id = $4
           ), last_result AS (
             SELECT DISTINCT ON (user_id, contact_id)
               user_id,
@@ -17880,7 +17884,7 @@ export const handler = async (event) => {
           FROM last_result
           GROUP BY user_id
           `,
-          [sellerIds, fecha, batchTipo]
+          [sellerIds, fecha, batchTipo, organizationId]
         );
         const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
 
@@ -17903,9 +17907,10 @@ export const handler = async (event) => {
             WHERE s.seller_user_id = ANY($1::uuid[])
               AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
               AND ($3::text IS NULL OR lb.tipo = $3)
+              AND lb.organization_id = $4
             GROUP BY s.seller_user_id
             `,
-            [sellerIds, fecha, batchTipo]
+            [sellerIds, fecha, batchTipo, organizationId]
           );
           manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
         } catch (error) {
