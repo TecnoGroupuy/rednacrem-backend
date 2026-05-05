@@ -5933,7 +5933,7 @@ function buildPhoneSearchClause(fieldPrefix, idx) {
   )`;
 }
 
-async function fetchCodificaciones({
+async function fetchCodificaciones(client, {
   limit = 10,
   offset = 0,
   searchPhone = "",
@@ -5942,14 +5942,13 @@ async function fetchCodificaciones({
   to = "",
   resultado = "",
   resultadoCorregido = "",
-  estado = ""
+  estado = "",
+  organizationId = null
 } = {}) {
-  const client = createDbClient();
-  try {
-    await client.connect();
+  if (!client) throw new Error("fetchCodificaciones requires a db client");
 
-    const whereParts = [];
-    const values = [];
+  const whereParts = [];
+  const values = [];
 
     if (sellerId) {
       values.push(sellerId);
@@ -5982,6 +5981,15 @@ async function fetchCodificaciones({
       } else if (estado === "pendiente") {
         whereParts.push(`la.id IS NULL`);
       }
+    }
+
+    if (organizationId) {
+      values.push(organizationId);
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM lead_batches lb
+        WHERE lb.id = lmh.batch_id
+          AND lb.organization_id = $${values.length}::uuid
+      )`);
     }
 
     const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -6049,10 +6057,7 @@ async function fetchCodificaciones({
     );
 
     return { items: result.rows, total };
-  } finally {
-    await client.end();
   }
-}
 async function getClientMetrics(organizationId) {
   const client = createDbClient();
 
@@ -17145,22 +17150,30 @@ export const handler = async (event) => {
       const from = normalizeText(getQueryParam(event, "from"));
       const to = normalizeText(getQueryParam(event, "to"));
 
-      const { items, total } = await fetchCodificaciones({
-        limit,
-        offset: 0,
-        searchPhone,
-        sellerId,
-        from,
-        to
-      });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const { items, total } = await fetchCodificaciones(client, {
+          limit,
+          offset: 0,
+          searchPhone,
+          sellerId,
+          from,
+          to,
+          organizationId
+        });
 
-      return json(200, {
-        ok: true,
-        success: true,
-        items,
-        limit,
-        total
-      });
+        return json(200, {
+          ok: true,
+          success: true,
+          items,
+          limit,
+          total
+        });
+      } finally {
+        await client.end();
+      }
     } catch (error) {
       return json(500, {
         ok: false,
@@ -17242,26 +17255,34 @@ export const handler = async (event) => {
       const resultadoCorregido = normalizeText(getQueryParam(event, "resultado_corregido"));
       const estado = normalizeText(getQueryParam(event, "estado")).toLowerCase();
 
-      const { items, total } = await fetchCodificaciones({
-        limit,
-        offset,
-        searchPhone,
-        sellerId,
-        from,
-        to,
-        resultado,
-        resultadoCorregido,
-        estado
-      });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const { items, total } = await fetchCodificaciones(client, {
+          limit,
+          offset,
+          searchPhone,
+          sellerId,
+          from,
+          to,
+          resultado,
+          resultadoCorregido,
+          estado,
+          organizationId
+        });
 
-      return json(200, {
-        ok: true,
-        success: true,
-        items,
-        page,
-        limit,
-        total
-      });
+        return json(200, {
+          ok: true,
+          success: true,
+          items,
+          page,
+          limit,
+          total
+        });
+      } finally {
+        await client.end();
+      }
     } catch (error) {
       return json(500, {
         ok: false,
@@ -17295,6 +17316,8 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
         const managementRes = await client.query(
           `
           SELECT
@@ -17322,6 +17345,16 @@ export const handler = async (event) => {
         const management = managementRes.rows[0];
         if (!management) {
           return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
+        }
+
+        const orgCheck = await client.query(
+          `SELECT 1 FROM lead_batches lb
+           WHERE lb.id = $1 AND lb.organization_id = $2
+           LIMIT 1`,
+          [management.batch_id, organizationId]
+        );
+        if (!orgCheck.rows.length) {
+          return json(403, { ok: false, message: "Acceso no autorizado" });
         }
 
         const auditsRes = await client.query(
@@ -17387,6 +17420,30 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const managementRes = await client.query(
+          `SELECT id, batch_id
+           FROM lead_management_history
+           WHERE id = $1
+           LIMIT 1`,
+          [managementId]
+        );
+        const management = managementRes.rows[0];
+        if (!management) {
+          return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
+        }
+
+        const orgCheck = await client.query(
+          `SELECT 1 FROM lead_batches lb
+           WHERE lb.id = $1 AND lb.organization_id = $2
+           LIMIT 1`,
+          [management.batch_id, organizationId]
+        );
+        if (!orgCheck.rows.length) {
+          return json(403, { ok: false, message: "Acceso no autorizado" });
+        }
+
         const detailRes = await client.query(
           `
           WITH latest_audit AS (
@@ -17490,6 +17547,8 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
         await client.query("BEGIN");
 
         const managementRes = await client.query(
@@ -17506,6 +17565,17 @@ export const handler = async (event) => {
         if (!management) {
           await client.query("ROLLBACK");
           return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
+        }
+
+        const orgCheck = await client.query(
+          `SELECT 1 FROM lead_batches lb
+           WHERE lb.id = $1 AND lb.organization_id = $2
+           LIMIT 1`,
+          [management.batch_id, organizationId]
+        );
+        if (!orgCheck.rows.length) {
+          await client.query("ROLLBACK");
+          return json(403, { ok: false, message: "Acceso no autorizado" });
         }
 
         const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
