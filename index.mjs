@@ -16586,8 +16586,8 @@ export const handler = async (event) => {
       await client.connect();
       try {
         let dateFilter = "";
-        if (periodo === "dia" || periodo === "hoy") dateFilter = "AND d.created_at >= now() - interval '1 day'";
-        else if (periodo === "semana" || periodo === "7d" || periodo === "ultimos_7_dias") dateFilter = "AND d.created_at >= now() - interval '7 days'";
+        if (periodo === "dia") dateFilter = "AND d.created_at >= now() - interval '1 day'";
+        else if (periodo === "semana") dateFilter = "AND d.created_at >= now() - interval '7 days'";
         else if (periodo === "mes") dateFilter = "AND d.created_at >= now() - interval '30 days'";
 
         const filters = [];
