@@ -16659,6 +16659,8 @@ export const handler = async (event) => {
 
         return json(200, {
           ok: true,
+          periodo,
+          origen_dato: origenDatoFilter || "todos",
           items: result.rows,
           total: parseInt(countRes.rows[0].total, 10),
           page,
