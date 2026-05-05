@@ -16574,6 +16574,7 @@ export const handler = async (event) => {
         throw error;
       }
 
+      const periodo = getQueryParam(event, "periodo") || "mes";
       const origenDatoRaw = getQueryParam(event, "origen_dato");
       const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
@@ -16584,6 +16585,11 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        let dateFilter = "";
+        if (periodo === "dia" || periodo === "hoy") dateFilter = "AND d.created_at >= now() - interval '1 day'";
+        else if (periodo === "semana" || periodo === "7d" || periodo === "ultimos_7_dias") dateFilter = "AND d.created_at >= now() - interval '7 days'";
+        else if (periodo === "mes") dateFilter = "AND d.created_at >= now() - interval '30 days'";
+
         const filters = [];
         const filterValues = [];
         let filterIdx = 1;
@@ -16605,6 +16611,7 @@ export const handler = async (event) => {
           FROM datos_para_trabajar d
           WHERE 1=1
           ${whereClause}
+          ${dateFilter}
           `,
           filterValues
         );
@@ -16632,6 +16639,7 @@ export const handler = async (event) => {
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE 1=1
           ${whereClause}
+          ${dateFilter}
           ORDER BY d.created_at DESC
           LIMIT $${filterIdx} OFFSET $${filterIdx + 1}
           `,
