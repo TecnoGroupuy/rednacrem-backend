@@ -16578,7 +16578,11 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const periodo = getQueryParam(event, "periodo") || "mes";
+      const periodoRaw = getQueryParam(event, "periodo");
+      let periodo = String(periodoRaw || "mes").trim().toLowerCase();
+      if (periodo === "este_mes") periodo = "mes";
+      if (periodo === "ultimos_7_dias") periodo = "semana";
+      if (periodo === "hoy") periodo = "dia";
       const origenDatoRaw = getQueryParam(event, "origen_dato");
       const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
