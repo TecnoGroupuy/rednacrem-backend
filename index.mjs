@@ -7828,26 +7828,23 @@ export const handler = async (event) => {
             // Asignar vendedor round-robin
             let assignedTo = null;
             if (sellers.length) {
-              // Contar cuÃ¡ntos leads tiene cada vendedor en este lote
-              const countsRes = await client.query(
-                `
-                SELECT assigned_to, COUNT(*) AS total
-                FROM lead_contact_status
-                WHERE batch_id = $1
-                GROUP BY assigned_to
-                `,
-                [batchId]
+              // Round-robin por último asignado
+              const lastAssignedRes = await client.query(
+                `SELECT assigned_to
+                 FROM lead_contact_status
+                 WHERE batch_id = $1
+                   AND assigned_to = ANY($2::uuid[])
+                 ORDER BY COALESCE(updated_at, created_at) DESC
+                 LIMIT 1`,
+                [batchId, sellers]
               );
 
-              const counts = {};
-              for (const row of countsRes.rows) {
-                counts[row.assigned_to] = parseInt(row.total, 10);
+              if (!lastAssignedRes.rows.length) {
+                assignedTo = sellers[0];
+              } else {
+                const lastIndex = sellers.indexOf(lastAssignedRes.rows[0].assigned_to);
+                assignedTo = sellers[(lastIndex + 1) % sellers.length];
               }
-
-              // Asignar al vendedor con menos leads
-              assignedTo = sellers.reduce((min, s) =>
-                (counts[s] || 0) < (counts[min] || 0) ? s : min
-              , sellers[0]);
             }
 
             // Insertar en lead_contact_status
@@ -8221,19 +8218,23 @@ export const handler = async (event) => {
         const sellers = sellersRes.rows.map((r) => r.seller_id);
 
         if (sellers.length) {
-          const countsRes = await client.query(
-            `SELECT assigned_to, COUNT(*) AS total
+          // Round-robin por último asignado
+          const lastAssignedRes = await client.query(
+            `SELECT assigned_to
              FROM lead_contact_status
              WHERE batch_id = $1
                AND assigned_to = ANY($2::uuid[])
-               AND estado_venta IN ('no_contesta', 'seguimiento', 'nuevo')
-             GROUP BY assigned_to`,
+             ORDER BY COALESCE(updated_at, created_at) DESC
+             LIMIT 1`,
             [batchId, sellers]
           );
-          const counts = {};
-          for (const row of countsRes.rows) counts[row.assigned_to] = parseInt(row.total, 10);
-          assignedTo = sellers.reduce((min, s) =>
-            (counts[s] || 0) < (counts[min] || 0) ? s : min, sellers[0]);
+
+          if (!lastAssignedRes.rows.length) {
+            assignedTo = sellers[0];
+          } else {
+            const lastIndex = sellers.indexOf(lastAssignedRes.rows[0].assigned_to);
+            assignedTo = sellers[(lastIndex + 1) % sellers.length];
+          }
 
           await client.query(
             `
