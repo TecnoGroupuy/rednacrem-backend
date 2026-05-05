@@ -10711,7 +10711,12 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path.endsWith("/leads")) {
+  if (
+    method === "GET" &&
+    path.endsWith("/leads") &&
+    !path.endsWith("/campanas/leads") &&
+    !path.endsWith("/api/campanas/leads")
+  ) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
