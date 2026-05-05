@@ -2768,17 +2768,28 @@ async function applyInactividadSiCorresponde(client, agenteId, now) {
   };
 }
 
-async function getTeamSummary(client, fecha, now = new Date()) {
+async function getTeamSummary(client, fecha, now = new Date(), organizationId = null) {
   const config = await getConfigMap(client);
   const sellersRes = await client.query(
     `
-    SELECT id, nombre, apellido
-    FROM users
-    WHERE role_key = 'vendedor'
-      AND status = 'approved'
-      AND (is_test IS NULL OR is_test = false)
-    ORDER BY nombre
+    SELECT u.id, u.nombre, u.apellido
+    FROM users u
+    WHERE u.role_key = 'vendedor'
+      AND u.status = 'approved'
+      AND (u.is_test IS NULL OR u.is_test = false)
+      AND (
+        $1::uuid IS NULL
+        OR EXISTS (
+          SELECT 1 FROM organization_users ou
+          WHERE ou.user_id = u.id
+            AND ou.organization_id = $1::uuid
+            AND ou.activo = true
+        )
+      )
+    ORDER BY u.nombre
     `
+    ,
+    [organizationId]
   );
   const sellers = sellersRes.rows;
   const sellerIds = sellers.map((u) => u.id);
@@ -2911,17 +2922,20 @@ async function getTeamSummary(client, fecha, now = new Date()) {
 
   let agentesAtencion = agentesOutput.filter((a) => a.estado === "Atencion").length;
 
-  const alertasRes = await client.query(
-    `
-    SELECT a.*, u.nombre AS agente_nombre
-    FROM alertas a
-    LEFT JOIN users u ON u.id = a.agente_id
-    WHERE a.fecha = $1
-      AND a.resuelta = false
-    ORDER BY a.created_at DESC
-    `,
-    [fecha]
-  );
+  const alertasRes = sellerIds.length
+    ? await client.query(
+      `
+      SELECT a.*, u.nombre AS agente_nombre
+      FROM alertas a
+      LEFT JOIN users u ON u.id = a.agente_id
+      WHERE a.fecha = $1
+        AND a.resuelta = false
+        AND a.agente_id = ANY($2::uuid[])
+      ORDER BY a.created_at DESC
+      `,
+      [fecha, sellerIds]
+    )
+    : { rows: [] };
 
   const resumen_equipo = {
     agentes_activos: agentesActivos,
@@ -16735,7 +16749,8 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-        const summary = await getTeamSummary(client, fecha, new Date());
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const summary = await getTeamSummary(client, fecha, new Date(), organizationId);
         return json(200, summary);
       } finally {
         await client.end();
