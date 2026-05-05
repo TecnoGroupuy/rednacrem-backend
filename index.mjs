@@ -238,16 +238,19 @@ function getMethod(event) {
 }
 
 function getQueryParam(event, key) {
-  const raw =
-    event?.rawQueryString ||
-    event?.queryString ||
-    event?.queryStringParameters ||
-    "";
-  if (!raw) return null;
-  if (typeof raw === "object") {
-    return raw[key] || null;
+  // Primero intentar como objeto
+  if (event?.queryStringParameters && typeof event.queryStringParameters === "object") {
+    const val = event.queryStringParameters[key];
+    if (val !== undefined && val !== null) return String(val);
   }
-  const params = new URLSearchParams(String(raw));
+  // Luego intentar rawQueryString como string
+  let raw = event?.rawQueryString || event?.queryString || "";
+  if (!raw) return null;
+  // Si es URL completa, extraer solo el querystring
+  if (raw.includes("?")) {
+    raw = raw.split("?").slice(1).join("?");
+  }
+  const params = new URLSearchParams(raw);
   return params.get(key);
 }
 
