@@ -2980,7 +2980,7 @@ async function getTeamSummary(client, fecha, now = new Date()) {
   };
 }
 
-async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new Date(), filterUserId = null) {
+async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new Date(), filterUserId = null, organizationId = null) {
   const result = await client.query(
     `
     WITH base AS (
@@ -3116,9 +3116,15 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       AND u.status = 'approved'
       AND (u.is_test IS NULL OR u.is_test = false)
       AND ($4::uuid IS NULL OR u.id = $4::uuid)
+      AND EXISTS (
+        SELECT 1 FROM organization_users ou
+        WHERE ou.user_id = u.id
+          AND ou.organization_id = $5::uuid
+          AND ou.activo = true
+      )
     ORDER BY u.nombre
     `,
-    [fecha, timezone, now, filterUserId]
+    [fecha, timezone, now, filterUserId, organizationId]
   );
 
   return result.rows.map((row) => {
@@ -17766,7 +17772,8 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-        const items = await getDailyWorkReport(client, fecha, timezone, new Date(), effectiveFilterUserId);
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const items = await getDailyWorkReport(client, fecha, timezone, new Date(), effectiveFilterUserId, organizationId);
         return json(200, { ok: true, fecha, timezone, items });
       } finally {
         await client.end();
