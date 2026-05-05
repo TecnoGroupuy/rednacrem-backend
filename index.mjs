@@ -5672,21 +5672,27 @@ async function resolveOrganizationId(client, dbUser, event) {
       return check.rows[0].organization_id;
     }
   }
-  const orgUser = await client.query(
+  const orgUsers = await client.query(
     `
     SELECT organization_id
     FROM organization_users
     WHERE user_id = $1
       AND activo = true
     ORDER BY created_at ASC
-    LIMIT 1
     `,
     [dbUser.id]
   );
-  if (!orgUser.rows[0]) {
+  if (!orgUsers.rows.length) {
     throw { status: 403, message: "Usuario no asociado a una organizaciÃ³n activa" };
   }
-  return orgUser.rows[0].organization_id;
+
+  // Si el usuario pertenece a mÃ¡s de una organizaciÃ³n, exigir organization_id explÃ­cito
+  // para evitar filtraciones de datos entre empresas.
+  if (orgUsers.rows.length > 1) {
+    throw { status: 400, message: "organization_id requerido" };
+  }
+
+  return orgUsers.rows[0].organization_id;
 }
 
 async function resolveOrganizationIdForRequest(dbUser, event) {
