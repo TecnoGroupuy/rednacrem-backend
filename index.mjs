@@ -20440,6 +20440,12 @@ export const handler = async (event) => {
           }
         }
 
+        // Sacar al usuario de todos los lotes activos
+        await client.query(
+          `DELETE FROM lead_batch_sellers WHERE seller_id = $1`,
+          [userId]
+        );
+
         return json(200, {
           ok: true,
           user: pausedUser,
