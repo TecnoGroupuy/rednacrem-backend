@@ -5933,6 +5933,25 @@ function buildPhoneSearchClause(fieldPrefix, idx) {
   )`;
 }
 
+async function getNextSellerForBatchRoundRobin(client, batchId, sellers) {
+  if (!Array.isArray(sellers) || sellers.length === 0) return null;
+
+  const rrRes = await client.query(
+    `
+    INSERT INTO lead_batch_rr_cursor (batch_id, last_assigned_index, updated_at)
+    VALUES ($1, 0, NOW())
+    ON CONFLICT (batch_id) DO UPDATE
+    SET last_assigned_index = (lead_batch_rr_cursor.last_assigned_index + 1) % $2::int,
+        updated_at = NOW()
+    RETURNING last_assigned_index
+    `,
+    [batchId, sellers.length]
+  );
+
+  const nextIndex = rrRes.rows[0]?.last_assigned_index ?? 0;
+  return sellers[nextIndex] || sellers[0];
+}
+
 async function fetchCodificaciones(client, {
   limit = 10,
   offset = 0,
@@ -7816,7 +7835,7 @@ export const handler = async (event) => {
             const batchId = batchRes.rows[0]?.id || null;
             if (!batchId) continue; // Si no hay lote Meta, ignorar
 
-            // Obtener vendedores del lote para round-robin
+            // Obtener vendedores del lote en orden fijo (created_at ASC)
             const sellersRes = await client.query(
               `
               SELECT lbs.seller_id
@@ -7824,7 +7843,8 @@ export const handler = async (event) => {
               JOIN users u ON u.id = lbs.seller_id
               WHERE lbs.batch_id = $1
                 AND lower(coalesce(u.status, 'approved')) <> 'pausado'
-              ORDER BY seller_id ASC
+                AND lower(coalesce(u.status, 'approved')) = 'approved'
+              ORDER BY lbs.created_at ASC, lbs.seller_id ASC
               `,
               [batchId]
             );
@@ -7856,27 +7876,7 @@ export const handler = async (event) => {
               [batchId, leadId, defaultOrgId]
             );
 
-            // Asignar vendedor round-robin
-            let assignedTo = null;
-            if (sellers.length) {
-              // Round-robin por último asignado
-              const lastAssignedRes = await client.query(
-                `SELECT assigned_to
-                 FROM lead_contact_status
-                 WHERE batch_id = $1
-                   AND assigned_to = ANY($2::uuid[])
-                 ORDER BY COALESCE(updated_at, created_at) DESC
-                 LIMIT 1`,
-                [batchId, sellers]
-              );
-
-              if (!lastAssignedRes.rows.length) {
-                assignedTo = sellers[0];
-              } else {
-                const lastIndex = sellers.indexOf(lastAssignedRes.rows[0].assigned_to);
-                assignedTo = sellers[(lastIndex + 1) % sellers.length];
-              }
-            }
+            const assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
             // Insertar en lead_contact_status
             await client.query(
@@ -8243,29 +8243,14 @@ export const handler = async (event) => {
            JOIN users u ON u.id = lbs.seller_id
            WHERE lbs.batch_id = $1
              AND lower(coalesce(u.status, 'approved')) = 'approved'
-           ORDER BY seller_id ASC`,
+             AND lower(coalesce(u.status, 'approved')) <> 'pausado'
+           ORDER BY lbs.created_at ASC, lbs.seller_id ASC`,
           [batchId]
         );
         const sellers = sellersRes.rows.map((r) => r.seller_id);
 
         if (sellers.length) {
-          // Round-robin por último asignado
-          const lastAssignedRes = await client.query(
-            `SELECT assigned_to
-             FROM lead_contact_status
-             WHERE batch_id = $1
-               AND assigned_to = ANY($2::uuid[])
-             ORDER BY COALESCE(updated_at, created_at) DESC
-             LIMIT 1`,
-            [batchId, sellers]
-          );
-
-          if (!lastAssignedRes.rows.length) {
-            assignedTo = sellers[0];
-          } else {
-            const lastIndex = sellers.indexOf(lastAssignedRes.rows[0].assigned_to);
-            assignedTo = sellers[(lastIndex + 1) % sellers.length];
-          }
+          assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
           await client.query(
             `
