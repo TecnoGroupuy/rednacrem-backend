@@ -4379,7 +4379,12 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
 async function processClientImportBatch(
   batchId,
-  { createProducts = true, organizationId: initialOrganizationId = null } = {}
+  {
+    createProducts = true,
+    organizationId: initialOrganizationId = null,
+    offset = 0,
+    chunkSize = null
+  } = {}
 ) {
   const client = createDbClient();
   await client.connect();
@@ -4453,9 +4458,17 @@ async function processClientImportBatch(
       }
     }
 
+    const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+    const safeChunkSize =
+      Number.isFinite(chunkSize) && chunkSize > 0 ? Math.floor(chunkSize) : null;
+
     const rowsValues = [batchId];
     const rowsOrgClause = organizationId ? "AND organization_id = $2" : "";
     if (organizationId) rowsValues.push(organizationId);
+    const limitOffsetClause = safeChunkSize
+      ? `LIMIT $${rowsValues.length + 1} OFFSET $${rowsValues.length + 2}`
+      : "";
+    if (safeChunkSize) rowsValues.push(safeChunkSize, safeOffset);
     const rowsResult = await client.query(
       `
       SELECT *
@@ -4464,6 +4477,7 @@ async function processClientImportBatch(
         ${rowsOrgClause}
         AND import_status = 'validated'
       ORDER BY row_number ASC
+      ${limitOffsetClause}
       `,
       rowsValues
     );
@@ -20192,6 +20206,11 @@ export const handler = async (event) => {
     if (!batchId || !isValidUuid(batchId)) {
       return json(400, { ok: false, message: "batchId inválido" });
     }
+    const offset = parseInt(String(getQueryParam(event, "offset") || "0"), 10);
+    const chunkSize = 500;
+    if (!Number.isFinite(offset) || offset < 0) {
+      return json(400, { ok: false, message: "offset inválido" });
+    }
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
@@ -20211,7 +20230,9 @@ export const handler = async (event) => {
         const organizationId = batchRes.rows[0]?.organization_id || null;
         await processClientImportBatch(batchId, {
           createProducts: true,
-          organizationId
+          organizationId,
+          offset,
+          chunkSize
         });
         return json(200, { ok: true, processed: true });
       } finally {
