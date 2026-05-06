@@ -12024,7 +12024,9 @@ export const handler = async (event) => {
       const limit = parseInt(getQueryParam(event, "limit") || "50", 10);
       const offset = (page - 1) * limit;
       const tab = getQueryParam(event, "tab") || "todos";
-      const tipo = getQueryParam(event, "tipo") || null;
+      const tipoRaw = getQueryParam(event, "tipo");
+      const tipoNormalized = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
+      const tipo = BATCH_TIPOS.includes(tipoNormalized) ? tipoNormalized : null;
       const searchRaw = String(getQueryParam(event, "search") || "").trim();
       const search = searchRaw ? `%${searchRaw}%` : null;
       const origenDatoRaw = String(getQueryParam(event, "origen_dato") || "").trim();
