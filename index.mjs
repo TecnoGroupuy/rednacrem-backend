@@ -19597,7 +19597,7 @@ export const handler = async (event) => {
         let processResult = null;
         let enqueued = false;
         if (autoProcess) {
-          await enqueueContactImportJob(batch.id, { createProducts });
+          await enqueueContactImportJob(batch.id, { createProducts, organizationId: batch.organization_id });
           enqueued = true;
         }
 
