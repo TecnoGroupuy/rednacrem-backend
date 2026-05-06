@@ -18525,19 +18525,50 @@ export const handler = async (event) => {
       if (roleError) return roleError;
 
       const search = normalizeText(getQueryParam(event, "search") || "");
-      const items = await listUsersService({
-        role: "vendedor",
-        status: "approved",
-        search: search || null
-      });
+      const client = createDbClient();
+      await client.connect();
+      let mapped = [];
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
 
-      const mapped = items.map((user) => ({
-        id: user.id,
-        nombre: user.nombre,
-        apellido: user.apellido,
-        email: user.email,
-        status: "Activo"
-      }));
+        const values = [organizationId];
+        const whereParts = [
+          "u.role_key = 'vendedor'",
+          "u.status = 'approved'",
+          "(u.is_test IS NULL OR u.is_test = false)",
+          "ou.organization_id = $1",
+          "ou.activo = true"
+        ];
+
+        if (search) {
+          values.push(`%${search.toLowerCase()}%`);
+          const idx = values.length;
+          whereParts.push(
+            `(lower(u.nombre) LIKE $${idx} OR lower(u.apellido) LIKE $${idx} OR lower(coalesce(u.email,'')) LIKE $${idx})`
+          );
+        }
+
+        const result = await client.query(
+          `
+          SELECT u.id, u.nombre, u.apellido, u.email
+          FROM users u
+          JOIN organization_users ou ON ou.user_id = u.id
+          WHERE ${whereParts.join(" AND ")}
+          ORDER BY u.nombre ASC
+          `,
+          values
+        );
+
+        mapped = result.rows.map((user) => ({
+          id: user.id,
+          nombre: user.nombre,
+          apellido: user.apellido,
+          email: user.email,
+          status: "Activo"
+        }));
+      } finally {
+        await client.end();
+      }
 
       return json(200, {
         ok: true,
