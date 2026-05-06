@@ -3634,6 +3634,7 @@ function mapCsvRowsToImport(rows) {
 
 const CONTACT_IMPORT_COLUMNS = [
   "batch_id",
+  "organization_id",
   "row_number",
   "nombre",
   "apellido",
@@ -3677,9 +3678,10 @@ const CONTACT_IMPORT_COLUMNS = [
   "raw_payload"
 ];
 
-function buildContactImportRowValues(batchId, rowNumber, item, importStatus, errorDetail) {
+function buildContactImportRowValues(batchId, organizationId, rowNumber, item, importStatus, errorDetail) {
   return [
     batchId,
+    organizationId,
     rowNumber,
     item.nombre,
     item.apellido,
@@ -4377,7 +4379,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
 async function processClientImportBatch(
   batchId,
-  { createProducts = true, organizationId = null } = {}
+  { createProducts = true, organizationId: initialOrganizationId = null } = {}
 ) {
   const client = createDbClient();
   await client.connect();
@@ -4391,6 +4393,15 @@ async function processClientImportBatch(
   const paymentMethodsSeen = new Set();
 
   try {
+    let organizationId = initialOrganizationId;
+    if (!organizationId) {
+      const batchOrgRes = await client.query(
+        "SELECT organization_id FROM contact_import_batches WHERE id = $1",
+        [batchId]
+      );
+      organizationId = batchOrgRes.rows[0]?.organization_id || null;
+    }
+
     const hasResolvedSellerUserId = await columnExists(
       client,
       "contact_import_rows",
@@ -19540,6 +19551,7 @@ export const handler = async (event) => {
 
           const rowValues = buildContactImportRowValues(
             batch.id,
+            batch.organization_id,
             totalRows,
             item,
             importStatus,
