@@ -4441,14 +4441,15 @@ async function processClientImportBatch(
           organizationId ? [productName, organizationId] : [productName]
         );
         if (exists.rowCount > 0) continue;
-        await client.query(
+        const insertProductRes = await client.query(
           `
           INSERT INTO products (nombre, categoria, precio, activo, organization_id)
           VALUES ($1, 'General', $2, true, $3)
+          ON CONFLICT DO NOTHING
           `,
           [productName, row.precio || 0, organizationId]
         );
-        productsCreated += 1;
+        productsCreated += insertProductRes.rowCount || 0;
       }
     }
 
