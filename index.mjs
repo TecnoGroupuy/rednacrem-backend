@@ -15359,18 +15359,32 @@ export const handler = async (event) => {
           );
           const sellerIds = sellersRes.rows.map((r) => r.seller_id);
           if (sellerIds.length > 0) {
+            const contactsParams = [batchId, sellerId];
+            let contactsOrgClause = "";
+            if (organizationId) {
+              contactsParams.push(organizationId);
+              contactsOrgClause = ` AND organization_id = $3`;
+            }
             const contactsRes = await client.query(
-              `SELECT id FROM lead_contact_status
+              `SELECT contact_id FROM lead_contact_status
                WHERE batch_id = $1 AND assigned_to = $2
-                 AND estado_venta IN ('nuevo', 'no_contesta')
-               ORDER BY id ASC`,
-              [batchId, sellerId]
+                 AND estado_venta IN ('nuevo', 'no_contesta')${contactsOrgClause}
+               ORDER BY contact_id ASC`,
+              contactsParams
             );
             for (let i = 0; i < contactsRes.rows.length; i += 1) {
               const destSeller = sellerIds[i % sellerIds.length];
+              const updateParams = [destSeller, contactsRes.rows[i].contact_id, batchId];
+              let updateOrgClause = "";
+              if (organizationId) {
+                updateParams.push(organizationId);
+                updateOrgClause = ` AND organization_id = $4`;
+              }
               await client.query(
-                `UPDATE lead_contact_status SET assigned_to = $1, updated_at = now() WHERE id = $2`,
-                [destSeller, contactsRes.rows[i].id]
+                `UPDATE lead_contact_status
+                 SET assigned_to = $1, updated_at = now()
+                 WHERE contact_id = $2 AND batch_id = $3${updateOrgClause}`,
+                updateParams
               );
             }
           }
