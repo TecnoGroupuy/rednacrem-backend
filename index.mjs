@@ -20185,6 +20185,44 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "POST" && path.match(/\/api\/imports\/clients\/([^/]+)\/process-sync$/)) {
+    const match = path.match(/\/api\/imports\/clients\/([^/]+)\/process-sync$/);
+    const batchId = match?.[1];
+    if (!batchId || !isValidUuid(batchId)) {
+      return json(400, { ok: false, message: "batchId inválido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const batchRes = await client.query(
+          "SELECT organization_id FROM contact_import_batches WHERE id = $1",
+          [batchId]
+        );
+        const organizationId = batchRes.rows[0]?.organization_id || null;
+        await processClientImportBatch(batchId, {
+          createProducts: true,
+          organizationId
+        });
+        return json(200, { ok: true, processed: true });
+      } finally {
+        try {
+          await client.end();
+        } catch {}
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: error.message });
+    }
+  }
+
   if (method === "POST" && path.match(/\/imports\/clients\/([^/]+)\/process$/)) {
     const match = path.match(/\/imports\/clients\/([^/]+)\/process$/);
     const batchId = match?.[1];
