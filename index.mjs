@@ -3814,7 +3814,7 @@ export async function processRecuperoImportJob(jobId) {
   try {
     const jobRes = await client.query(
       `
-      SELECT id, csv_text, status, total_rows, processed_rows, updated_rows, error_rows, delimiter, created_by
+      SELECT id, csv_text, status, total_rows, processed_rows, updated_rows, error_rows, delimiter, created_by, organization_id
       FROM recupero_import_jobs
       WHERE id = $1
       LIMIT 1
@@ -3825,6 +3825,7 @@ export async function processRecuperoImportJob(jobId) {
     if (!jobRes.rows.length) return;
     const job = jobRes.rows[0];
     const createdBy = job.created_by || null;
+    const organizationId = job.organization_id || null;
     const csvText = job.csv_text || "";
     const totalRows = Math.max(0, countCsvRows(csvText) - 1);
 
@@ -3856,6 +3857,21 @@ export async function processRecuperoImportJob(jobId) {
         UPDATE recupero_import_jobs
         SET status = 'failed',
             error_message = 'CSV vacio',
+            finished_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        `,
+        [jobId]
+      );
+      return;
+    }
+
+    if (!organizationId) {
+      await client.query(
+        `
+        UPDATE recupero_import_jobs
+        SET status = 'failed',
+            error_message = 'organization_id faltante',
             finished_at = now(),
             updated_at = now()
         WHERE id = $1
@@ -4006,8 +4022,9 @@ export async function processRecuperoImportJob(jobId) {
       SELECT id, documento
       FROM contacts
       WHERE documento = ANY($1)
+        AND organization_id = $2
       `,
-      [documentos]
+      [documentos, organizationId]
     );
     const contactMap = new Map();
     for (const row of contactsRes.rows) {
@@ -16908,6 +16925,8 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
         const existingRes = await client.query(
           `
           SELECT id, status
@@ -16943,12 +16962,13 @@ export const handler = async (event) => {
             csv_text,
             created_by,
             file_hash,
-            delimiter
+            delimiter,
+            organization_id
           )
-          VALUES ($1, 'queued', 0, 0, 0, 0, 0, 0, 0, $2, $3, $4, $5)
+          VALUES ($1, 'queued', 0, 0, 0, 0, 0, 0, 0, $2, $3, $4, $5, $6)
           RETURNING id, status
           `,
-          [fileName, csvText, dbUser?.id || null, fileHash, headerDelimiter]
+          [fileName, csvText, dbUser?.id || null, fileHash, headerDelimiter, organizationId]
         );
 
         await enqueueRecuperoImportJob(jobRes.rows[0].id);
