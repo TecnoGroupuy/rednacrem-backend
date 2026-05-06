@@ -12163,7 +12163,7 @@ export const handler = async (event) => {
       fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      const hasTipo = tipo === "recupero" || tipo === "captacion";
+      const hasTipo = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"].includes(tipo);
       batchTipo = hasTipo ? tipo : null;
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
@@ -16770,7 +16770,7 @@ export const handler = async (event) => {
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      const batchTipo = (tipo === "recupero" || tipo === "captacion") ? tipo : null;
+      const batchTipo = (["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"].includes(tipo)) ? tipo : null;
       const client = createDbClient();
       await client.connect();
       try {
@@ -17914,7 +17914,7 @@ export const handler = async (event) => {
       fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      batchTipo = (tipo === "recupero" || tipo === "captacion") ? tipo : "";
+      batchTipo = (["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"].includes(tipo)) ? tipo : "";
       const client = createDbClient();
       await client.connect();
       try {
