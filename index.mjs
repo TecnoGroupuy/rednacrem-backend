@@ -5744,6 +5744,32 @@ async function resolveOrganizationId(client, dbUser, event) {
   return orgUsers.rows[0].organization_id;
 }
 
+async function resolveOrganizationIdFromLeadBatchId(client, dbUser, batchId) {
+  const batchRes = await client.query(
+    `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
+    [batchId]
+  );
+  const organizationId = batchRes.rows[0]?.organization_id || null;
+  if (!organizationId) {
+    throw { status: 404, message: "Lote no encontrado" };
+  }
+
+  if (dbUser?.role_key === "superadministrador") {
+    return organizationId;
+  }
+
+  const check = await client.query(
+    `SELECT 1 FROM organization_users
+     WHERE user_id = $1 AND organization_id = $2 AND activo = true
+     LIMIT 1`,
+    [dbUser?.id, organizationId]
+  );
+  if (!check.rows.length) {
+    throw { status: 403, message: "Acceso no autorizado" };
+  }
+  return organizationId;
+}
+
 async function resolveOrganizationIdForRequest(dbUser, event) {
   const client = createDbClient();
   try {
@@ -15273,17 +15299,26 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser); if (statusError) return statusError;
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES); if (roleError) return roleError;
 
-      let organizationId = null;
-      try {
-        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
-      } catch (error) {
-        if (error?.status) return json(error.status, { ok: false, message: error.message });
-        throw error;
-      }
-
       const client = createDbClient();
       await client.connect();
       try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status && error.status !== 400) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+        }
+        if (!organizationId) {
+          try {
+            organizationId = await resolveOrganizationIdFromLeadBatchId(client, dbUser, batchId);
+          } catch (error) {
+            if (error?.status) return json(error.status, { ok: false, message: error.message });
+            throw error;
+          }
+        }
+
         await client.query("BEGIN");
 
         const orgClause = organizationId ? ` AND organization_id = $4` : "";
@@ -15416,19 +15451,26 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      let organizationId = null;
-      try {
-        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
-      } catch (error) {
-        if (error?.status) {
-          return json(error.status, { ok: false, message: error.message });
-        }
-        throw error;
-      }
-
       const client = createDbClient();
       await client.connect();
       try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status && error.status !== 400) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+        }
+        if (!organizationId) {
+          try {
+            organizationId = await resolveOrganizationIdFromLeadBatchId(client, dbUser, batchId);
+          } catch (error) {
+            if (error?.status) return json(error.status, { ok: false, message: error.message });
+            throw error;
+          }
+        }
+
         const batchParams = [batchId];
         let orgBatchClause = "";
         if (organizationId) {
