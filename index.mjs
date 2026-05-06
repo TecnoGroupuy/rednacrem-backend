@@ -8122,6 +8122,207 @@ export const handler = async (event) => {
     }
   }
 
+  // POST /webhooks/meta-sheet-global â€” ingesta desde n8n/Google Sheets (Global Assist)
+  if (method === "POST" && path.endsWith("/webhooks/meta-sheet-global")) {
+    try {
+      const body = safeParseBody(event);
+      console.log("WEBHOOK BODY:", JSON.stringify(body));
+      if (!body) return json(200, { ok: true, skipped: true });
+
+      const orgId = "b1ea7e1c-2c6e-48e3-ae13-e6f25d5edab8"; // Global Assist
+
+      // Parsear campos
+      const rawNombre = normalizeText(body?.full_name || body?.nombre || "");
+      const parts = rawNombre ? rawNombre.split(" ") : [];
+      const nombre = parts[0] || null;
+      const apellido = normalizeText(body?.apellido) || parts.slice(1).join(" ") || null;
+      const stripUY = (n) => {
+        if (!n) return n;
+        n = n.replace(/^\+598/, "");
+        if (n.startsWith("9")) n = "0" + n;
+        return n;
+      };
+      const telefono = stripUY(normalizePhone(body?.phone_number || body?.telefono));
+      const celular = stripUY(normalizePhone(body?.celular));
+      const email = normalizeEmail(body?.email || body?.correo);
+      const parseDateFlexible = (val) => {
+        if (!val) return null;
+        // Formato ISO 8601 con timezone: YYYY-MM-DDTHH:mm:ss-03:00
+        if (/^\d{4}-\d{2}-\d{2}T/.test(val)) {
+          const parsed = new Date(val);
+          if (Number.isNaN(parsed.getTime())) return null;
+          return parsed.toISOString();
+        }
+        // Formato ISO: YYYY-MM-DD
+        if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+        // Formato MDY: MM/DD/YYYY
+        if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(val)) {
+          const [m, d, y] = val.split("/");
+          return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+        }
+        return null;
+      };
+      const fechaNacimiento = parseDateFlexible(body?.date_of_birth || body?.fecha_nacimiento);
+      const nota = normalizeText(body?.nota) || null;
+      const localidad = normalizeText(body?.localidad) || null;
+      const departamento = normalizeText(body?.departamento) || null;
+      const fechaLead = parseDateFlexible(body?.fecha_lead) || null;
+      const origenDato = normalizeText(body?.origen_dato) || "facebook";
+      const campana = normalizeText(body?.campaign_name || body?.campana) || null;
+      const formulario = normalizeText(body?.form_name || body?.formulario) || null;
+
+      if (!nombre && !telefono && !email) {
+        return json(200, { ok: true, skipped: true, reason: "sin_datos" });
+      }
+
+      const client = createDbClient();
+      let responseData = { ok: true, skipped: true };
+      try {
+        await client.connect();
+
+        // Normalizar telÃ©fono para comparaciÃ³n â€” quitar +598, 598, y 0 inicial
+        const normalizeForCompare = (n) => {
+          if (!n) return null;
+          return n.replace(/^\+598/, "").replace(/^598/, "").replace(/^0/, "");
+        };
+
+        const telefonoNorm = normalizeForCompare(telefono);
+        const celularNorm = normalizeForCompare(celular);
+
+        // 1. Detectar si ya es cliente en contacts
+        let isClient = false;
+        if (telefonoNorm || celularNorm || email) {
+          const clientRes = await client.query(
+            `SELECT id FROM contacts
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
+               )
+             LIMIT 1`,
+            [orgId, telefonoNorm, celularNorm, email]
+          );
+          if (clientRes.rows.length) isClient = true;
+        }
+
+        // 2. Detectar duplicados en datos_para_trabajar
+        let isDuplicate = false;
+        if (!isClient && (telefonoNorm || celularNorm || email)) {
+          const dupRes = await client.query(
+            `SELECT id FROM datos_para_trabajar
+             WHERE organization_id = $1
+               AND (
+                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
+                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
+               )
+             LIMIT 1`,
+            [orgId, telefonoNorm, celularNorm, email]
+          );
+          if (dupRes.rows.length) isDuplicate = true;
+        }
+
+        const estado = isDuplicate || isClient ? "bloqueado" : "nuevo";
+        const motivoBloqueo = isClient ? "cliente_existente" : isDuplicate ? "duplicado" : null;
+
+        const insertRes = await client.query(
+          `INSERT INTO datos_para_trabajar (
+            nombre, apellido, telefono, celular,
+            email, fecha_nacimiento,
+            origen_dato, estado, organization_id,
+            nota, localidad, departamento, fecha_lead, motivo_bloqueo,
+            campaign_name, form_name
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14,
+            $15, $16
+          )
+          RETURNING id`,
+          [
+            nombre,
+            apellido,
+            telefono,
+            celular,
+            email,
+            fechaNacimiento,
+            origenDato,
+            estado,
+            orgId,
+            nota,
+            localidad,
+            departamento,
+            fechaLead,
+            motivoBloqueo,
+            campana,
+            formulario,
+          ]
+        );
+        const leadId = insertRes.rows[0]?.id;
+        if (leadId && estado === "nuevo") {
+          const batchRes = await client.query(
+            `SELECT id FROM lead_batches
+             WHERE nombre = 'Solicitud de tarjetas'
+               AND estado IN ('activo', 'asignado')
+               AND organization_id = $1
+             ORDER BY created_at DESC LIMIT 1`,
+            [orgId]
+          );
+          const batchId = batchRes.rows[0]?.id || null;
+
+          if (batchId) {
+            await client.query(
+              `INSERT INTO lead_batch_contacts (batch_id, contact_id, organization_id)
+               VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+              [batchId, leadId, orgId]
+            );
+
+            const sellersRes = await client.query(
+              `SELECT lbs.seller_id
+               FROM lead_batch_sellers lbs
+               JOIN users u ON u.id = lbs.seller_id
+               WHERE lbs.batch_id = $1
+                 AND u.status = 'approved'
+                 AND lower(coalesce(u.status, '')) <> 'pausado'
+               ORDER BY lbs.created_at ASC, lbs.seller_id ASC`,
+              [batchId]
+            );
+            const sellers = sellersRes.rows.map((r) => r.seller_id);
+
+            const assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
+
+            await client.query(
+              `INSERT INTO lead_contact_status (
+                 contact_id, estado_venta, intentos,
+                 batch_id, assigned_to, organization_id
+               ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
+               ON CONFLICT (contact_id) DO UPDATE SET
+                 batch_id = $2, assigned_to = $3,
+                 estado_venta = 'nuevo', updated_at = now()`,
+              [leadId, batchId, assignedTo, orgId]
+            );
+          }
+        }
+        responseData = { ok: true, id: leadId, estado, isDuplicate, isClient };
+      } catch (dbError) {
+        console.error("[DB_ERROR]", dbError?.message);
+        responseData = { ok: false, error: dbError?.message };
+      } finally {
+        try {
+          await client.end();
+        } catch {}
+      }
+      return json(200, responseData);
+    } catch (error) {
+      console.error("meta-sheet-global webhook error:", error);
+      return json(200, { ok: true, error: error.message });
+    }
+  }
+
   // POST /webhooks/discado — recibir contactos que contestaron desde discador (AMI / n8n)
   if (method === "POST" && path.endsWith("/webhooks/discado")) {
     const bodyRaw = safeParseBody(event);
