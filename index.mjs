@@ -8087,26 +8087,14 @@ export const handler = async (event) => {
                FROM lead_batch_sellers lbs
                JOIN users u ON u.id = lbs.seller_id
                WHERE lbs.batch_id = $1
-                 AND lower(coalesce(u.status, 'approved')) <> 'pausado'
-               ORDER BY seller_id ASC`,
+                 AND u.status = 'approved'
+                 AND lower(coalesce(u.status, '')) <> 'pausado'
+               ORDER BY lbs.created_at ASC, lbs.seller_id ASC`,
               [batchId]
             );
             const sellers = sellersRes.rows.map((r) => r.seller_id);
 
-            let assignedTo = null;
-            if (sellers.length) {
-              const countsRes = await client.query(
-                `SELECT assigned_to, COUNT(*) AS total
-                 FROM lead_contact_status
-                 WHERE batch_id = $1
-                 GROUP BY assigned_to`,
-                [batchId]
-              );
-              const counts = {};
-              for (const row of countsRes.rows) counts[row.assigned_to] = parseInt(row.total, 10);
-              assignedTo = sellers.reduce((min, s) =>
-                (counts[s] || 0) < (counts[min] || 0) ? s : min, sellers[0]);
-            }
+            const assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
             await client.query(
               `INSERT INTO lead_contact_status (
