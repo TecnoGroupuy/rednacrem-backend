@@ -21,6 +21,7 @@ const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
 const s3Client = new S3Client({ region: "us-east-1" });
 const S3_BUCKET = "rednacrem-assets";
 const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
+const BATCH_TIPOS = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"];
 
 function getRequestId(event) {
   const headerId =
@@ -12163,7 +12164,7 @@ export const handler = async (event) => {
       fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      const hasTipo = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"].includes(tipo);
+      const hasTipo = BATCH_TIPOS.includes(tipo);
       batchTipo = hasTipo ? tipo : null;
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
@@ -16770,7 +16771,7 @@ export const handler = async (event) => {
       const fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      const batchTipo = (["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"].includes(tipo)) ? tipo : null;
+      const batchTipo = BATCH_TIPOS.includes(tipo) ? tipo : null;
       const client = createDbClient();
       await client.connect();
       try {
@@ -17914,7 +17915,7 @@ export const handler = async (event) => {
       fecha = parseFechaParam(getQueryParam(event, "fecha"));
       const tipoRaw = getQueryParam(event, "tipo");
       const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
-      batchTipo = (["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"].includes(tipo)) ? tipo : "";
+      batchTipo = BATCH_TIPOS.includes(tipo) ? tipo : "";
       const client = createDbClient();
       await client.connect();
       try {
