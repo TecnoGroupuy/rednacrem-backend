@@ -3499,6 +3499,8 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "correo electronico": "correo_electronico",
   "correo electrï¿½nico": "correo_electronico",
   "email": "correo_electronico",
+  "e-mail": "correo_electronico",
+  "mail": "correo_electronico",
   "direccion": "direccion",
   "direcciï¿½n": "direccion",
   "departamento": "departamento",
@@ -3506,9 +3508,26 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "pais": "pais",
   "nombre completo": "nombre_completo",
   "nombre_completo": "nombre_completo",
+  "full name": "nombre_completo",
+  "nombre y apellido": "nombre_completo",
   "origen del dato": "origen_dato",
   "origen_dato": "origen_dato",
-  "origen": "origen_dato"
+  "origen": "origen_dato",
+  "tel": "telefono",
+  "telefono celular": "celular",
+  "telefono movil": "celular",
+  "movil": "celular",
+  "numero de telefono": "telefono",
+  "numero telefono": "telefono",
+  "phone": "telefono",
+  "phone number": "telefono",
+  "mobile": "celular",
+  "fecha": "fecha_lead",
+  "fecha lead": "fecha_lead",
+  "fecha de creacion": "fecha_lead",
+  "created time": "fecha_lead",
+  "id del formulario": "nota",
+  "id formulario": "nota"
 };
 
 function classifyUyPhone(rawValue) {
