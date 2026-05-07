@@ -3805,12 +3805,14 @@ function buildDatosTrabajarInsertBatch(batchRows, organizationId = null, importJ
     "fecha_nacimiento",
     "telefono",
     "celular",
-    "email",
+    "correo_electronico",
     "direccion",
     "departamento",
     "localidad",
     "origen_dato",
     "estado",
+    "fecha_lead",
+    "nota",
     "organization_id",
     "import_job_id"
   ];
@@ -4293,6 +4295,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
       const isBlocked =
         (tel && blockedNumbers.has(tel)) || (cel && blockedNumbers.has(cel));
 
+      const fechaLead = row.fecha_lead ? (parseDate(row.fecha_lead) || row.fecha_lead) : null;
       buffer.push([
         row.nombre || null,
         row.apellido || null,
@@ -4305,7 +4308,9 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         row.departamento || null,
         row.localidad || null,
         row.origen_dato || null,
-        isBlocked ? "bloqueado" : "nuevo"
+        isBlocked ? "bloqueado" : "nuevo",
+        fechaLead,
+        row.nota || null
       ]);
 
       if (isBlocked) blocked += 1;
