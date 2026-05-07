@@ -3797,7 +3797,12 @@ async function ensureDatosTrabajarJobTable(client) {
   );
 }
 
-function buildDatosTrabajarInsertBatch(batchRows, organizationId = null, importJobId = null) {
+function buildDatosTrabajarInsertBatch(
+  batchRows,
+  organizationId = null,
+  importJobId = null,
+  { emailColumn = "correo_electronico" } = {}
+) {
   const columns = [
     "nombre",
     "apellido",
@@ -3805,7 +3810,7 @@ function buildDatosTrabajarInsertBatch(batchRows, organizationId = null, importJ
     "fecha_nacimiento",
     "telefono",
     "celular",
-    "correo_electronico",
+    emailColumn,
     "direccion",
     "departamento",
     "localidad",
@@ -4287,6 +4292,9 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     const startedAt = Date.now();
     const batchSize = options.batchSize ?? 200;
     let buffer = [];
+    const emailColumn = (await columnExists(client, "datos_para_trabajar", "email"))
+      ? "email"
+      : "correo_electronico";
 
     for (let i = index; i < rows.length; i += 1) {
       const row = rows[i];
@@ -4318,14 +4326,18 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
       index += 1;
 
       if (buffer.length >= batchSize) {
-        const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId);
+        const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId, {
+          emailColumn
+        });
         await client.query(sql, values);
         buffer = [];
       }
 
       if (maxMillis && Date.now() - startedAt > maxMillis) {
         if (buffer.length) {
-          const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId);
+          const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId, {
+            emailColumn
+          });
           await client.query(sql, values);
         }
         await client.query(
@@ -4350,7 +4362,9 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     }
 
     if (buffer.length) {
-      const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId);
+      const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId, {
+        emailColumn
+      });
       await client.query(sql, values);
     }
 
