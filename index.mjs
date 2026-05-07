@@ -14584,6 +14584,23 @@ export const handler = async (event) => {
         i += 1;
       }
 
+      const excludeBatchId = getQueryParam(event, "excludeBatchId");
+      if (excludeBatchId) {
+        if (!isValidUuid(excludeBatchId)) {
+          return json(400, { ok: false, message: "excludeBatchId inválido" });
+        }
+        conditions.push(`
+          id NOT IN (
+            SELECT lbc.contact_id
+            FROM lead_batch_contacts lbc
+            WHERE lbc.batch_id = $${i}
+            ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+          )
+        `);
+        params.push(excludeBatchId);
+        i += 1;
+      }
+
       const edadDesde = getQueryParam(event, "edad_desde");
       if (edadDesde) {
         conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) >= $${i}`);
@@ -15157,6 +15174,241 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to assign lead batch",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/)) {
+    const match = path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/);
+    const batchId = match?.[1];
+    if (!batchId || !isValidUuid(batchId)) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const contactIdsRaw = Array.isArray(body?.contactIds)
+      ? body.contactIds
+      : Array.isArray(body?.contact_ids)
+      ? body.contact_ids
+      : [];
+    const contactIds = contactIdsRaw.filter((id) => isValidUuid(id));
+    if (!contactIds.length) {
+      return json(422, { ok: false, message: "contactIds es requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        // 2) Validar lote
+        const loteValues = [batchId];
+        let loteOrgClause = "";
+        if (organizationId) {
+          loteValues.push(organizationId);
+          loteOrgClause = "AND organization_id = $2";
+        }
+        const loteRes = await client.query(
+          `
+          SELECT id, estado
+          FROM lead_batches
+          WHERE id = $1
+          ${loteOrgClause}
+          LIMIT 1
+          `,
+          loteValues
+        );
+        if (!loteRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+        const estadoLote = String(loteRes.rows[0]?.estado || "");
+        if (!["activo", "asignado"].includes(estadoLote)) {
+          return json(400, { ok: false, message: "El lote no está activo" });
+        }
+
+        // 3) Filtrar contactos que ya están en el lote
+        const yaValues = [batchId, contactIds];
+        let yaOrgClause = "";
+        if (organizationId) {
+          yaValues.push(organizationId);
+          yaOrgClause = "AND organization_id = $3";
+        }
+        const yaRes = await client.query(
+          `
+          SELECT contact_id
+          FROM lead_batch_contacts
+          WHERE batch_id = $1
+            AND contact_id = ANY($2::uuid[])
+            ${yaOrgClause}
+          `,
+          yaValues
+        );
+        const yaIds = new Set(yaRes.rows.map((r) => r.contact_id));
+        const nuevosIds = contactIds.filter((id) => !yaIds.has(id));
+        if (!nuevosIds.length) {
+          return json(400, { ok: false, message: "Todos los contactos ya están en el lote" });
+        }
+
+        // 4) Vendedores del lote
+        const sellersValues = [batchId];
+        let sellersOrgClause = "";
+        if (organizationId) {
+          sellersValues.push(organizationId);
+          sellersOrgClause = "AND lbs.organization_id = $2";
+        }
+        const sellersRes = await client.query(
+          `
+          SELECT lbs.seller_id, u.nombre, u.apellido
+          FROM lead_batch_sellers lbs
+          JOIN users u ON u.id = lbs.seller_id
+          WHERE lbs.batch_id = $1
+          ${sellersOrgClause}
+          ORDER BY lbs.created_at ASC, lbs.seller_id ASC
+          `,
+          sellersValues
+        );
+        if (!sellersRes.rows.length) {
+          return json(400, { ok: false, message: "El lote no tiene vendedores asignados" });
+        }
+
+        // 5) Conteo por día (Montevideo)
+        const hoy = new Date().toISOString().slice(0, 10);
+        const countsValues = [batchId, hoy];
+        let countsOrgClause = "";
+        if (organizationId) {
+          countsValues.push(organizationId);
+          countsOrgClause = "AND organization_id = $3";
+        }
+        const countsRes = await client.query(
+          `
+          SELECT assigned_to, COUNT(*)::int AS total
+          FROM lead_contact_status
+          WHERE batch_id = $1
+            AND DATE(created_at AT TIME ZONE 'America/Montevideo') = $2
+            ${countsOrgClause}
+          GROUP BY assigned_to
+          `,
+          countsValues
+        );
+        const countMap = {};
+        for (const s of sellersRes.rows) countMap[s.seller_id] = 0;
+        for (const r of countsRes.rows) {
+          if (countMap[r.assigned_to] !== undefined) {
+            countMap[r.assigned_to] = Number(r.total) || 0;
+          }
+        }
+
+        // 6) Asignación balanceada
+        const assignments = [];
+        for (const contactId of nuevosIds) {
+          const sellerEntry = sellersRes.rows.reduce((min, s) =>
+            countMap[s.seller_id] < countMap[min.seller_id] ? s : min
+          );
+          assignments.push({ contactId, sellerId: sellerEntry.seller_id });
+          countMap[sellerEntry.seller_id] += 1;
+        }
+
+        await client.query("BEGIN");
+        try {
+          // 7) lead_batch_contacts
+          for (const { contactId } of assignments) {
+            const insertValues = [batchId, contactId];
+            let orgCols = "";
+            let orgVals = "";
+            if (organizationId) {
+              insertValues.push(organizationId);
+              orgCols = ", organization_id";
+              orgVals = ", $3";
+            }
+            await client.query(
+              `
+              INSERT INTO lead_batch_contacts (batch_id, contact_id${orgCols})
+              VALUES ($1, $2${orgVals})
+              ON CONFLICT DO NOTHING
+              `,
+              insertValues
+            );
+          }
+
+          // 8) lead_contact_status upsert
+          for (const { contactId, sellerId } of assignments) {
+            const statusValues = [contactId, batchId, sellerId];
+            let orgCols = "";
+            let orgVals = "";
+            let orgUpdate = "";
+            if (organizationId) {
+              statusValues.push(organizationId);
+              orgCols = ", organization_id";
+              orgVals = ", $4";
+              orgUpdate = ", organization_id = $4";
+            }
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id, batch_id, assigned_to, estado_venta, intentos${orgCols}
+              )
+              VALUES ($1, $2, $3, 'nuevo', 0${orgVals})
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = EXCLUDED.assigned_to,
+                estado_venta = 'nuevo',
+                intentos = 0,
+                updated_at = now()
+                ${orgUpdate}
+              `,
+              statusValues
+            );
+          }
+
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+
+        const distribution = sellersRes.rows.map((s) => ({
+          seller_id: s.seller_id,
+          nombre: [s.nombre, s.apellido].filter(Boolean).join(" ").trim(),
+          cantidad: assignments.filter((a) => a.sellerId === s.seller_id).length
+        }));
+
+        return json(200, { ok: true, added: assignments.length, distribution });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to add contacts to batch",
         error: error.message
       });
     }
