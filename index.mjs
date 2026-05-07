@@ -3525,6 +3525,7 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "mobile": "celular",
   "fecha": "fecha_lead",
   "fecha lead": "fecha_lead",
+  "fecha_lead": "fecha_lead",
   "fecha de creacion": "fecha_lead",
   "created time": "fecha_lead",
   "id del formulario": "nota",
