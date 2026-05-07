@@ -3801,7 +3801,7 @@ function buildDatosTrabajarInsertBatch(
   batchRows,
   organizationId = null,
   importJobId = null,
-  { emailColumn = "correo_electronico" } = {}
+  { emailColumn = "email" } = {}
 ) {
   const columns = [
     "nombre",
