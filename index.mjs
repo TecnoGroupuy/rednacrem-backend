@@ -3498,6 +3498,7 @@ const DATOS_TRABAJAR_HEADER_MAP = {
   "celular": "celular",
   "correo electronico": "correo_electronico",
   "correo electrï¿½nico": "correo_electronico",
+  "correo_electronico": "correo_electronico",
   "correo": "correo_electronico",
   "email": "correo_electronico",
   "e-mail": "correo_electronico",
