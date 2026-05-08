@@ -4304,6 +4304,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         (tel && blockedNumbers.has(tel)) || (cel && blockedNumbers.has(cel));
 
       const fechaLead = row.fecha_lead ? (parseDate(row.fecha_lead) || row.fecha_lead) : null;
+      console.log('[debug email]', row.correo_electronico, row.email, JSON.stringify(Object.keys(row)));
       buffer.push([
         row.nombre || null,
         row.apellido || null,
