@@ -15324,18 +15324,12 @@ export const handler = async (event) => {
 
         // 4) Vendedores del lote
         const sellersValues = [batchId];
-        let sellersOrgClause = "";
-        if (organizationId) {
-          sellersValues.push(organizationId);
-          sellersOrgClause = "AND lbs.organization_id = $2";
-        }
         const sellersRes = await client.query(
           `
           SELECT lbs.seller_id, u.nombre, u.apellido
           FROM lead_batch_sellers lbs
           JOIN users u ON u.id = lbs.seller_id
           WHERE lbs.batch_id = $1
-          ${sellersOrgClause}
           ORDER BY lbs.created_at ASC, lbs.seller_id ASC
           `,
           sellersValues
