@@ -14844,9 +14844,12 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const hasFechaLead = await columnExists(client, "datos_para_trabajar", "fecha_lead");
         const result = await client.query(
           `SELECT id, nombre, apellido, departamento, localidad, telefono, celular,
                   origen_dato AS fuente,
+                  ${hasFechaLead ? "fecha_lead" : "NULL::date AS fecha_lead"},
+                  ${hasFechaLead ? "fecha_lead AS fecha_solicitud" : "NULL::date AS fecha_solicitud"},
                   DATE_PART('year', AGE(fecha_nacimiento))::int AS edad
            FROM datos_para_trabajar
            WHERE ${where}
