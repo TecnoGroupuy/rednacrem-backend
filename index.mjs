@@ -3128,7 +3128,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     LEFT JOIN jornada_span js ON js.agente_id = u.id
     LEFT JOIN session_count sc ON sc.agente_id = u.id
     WHERE u.role_key = 'vendedor'
-      AND u.status = 'approved'
+      AND u.status != 'baja'
       AND (u.is_test IS NULL OR u.is_test = false)
       AND ($4::uuid IS NULL OR u.id = $4::uuid)
       AND EXISTS (
@@ -21564,6 +21564,156 @@ async function getNewContactsDistribution(client, batchId) {
       }
     } catch (err) {
       return json(500, { ok: false, message: err.message });
+    }
+  }
+
+  // PATCH /api/users/:id/desactivar
+  // Marca al usuario como baja y lo desactiva en la organización.
+  if (method === "PATCH" && path.match(/\/api\/users\/([^/]+)\/desactivar$/)) {
+    const match = path.match(/\/api\/users\/([^/]+)\/desactivar$/);
+    const userId = match?.[1];
+    if (!userId) {
+      return json(400, { ok: false, message: "User id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const userValues = [userId];
+        let orgUserClause = "";
+        if (organizationId) {
+          userValues.push(organizationId);
+          orgUserClause = `
+            AND EXISTS (
+              SELECT 1
+              FROM organization_users ou
+              WHERE ou.user_id = users.id
+                AND ou.organization_id = $2
+                AND ou.activo = true
+            )
+          `;
+        }
+
+        const userRes = await client.query(
+          `
+          UPDATE users
+          SET status = 'baja',
+              updated_at = NOW()
+          WHERE id = $1
+          ${orgUserClause}
+          RETURNING id, nombre, apellido, status
+          `,
+          userValues
+        );
+        if (!userRes.rows.length) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Usuario no encontrado" });
+        }
+
+        const orgValues = [userId];
+        let orgClause = "";
+        if (organizationId) {
+          orgValues.push(organizationId);
+          orgClause = "AND organization_id = $2";
+        }
+        await client.query(
+          `
+          UPDATE organization_users
+          SET activo = false
+          WHERE user_id = $1
+          ${orgClause}
+          `,
+          orgValues
+        );
+
+        const deleteValues = [userId];
+        let deleteOrgClause = "";
+        if (organizationId) {
+          deleteValues.push(organizationId);
+          deleteOrgClause = "AND lb.organization_id = $2";
+        }
+        await client.query(
+          `
+          DELETE FROM lead_batch_sellers lbs
+          USING lead_batches lb
+          WHERE lbs.seller_id = $1
+            AND lbs.batch_id = lb.id
+            AND lb.estado IN ('activo', 'asignado')
+            ${deleteOrgClause}
+          `,
+          deleteValues
+        );
+
+        const pendientesValues = [userId];
+        let pendientesOrgClause = "";
+        if (organizationId) {
+          pendientesValues.push(organizationId);
+          pendientesOrgClause = "AND lb.organization_id = $2";
+        }
+        const pendientesRes = await client.query(
+          `
+          SELECT
+            lb.id AS batch_id,
+            lb.nombre AS batch_nombre,
+            COUNT(lcs.contact_id)::int AS pendientes
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lcs.estado_venta = 'nuevo'
+            AND lb.estado IN ('activo', 'asignado')
+            ${pendientesOrgClause}
+          GROUP BY lb.id, lb.nombre
+          ORDER BY pendientes DESC, lb.nombre ASC
+          `,
+          pendientesValues
+        );
+
+        await client.query("COMMIT");
+        return json(200, {
+          ok: true,
+          user: userRes.rows[0],
+          pendientes: pendientesRes.rows
+        });
+      } catch (err) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {}
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to deactivate user",
+        error: error.message
+      });
     }
   }
 
