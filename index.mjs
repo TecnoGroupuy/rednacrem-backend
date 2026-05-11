@@ -18682,62 +18682,8 @@ async function getNewContactsDistribution(client, batchId) {
           });
         }
 
-        const assignedRes = await client.query(
-          `
-          SELECT lcs.assigned_to AS user_id,
-                 COUNT(DISTINCT lcs.contact_id)::int AS asignados
-          FROM lead_contact_status lcs
-          JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE lcs.assigned_to = ANY($1::uuid[])
-            AND lb.estado IN ('activo', 'asignado')
-            AND ($2::text IS NULL OR lb.tipo = $2)
-            AND lb.organization_id = $3
-          GROUP BY lcs.assigned_to
-          `,
-          [sellerIds, batchTipo, organizationId]
-        );
-        const assignedMap = new Map(assignedRes.rows.map((row) => [row.user_id, Number(row.asignados || 0)]));
-
-        const dailyRes = await client.query(
-          `
-          WITH day_events AS (
-            SELECT lmh.user_id,
-                   lmh.contact_id,
-                   lmh.resultado,
-                   lmh.fecha_gestion
-            FROM lead_management_history lmh
-            JOIN lead_batches lb ON lb.id = lmh.batch_id
-            WHERE lmh.user_id = ANY($1::uuid[])
-              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
-              AND (
-                $3::text IS NULL
-                OR lb.tipo = $3
-              )
-              AND lb.organization_id = $4
-          ), last_result AS (
-            SELECT DISTINCT ON (user_id, contact_id)
-              user_id,
-              contact_id,
-              resultado
-            FROM day_events
-            ORDER BY user_id, contact_id, fecha_gestion DESC
-          )
-          SELECT user_id,
-                 COUNT(*)::int AS gestiones,
-                 COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas,
-                 COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS seguimientos,
-                 COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS rellamadas,
-                 COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS no_contesta,
-                 COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS rechazos,
-                 COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS datos_erroneos
-          FROM last_result
-          GROUP BY user_id
-          `,
-          [sellerIds, fecha, batchTipo, organizationId]
-        );
-        const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
-
-        const warnings = [];
+        const requestedTipo = batchTipo || null;
+        const wantsAll = !requestedTipo || tipo === "all";
         const manualJoin = `
             JOIN contacts c ON c.id = s.contact_id
             JOIN datos_para_trabajar d ON d.contact_id = c.id
@@ -18745,75 +18691,298 @@ async function getNewContactsDistribution(client, batchId) {
             JOIN lead_batches lb ON lb.id = lcs.batch_id
           `;
 
+        if (!wantsAll) {
+          const assignedRes = await client.query(
+            `
+            SELECT lcs.assigned_to AS user_id,
+                   COUNT(DISTINCT lcs.contact_id)::int AS asignados
+            FROM lead_contact_status lcs
+            JOIN lead_batches lb ON lb.id = lcs.batch_id
+            WHERE lcs.assigned_to = ANY($1::uuid[])
+              AND lb.estado IN ('activo', 'asignado')
+              AND lb.tipo = $2
+              AND lb.organization_id = $3
+            GROUP BY lcs.assigned_to
+            `,
+            [sellerIds, requestedTipo, organizationId]
+          );
+          const assignedMap = new Map(assignedRes.rows.map((row) => [row.user_id, Number(row.asignados || 0)]));
+
+          const dailyRes = await client.query(
+            `
+            WITH day_events AS (
+              SELECT lmh.user_id,
+                     lmh.contact_id,
+                     lmh.resultado,
+                     lmh.fecha_gestion
+              FROM lead_management_history lmh
+              JOIN lead_batches lb ON lb.id = lmh.batch_id
+              WHERE lmh.user_id = ANY($1::uuid[])
+                AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+                AND lb.tipo = $3
+                AND lb.organization_id = $4
+            ), last_result AS (
+              SELECT DISTINCT ON (user_id, contact_id)
+                user_id,
+                contact_id,
+                resultado
+              FROM day_events
+              ORDER BY user_id, contact_id, fecha_gestion DESC
+            )
+            SELECT user_id,
+                   COUNT(*)::int AS gestiones,
+                   COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas,
+                   COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS seguimientos,
+                   COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS rellamadas,
+                   COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS no_contesta,
+                   COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS rechazos,
+                   COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS datos_erroneos
+            FROM last_result
+            GROUP BY user_id
+            `,
+            [sellerIds, fecha, requestedTipo, organizationId]
+          );
+          const dailyMap = new Map(dailyRes.rows.map((row) => [row.user_id, row]));
+
+          const warnings = [];
+          let manualSalesMap = new Map();
+          try {
+            const manualSalesRes = await client.query(
+              `
+              SELECT s.seller_user_id AS user_id,
+                     COUNT(*)::int AS manual_ventas
+              FROM sales s
+              ${manualJoin}
+              WHERE s.seller_user_id = ANY($1::uuid[])
+                AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
+                AND lb.tipo = $3
+                AND lb.organization_id = $4
+              GROUP BY s.seller_user_id
+              `,
+              [sellerIds, fecha, requestedTipo, organizationId]
+            );
+            manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
+          } catch (error) {
+            warnings.push({ code: "MANUAL_SALES_FAILED", message: "No se pudieron calcular ventas manuales" });
+          }
+
+          const items = sellers.map((seller) => {
+            const daily = dailyMap.get(seller.id) || {};
+            const manualVentas = manualSalesMap.get(seller.id) || 0;
+            const ventas = manualVentas;
+            const seguimientos = Number(daily.seguimientos || 0);
+            const rellamadas = Number(daily.rellamadas || 0);
+            const noContesta = Number(daily.no_contesta || 0);
+            const rechazos = Number(daily.rechazos || 0);
+            const datosErroneos = Number(daily.datos_erroneos || 0);
+            const gestionesVenta = Number(daily.ventas || 0);
+            const totalGestionado =
+              ventas +
+              seguimientos +
+              rellamadas +
+              noContesta +
+              rechazos +
+              datosErroneos;
+            const datosUtiles = ventas + seguimientos + rechazos;
+            const contacto = totalGestionado > 0
+              ? Math.round((datosUtiles / totalGestionado) * 100)
+              : 0;
+            const efectividad = datosUtiles > 0
+              ? Math.round((ventas / datosUtiles) * 100)
+              : 0;
+
+            return {
+              id: seller.id,
+              nombre: seller.nombre,
+              apellido: seller.apellido,
+              tipo: requestedTipo,
+              gestiones: totalGestionado,
+              asignados: assignedMap.get(seller.id) || 0,
+              ventas,
+              gestiones_venta: gestionesVenta,
+              seguimientos,
+              rellamadas,
+              no_contesta: noContesta,
+              rechazos,
+              datos_erroneos: datosErroneos,
+              contacto,
+              efectividad
+            };
+          });
+
+          return safeResponse({
+            data: { items },
+            emptyCondition: items.length === 0,
+            warnings,
+            meta: { fecha, tipo: requestedTipo, source: "sellers-summary", request_id: requestId }
+          });
+        }
+
+        // tipo vacío / null / all: agrupar dinámicamente por tipos activos
+        const tiposRes = await client.query(
+          `
+          SELECT DISTINCT lb.tipo
+          FROM lead_batches lb
+          WHERE lb.organization_id = $1
+            AND lb.estado IN ('activo', 'asignado')
+            AND lb.tipo IS NOT NULL
+            AND lb.tipo <> ''
+          ORDER BY lb.tipo ASC
+          `,
+          [organizationId]
+        );
+        const tipos = tiposRes.rows.map((r) => r.tipo).filter(Boolean);
+        if (!tipos.length) {
+          return safeResponse({
+            data: { tipos: [], data: [] },
+            emptyCondition: true,
+            message: "No hay lotes activos",
+            meta: { fecha, tipo: "all", source: "sellers-summary", request_id: requestId }
+          });
+        }
+
+        const assignedRes = await client.query(
+          `
+          SELECT
+            lcs.assigned_to AS user_id,
+            lb.tipo,
+            COUNT(DISTINCT lcs.contact_id)::int AS asignados
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = ANY($1::uuid[])
+            AND lb.estado IN ('activo', 'asignado')
+            AND lb.organization_id = $2
+          GROUP BY lcs.assigned_to, lb.tipo
+          `,
+          [sellerIds, organizationId]
+        );
+        const assignedMap = new Map(
+          assignedRes.rows.map((row) => [`${row.user_id}:${row.tipo}`, Number(row.asignados || 0)])
+        );
+
+        const dailyRes = await client.query(
+          `
+          WITH day_events AS (
+            SELECT lmh.user_id,
+                   lmh.contact_id,
+                   lmh.resultado,
+                   lmh.fecha_gestion,
+                   lb.tipo
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            WHERE lmh.user_id = ANY($1::uuid[])
+              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+              AND lb.organization_id = $3
+              AND lb.estado IN ('activo', 'asignado', 'finalizado', 'sin_asignar')
+          ), last_result AS (
+            SELECT DISTINCT ON (user_id, contact_id, tipo)
+              user_id,
+              contact_id,
+              tipo,
+              resultado
+            FROM day_events
+            ORDER BY user_id, contact_id, tipo, fecha_gestion DESC
+          )
+          SELECT
+            user_id,
+            tipo,
+            COUNT(*)::int AS gestiones,
+            COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas,
+            COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS seguimientos,
+            COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS rellamadas,
+            COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS rechazos,
+            COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS datos_erroneos
+          FROM last_result
+          GROUP BY user_id, tipo
+          `,
+          [sellerIds, fecha, organizationId]
+        );
+        const dailyMap = new Map(
+          dailyRes.rows.map((row) => [`${row.user_id}:${row.tipo}`, row])
+        );
+
+        const warnings = [];
         let manualSalesMap = new Map();
         try {
           const manualSalesRes = await client.query(
             `
-            SELECT s.seller_user_id AS user_id,
-                   COUNT(*)::int AS manual_ventas
+            SELECT
+              s.seller_user_id AS user_id,
+              lb.tipo,
+              COUNT(*)::int AS manual_ventas
             FROM sales s
             ${manualJoin}
             WHERE s.seller_user_id = ANY($1::uuid[])
               AND (COALESCE(s.fecha_venta, s.created_at) AT TIME ZONE 'America/Montevideo')::date = $2::date
-              AND ($3::text IS NULL OR lb.tipo = $3)
-              AND lb.organization_id = $4
-            GROUP BY s.seller_user_id
+              AND lb.organization_id = $3
+            GROUP BY s.seller_user_id, lb.tipo
             `,
-            [sellerIds, fecha, batchTipo, organizationId]
+            [sellerIds, fecha, organizationId]
           );
-          manualSalesMap = new Map(manualSalesRes.rows.map((row) => [row.user_id, Number(row.manual_ventas || 0)]));
+          manualSalesMap = new Map(
+            manualSalesRes.rows.map((row) => [`${row.user_id}:${row.tipo}`, Number(row.manual_ventas || 0)])
+          );
         } catch (error) {
           warnings.push({ code: "MANUAL_SALES_FAILED", message: "No se pudieron calcular ventas manuales" });
         }
 
-        const items = sellers.map((seller) => {
-          const daily = dailyMap.get(seller.id) || {};
-          const manualVentas = manualSalesMap.get(seller.id) || 0;
-          const ventas = manualVentas;
-          const seguimientos = Number(daily.seguimientos || 0);
-          const rellamadas = Number(daily.rellamadas || 0);
-          const noContesta = Number(daily.no_contesta || 0);
-          const rechazos = Number(daily.rechazos || 0);
-          const datosErroneos = Number(daily.datos_erroneos || 0);
-          const gestionesVenta = Number(daily.ventas || 0);
-          const totalGestionado =
-            ventas +
-            seguimientos +
-            rellamadas +
-            noContesta +
-            rechazos +
-            datosErroneos;
-          const datosUtiles = ventas + seguimientos + rechazos;
-          const contacto = totalGestionado > 0
-            ? Math.round((datosUtiles / totalGestionado) * 100)
-            : 0;
-          const efectividad = datosUtiles > 0
-            ? Math.round((ventas / datosUtiles) * 100)
-            : 0;
-
-          return {
-            id: seller.id,
-            nombre: seller.nombre,
-            apellido: seller.apellido,
-            gestiones: totalGestionado,
-            asignados: assignedMap.get(seller.id) || 0,
-            ventas,
-            gestiones_venta: gestionesVenta,
-            seguimientos,
-            rellamadas,
-            no_contesta: noContesta,
-            rechazos,
-            datos_erroneos: datosErroneos,
-            contacto,
-            efectividad
-          };
-        });
+        const itemsByTipo = new Map();
+        for (const tipoValue of tipos) {
+          const items = sellers.map((seller) => {
+            const key = `${seller.id}:${tipoValue}`;
+            const daily = dailyMap.get(key) || {};
+            const manualVentas = manualSalesMap.get(key) || 0;
+            const ventas = manualVentas;
+            const seguimientos = Number(daily.seguimientos || 0);
+            const rellamadas = Number(daily.rellamadas || 0);
+            const noContesta = Number(daily.no_contesta || 0);
+            const rechazos = Number(daily.rechazos || 0);
+            const datosErroneos = Number(daily.datos_erroneos || 0);
+            const gestionesVenta = Number(daily.ventas || 0);
+            const totalGestionado =
+              ventas +
+              seguimientos +
+              rellamadas +
+              noContesta +
+              rechazos +
+              datosErroneos;
+            const datosUtiles = ventas + seguimientos + rechazos;
+            const contacto = totalGestionado > 0
+              ? Math.round((datosUtiles / totalGestionado) * 100)
+              : 0;
+            const efectividad = datosUtiles > 0
+              ? Math.round((ventas / datosUtiles) * 100)
+              : 0;
+            return {
+              id: seller.id,
+              nombre: seller.nombre,
+              apellido: seller.apellido,
+              tipo: tipoValue,
+              gestiones: totalGestionado,
+              asignados: assignedMap.get(key) || 0,
+              ventas,
+              gestiones_venta: gestionesVenta,
+              seguimientos,
+              rellamadas,
+              no_contesta: noContesta,
+              rechazos,
+              datos_erroneos: datosErroneos,
+              contacto,
+              efectividad
+            };
+          });
+          itemsByTipo.set(tipoValue, items);
+        }
 
         return safeResponse({
-          data: { items },
-          emptyCondition: items.length === 0,
+          data: {
+            tipos,
+            data: tipos.map((t) => ({ tipo: t, items: itemsByTipo.get(t) || [] }))
+          },
+          emptyCondition: false,
           warnings,
-          meta: { fecha, tipo: batchTipo || "all", source: "sellers-summary", request_id: requestId }
+          meta: { fecha, tipo: "all", source: "sellers-summary", request_id: requestId }
         });
       } finally {
         await client.end();
