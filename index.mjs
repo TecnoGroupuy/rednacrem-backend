@@ -20813,6 +20813,154 @@ async function getNewContactsDistribution(client, batchId) {
     }
   }
 
+  // GET /api/supervisor/seller-detail?seller_id=xxx&fecha_desde=yyyy-mm-dd&fecha_hasta=yyyy-mm-dd
+  // Detalle global del vendedor: último resultado por contacto en el rango.
+  if (method === "GET" && path.endsWith("/api/supervisor/seller-detail")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
+    let sellerId = null;
+    let desde = null;
+    let hasta = null;
+    try {
+      const { authUser, dbUser: currentUser } = await getCurrentDbUserFromEvent(event);
+      dbUser = currentUser;
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
+      if (roleError) return roleError;
+
+      sellerId = getQueryParam(event, "seller_id");
+      if (!sellerId || !isValidUuid(sellerId)) {
+        return json(400, { ok: false, message: "seller_id requerido" });
+      }
+
+      const fechaDesdeRaw = getQueryParam(event, "fecha_desde");
+      const fechaHastaRaw = getQueryParam(event, "fecha_hasta");
+      const fechaDesdeParsed = fechaDesdeRaw ? parseFechaParam(fechaDesdeRaw) : null;
+      const fechaHastaParsed = fechaHastaRaw ? parseFechaParam(fechaHastaRaw) : null;
+      const ymdRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (fechaDesdeParsed && !ymdRegex.test(fechaDesdeParsed)) {
+        return json(400, { ok: false, message: "fecha_desde inválida" });
+      }
+      if (fechaHastaParsed && !ymdRegex.test(fechaHastaParsed)) {
+        return json(400, { ok: false, message: "fecha_hasta inválida" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+
+        const primeraGestionRes = await client.query(
+          `
+          SELECT MIN((fecha_gestion AT TIME ZONE 'America/Montevideo')::date) AS primera
+          FROM lead_management_history
+          WHERE user_id = $1
+            AND organization_id = $2
+          `,
+          [sellerId, organizationId]
+        );
+        const primera = primeraGestionRes.rows[0]?.primera || null;
+
+        const today = formatDateYmd(new Date());
+        desde = fechaDesdeParsed || (primera ? String(primera) : today);
+        hasta = fechaHastaParsed || today;
+
+        const resultadoRes = await client.query(
+          `
+          WITH ultimo_resultado AS (
+            SELECT DISTINCT ON (lmh.contact_id)
+              lmh.contact_id,
+              lmh.resultado,
+              lmh.fecha_gestion,
+              lmh.proxima_accion,
+              lmh.nota,
+              TRIM(CONCAT(
+                COALESCE(d.nombre, c.nombre, ''),
+                ' ',
+                COALESCE(d.apellido, c.apellido, '')
+              )) AS contacto_nombre,
+              COUNT(*) OVER (PARTITION BY lmh.contact_id) AS total_intentos
+            FROM lead_management_history lmh
+            LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+            LEFT JOIN contacts c ON c.id = lmh.contact_id
+            WHERE lmh.user_id = $1
+              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date BETWEEN $2::date AND $3::date
+              AND lmh.organization_id = $4
+            ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
+          )
+          SELECT
+            contact_id,
+            resultado,
+            contacto_nombre,
+            fecha_gestion,
+            proxima_accion,
+            total_intentos,
+            nota
+          FROM ultimo_resultado
+          ORDER BY fecha_gestion DESC
+          `,
+          [sellerId, desde, hasta, organizationId]
+        );
+
+        const rows = resultadoRes.rows || [];
+        const groupBy = (tipo) => rows.filter((r) => r.resultado === tipo);
+
+        return json(200, {
+          ok: true,
+          seller_id: sellerId,
+          fecha_desde: desde,
+          fecha_hasta: hasta,
+          resumen: {
+            ventas: groupBy("venta").length,
+            rechazos: groupBy("rechazo").length,
+            seguimientos: groupBy("seguimiento").length,
+            rellamar: groupBy("rellamar").length,
+            no_contesta: groupBy("no_contesta").length,
+            dato_erroneo: groupBy("dato_erroneo").length
+          },
+          detalle: {
+            ventas: groupBy("venta"),
+            rechazos: groupBy("rechazo"),
+            seguimientos: groupBy("seguimiento"),
+            rellamar: groupBy("rellamar"),
+            no_contesta: groupBy("no_contesta")
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load seller detail",
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[seller-detail]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        seller_id: sellerId,
+        fecha_desde: desde,
+        fecha_hasta: hasta,
+        duration_ms: Date.now() - startedAt
+      });
+    }
+  }
+
   if (method === "POST" && path.match(/\/api\/imports\/clients\/([^/]+)\/process-sync$/)) {
     const match = path.match(/\/api\/imports\/clients\/([^/]+)\/process-sync$/);
     const batchId = match?.[1];
