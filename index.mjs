@@ -15224,6 +15224,54 @@ export const handler = async (event) => {
     }
   }
 
+async function redistributeNewContacts(client, batchId) {
+  const sellersRes = await client.query(
+    `SELECT seller_id FROM lead_batch_sellers WHERE batch_id = $1 ORDER BY id ASC`,
+    [batchId]
+  );
+  if (!sellersRes.rows.length) return;
+  const sellerIds = sellersRes.rows.map((r) => r.seller_id);
+
+  const contactsRes = await client.query(
+    `
+    SELECT contact_id
+    FROM lead_contact_status
+    WHERE batch_id = $1
+      AND estado_venta = 'nuevo'
+    ORDER BY created_at DESC
+    `,
+    [batchId]
+  );
+  if (!contactsRes.rows.length) return;
+  const contactIds = contactsRes.rows.map((r) => r.contact_id);
+
+  const assignedTo = contactIds.map(
+    (_contactId, index) => sellerIds[index % sellerIds.length]
+  );
+
+  const chunkSize = 500;
+  for (let i = 0; i < contactIds.length; i += chunkSize) {
+    const contactChunk = contactIds.slice(i, i + chunkSize);
+    const assignedChunk = assignedTo.slice(i, i + chunkSize);
+    await client.query(
+      `
+      UPDATE lead_contact_status lcs
+      SET assigned_to = v.assigned_to,
+          updated_at = now()
+      FROM (
+        SELECT UNNEST($1::uuid[]) AS contact_id,
+               UNNEST($2::uuid[]) AS assigned_to
+      ) v
+      WHERE lcs.contact_id = v.contact_id
+        AND lcs.batch_id = $3
+        AND lcs.estado_venta = 'nuevo'
+        AND (lcs.assigned_to IS DISTINCT FROM v.assigned_to)
+      `,
+      [contactChunk, assignedChunk, batchId]
+    );
+  }
+}
+
   if (method === "POST" && path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/)) {
     const match = path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/);
     const batchId = match?.[1];
@@ -15322,63 +15370,10 @@ export const handler = async (event) => {
           return json(400, { ok: false, message: "Todos los contactos ya están en el lote" });
         }
 
-        // 4) Vendedores del lote
-        const sellersValues = [batchId];
-        const sellersRes = await client.query(
-          `
-          SELECT lbs.seller_id, u.nombre, u.apellido
-          FROM lead_batch_sellers lbs
-          JOIN users u ON u.id = lbs.seller_id
-          WHERE lbs.batch_id = $1
-          ORDER BY lbs.created_at ASC, lbs.seller_id ASC
-          `,
-          sellersValues
-        );
-        if (!sellersRes.rows.length) {
-          return json(400, { ok: false, message: "El lote no tiene vendedores asignados" });
-        }
-
-        // 5) Conteo por día (Montevideo)
-        const hoy = new Date().toISOString().slice(0, 10);
-        const countsValues = [batchId, hoy];
-        let countsOrgClause = "";
-        if (organizationId) {
-          countsValues.push(organizationId);
-          countsOrgClause = "AND organization_id = $3";
-        }
-        const countsRes = await client.query(
-          `
-          SELECT assigned_to, COUNT(*)::int AS total
-          FROM lead_contact_status
-          WHERE batch_id = $1
-            AND DATE(created_at AT TIME ZONE 'America/Montevideo') = $2
-            ${countsOrgClause}
-          GROUP BY assigned_to
-          `,
-          countsValues
-        );
-        const countMap = {};
-        for (const s of sellersRes.rows) countMap[s.seller_id] = 0;
-        for (const r of countsRes.rows) {
-          if (countMap[r.assigned_to] !== undefined) {
-            countMap[r.assigned_to] = Number(r.total) || 0;
-          }
-        }
-
-        // 6) Asignación balanceada
-        const assignments = [];
-        for (const contactId of nuevosIds) {
-          const sellerEntry = sellersRes.rows.reduce((min, s) =>
-            countMap[s.seller_id] < countMap[min.seller_id] ? s : min
-          );
-          assignments.push({ contactId, sellerId: sellerEntry.seller_id });
-          countMap[sellerEntry.seller_id] += 1;
-        }
-
         await client.query("BEGIN");
         try {
           // 7) lead_batch_contacts
-          for (const { contactId } of assignments) {
+          for (const contactId of nuevosIds) {
             const insertValues = [batchId, contactId];
             let orgCols = "";
             let orgVals = "";
@@ -15397,28 +15392,28 @@ export const handler = async (event) => {
             );
           }
 
-          // 8) lead_contact_status upsert
-          for (const { contactId, sellerId } of assignments) {
-            const statusValues = [contactId, batchId, sellerId];
+          // 8) Crear / resetear lead_contact_status para los nuevos contactos (sin vendedor)
+          for (const contactId of nuevosIds) {
+            const statusValues = [contactId, batchId];
             let orgCols = "";
             let orgVals = "";
             let orgUpdate = "";
             if (organizationId) {
               statusValues.push(organizationId);
               orgCols = ", organization_id";
-              orgVals = ", $4";
-              orgUpdate = ", organization_id = $4";
+              orgVals = ", $3";
+              orgUpdate = ", organization_id = $3";
             }
             await client.query(
               `
               INSERT INTO lead_contact_status (
                 contact_id, batch_id, assigned_to, estado_venta, intentos${orgCols}
               )
-              VALUES ($1, $2, $3, 'nuevo', 0${orgVals})
+              VALUES ($1, $2, NULL, 'nuevo', 0${orgVals})
               ON CONFLICT (contact_id) DO UPDATE
               SET
                 batch_id = EXCLUDED.batch_id,
-                assigned_to = EXCLUDED.assigned_to,
+                assigned_to = NULL,
                 estado_venta = 'nuevo',
                 intentos = 0,
                 updated_at = now()
@@ -15428,19 +15423,42 @@ export const handler = async (event) => {
             );
           }
 
+          await redistributeNewContacts(client, batchId);
+
           await client.query("COMMIT");
         } catch (err) {
           await client.query("ROLLBACK");
           throw err;
         }
 
+        const sellersRes = await client.query(
+          `
+          SELECT lbs.seller_id, u.nombre, u.apellido
+          FROM lead_batch_sellers lbs
+          JOIN users u ON u.id = lbs.seller_id
+          WHERE lbs.batch_id = $1
+          ORDER BY lbs.created_at ASC, lbs.seller_id ASC
+          `,
+          [batchId]
+        );
+        const distRes = await client.query(
+          `
+          SELECT assigned_to, COUNT(*)::int AS cantidad
+          FROM lead_contact_status
+          WHERE batch_id = $1
+            AND contact_id = ANY($2::uuid[])
+          GROUP BY assigned_to
+          `,
+          [batchId, nuevosIds]
+        );
+        const countBySeller = new Map(distRes.rows.map((r) => [r.assigned_to, r.cantidad]));
         const distribution = sellersRes.rows.map((s) => ({
           seller_id: s.seller_id,
           nombre: [s.nombre, s.apellido].filter(Boolean).join(" ").trim(),
-          cantidad: assignments.filter((a) => a.sellerId === s.seller_id).length
+          cantidad: countBySeller.get(s.seller_id) || 0
         }));
 
-        return json(200, { ok: true, added: assignments.length, distribution });
+        return json(200, { ok: true, added: nuevosIds.length, distribution });
       } finally {
         await client.end();
       }
@@ -15807,12 +15825,20 @@ export const handler = async (event) => {
           return json(404, { ok: false, message: "Lote no encontrado" });
         }
 
-        await client.query(
-          `INSERT INTO lead_batch_sellers (batch_id, seller_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [batchId, sellerId]
-        );
+        await client.query("BEGIN");
+        try {
+          await client.query(
+            `INSERT INTO lead_batch_sellers (batch_id, seller_id)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [batchId, sellerId]
+          );
+          await redistributeNewContacts(client, batchId);
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
         return json(200, { ok: true, message: "Vendedor agregado al lote" });
       } catch (err) {
         return json(500, { ok: false, message: err.message });
