@@ -12125,6 +12125,7 @@ export const handler = async (event) => {
         const dEmail = leadCols.d.has("email") ? "d.email" : "NULL::text";
         const dDireccion = leadCols.d.has("direccion") ? "d.direccion" : "NULL::text";
         const dLocalidad = leadCols.d.has("localidad") ? "d.localidad" : "NULL::text";
+        const dFechaLead = leadCols.d.has("fecha_lead") ? "d.fecha_lead" : "NULL::date";
         const dContactId = leadCols.d.has("contact_id") ? "d.contact_id" : "NULL::uuid";
         const cEmail = leadCols.c.has("email") ? "c.email" : "NULL::text";
         const cDireccion = leadCols.c.has("direccion") ? "c.direccion" : "NULL::text";
@@ -12182,6 +12183,7 @@ export const handler = async (event) => {
             COALESCE(d.departamento, ${cDepartamento}) AS departamento,
             ${dLocalidad}                           AS localidad,
             d.nota                                  AS nota,
+            ${dFechaLead}                            AS fecha_lead,
             COALESCE(d.origen_dato, 'recupero')     AS origen_dato,
             lb.tipo                                 AS lote_tipo,
             lcs.estado_venta,
