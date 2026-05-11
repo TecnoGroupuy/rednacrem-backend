@@ -18972,7 +18972,8 @@ async function getNewContactsDistribution(client, batchId) {
               efectividad
             };
           });
-          itemsByTipo.set(tipoValue, items);
+          const itemsConGestiones = items.filter((item) => (item.gestiones || 0) > 0);
+          itemsByTipo.set(tipoValue, itemsConGestiones);
         }
 
         return safeResponse({
