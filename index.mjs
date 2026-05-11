@@ -12615,6 +12615,123 @@ export const handler = async (event) => {
     }
   }
 
+  // GET /leads/batch-stats?batch_id=xxx&fecha=yyyy-mm-dd
+  // Stats del día por vendedor para un lote específico (vista supervisor).
+  if (method === "GET" && path.endsWith("/leads/batch-stats")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
+    let batchId = null;
+    let fecha = null;
+    try {
+      const authContext = await getCurrentDbUserFromEvent(event);
+      const authUser = authContext.authUser;
+      dbUser = authContext.dbUser;
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
+      if (roleError) return roleError;
+
+      batchId = getQueryParam(event, "batch_id");
+      if (!batchId || !isValidUuid(batchId)) {
+        return json(400, { ok: false, message: "batch_id requerido" });
+      }
+      fecha = parseFechaParam(getQueryParam(event, "fecha"));
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const batchRes = await client.query(
+          `
+          SELECT id
+          FROM lead_batches
+          WHERE id = $1
+            AND organization_id = $2
+          LIMIT 1
+          `,
+          [batchId, organizationId]
+        );
+        if (!batchRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
+        const result = await client.query(
+          `
+          SELECT
+            u.id AS seller_id,
+            COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS nombre,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado <> 'dato_erroneo')::int AS tocados,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado = 'rellamar')::int AS rellamar,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado = 'seguimiento')::int AS seguimiento,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado = 'rechazo')::int AS rechazos,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado = 'venta')::int AS ventas,
+            COUNT(*) FILTER (WHERE last_gestiones.resultado = 'dato_erroneo')::int AS dato_erroneo,
+            ROUND(
+              100.0
+              * COUNT(*) FILTER (WHERE last_gestiones.resultado = 'venta')
+              / NULLIF(COUNT(*) FILTER (WHERE last_gestiones.resultado <> 'dato_erroneo'), 0),
+              1
+            ) AS efectividad_pct
+          FROM (
+            SELECT DISTINCT ON (lmh.contact_id, lmh.user_id)
+              lmh.contact_id,
+              lmh.user_id,
+              lmh.resultado
+            FROM lead_management_history lmh
+            WHERE lmh.batch_id = $1
+              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+              AND lmh.organization_id = $3
+            ORDER BY lmh.contact_id, lmh.user_id, lmh.fecha_gestion DESC
+          ) last_gestiones
+          JOIN users u ON u.id = last_gestiones.user_id
+          GROUP BY u.id, u.nombre, u.apellido
+          ORDER BY tocados DESC, u.id ASC
+          `,
+          [batchId, fecha, organizationId]
+        );
+
+        return json(200, { ok: true, stats: result.rows, batch_id: batchId, fecha });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load batch stats",
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[batch-stats]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        batch_id: batchId,
+        fecha,
+        duration_ms: Date.now() - startedAt
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/leads/status")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
