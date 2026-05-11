@@ -15272,6 +15272,32 @@ async function redistributeNewContacts(client, batchId) {
   }
 }
 
+async function getNewContactsDistribution(client, batchId) {
+  const res = await client.query(
+    `
+    SELECT
+      u.id AS seller_id,
+      COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS nombre,
+      COUNT(lcs.contact_id)::int AS cantidad
+    FROM lead_batch_sellers lbs
+    JOIN users u ON u.id = lbs.seller_id
+    LEFT JOIN lead_contact_status lcs
+      ON lcs.batch_id = lbs.batch_id
+     AND lcs.assigned_to = lbs.seller_id
+     AND lcs.estado_venta = 'nuevo'
+    WHERE lbs.batch_id = $1
+    GROUP BY u.id, u.nombre, u.apellido
+    ORDER BY cantidad DESC, u.id ASC
+    `,
+    [batchId]
+  );
+  return res.rows.map((r) => ({
+    seller_id: r.seller_id,
+    nombre: r.nombre,
+    cantidad: Number(r.cantidad) || 0
+  }));
+}
+
   if (method === "POST" && path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/)) {
     const match = path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/);
     const batchId = match?.[1];
@@ -15371,6 +15397,7 @@ async function redistributeNewContacts(client, batchId) {
         }
 
         await client.query("BEGIN");
+        let distribution = [];
         try {
           // 7) lead_batch_contacts
           for (const contactId of nuevosIds) {
@@ -15424,39 +15451,13 @@ async function redistributeNewContacts(client, batchId) {
           }
 
           await redistributeNewContacts(client, batchId);
+          distribution = await getNewContactsDistribution(client, batchId);
 
           await client.query("COMMIT");
         } catch (err) {
           await client.query("ROLLBACK");
           throw err;
         }
-
-        const sellersRes = await client.query(
-          `
-          SELECT lbs.seller_id, u.nombre, u.apellido
-          FROM lead_batch_sellers lbs
-          JOIN users u ON u.id = lbs.seller_id
-          WHERE lbs.batch_id = $1
-          ORDER BY lbs.created_at ASC, lbs.seller_id ASC
-          `,
-          [batchId]
-        );
-        const distRes = await client.query(
-          `
-          SELECT assigned_to, COUNT(*)::int AS cantidad
-          FROM lead_contact_status
-          WHERE batch_id = $1
-            AND contact_id = ANY($2::uuid[])
-          GROUP BY assigned_to
-          `,
-          [batchId, nuevosIds]
-        );
-        const countBySeller = new Map(distRes.rows.map((r) => [r.assigned_to, r.cantidad]));
-        const distribution = sellersRes.rows.map((s) => ({
-          seller_id: s.seller_id,
-          nombre: [s.nombre, s.apellido].filter(Boolean).join(" ").trim(),
-          cantidad: countBySeller.get(s.seller_id) || 0
-        }));
 
         return json(200, { ok: true, added: nuevosIds.length, distribution });
       } finally {
@@ -15826,6 +15827,7 @@ async function redistributeNewContacts(client, batchId) {
         }
 
         await client.query("BEGIN");
+        let distribution = [];
         try {
           await client.query(
             `INSERT INTO lead_batch_sellers (batch_id, seller_id)
@@ -15834,12 +15836,17 @@ async function redistributeNewContacts(client, batchId) {
             [batchId, sellerId]
           );
           await redistributeNewContacts(client, batchId);
+          distribution = await getNewContactsDistribution(client, batchId);
           await client.query("COMMIT");
         } catch (err) {
           await client.query("ROLLBACK");
           throw err;
         }
-        return json(200, { ok: true, message: "Vendedor agregado al lote" });
+        return json(200, {
+          ok: true,
+          message: "Vendedor agregado al lote",
+          distribution
+        });
       } catch (err) {
         return json(500, { ok: false, message: err.message });
       } finally {
