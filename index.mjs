@@ -20889,10 +20889,10 @@ async function getNewContactsDistribution(client, batchId) {
           `,
           [sellerId]
         );
-        const primera = primeraGestionRes.rows[0]?.primera || null;
-
+        const primeraRaw = primeraGestionRes.rows[0]?.primera || null;
+        const primera = primeraRaw ? formatDateYmd(new Date(primeraRaw)) : null;
         const today = formatDateYmd(new Date());
-        desde = fechaDesdeParsed || (primera ? String(primera) : today);
+        desde = fechaDesdeParsed || primera || today;
         hasta = fechaHastaParsed || today;
 
         const resultadoRes = await client.query(
