@@ -20935,11 +20935,25 @@ async function getNewContactsDistribution(client, batchId) {
         const rows = resultadoRes.rows || [];
         const groupBy = (tipo) => rows.filter((r) => r.resultado === tipo);
 
+        const pendientesRes = await client.query(
+          `
+          SELECT COUNT(*)::int AS total
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lcs.estado_venta = 'nuevo'
+            AND lb.estado IN ('activo', 'asignado')
+          `,
+          [sellerId]
+        );
+        const pendientes_count = pendientesRes.rows[0]?.total || 0;
+
         return json(200, {
           ok: true,
           seller_id: sellerId,
           fecha_desde: desde,
           fecha_hasta: hasta,
+          pendientes_count,
           resumen: {
             ventas: groupBy("venta").length,
             rechazos: groupBy("rechazo").length,
