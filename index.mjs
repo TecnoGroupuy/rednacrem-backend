@@ -18795,18 +18795,18 @@ async function getNewContactsDistribution(client, batchId) {
             const datosErroneos = Number(daily.datos_erroneos || 0);
             const gestionesVenta = Number(daily.ventas || 0);
             const totalGestionado =
-              ventas +
+              gestionesVenta +
               seguimientos +
               rellamadas +
               noContesta +
               rechazos +
               datosErroneos;
-            const datosUtiles = ventas + seguimientos + rechazos;
-            const contacto = totalGestionado > 0
-              ? Math.round((datosUtiles / totalGestionado) * 100)
+            const totalSinError = totalGestionado - datosErroneos;
+            const efectividad = totalSinError > 0
+              ? Math.round((gestionesVenta / totalSinError) * 100)
               : 0;
-            const efectividad = datosUtiles > 0
-              ? Math.round((ventas / datosUtiles) * 100)
+            const contacto = totalSinError > 0
+              ? Math.round(((totalSinError - noContesta) / totalSinError) * 100)
               : 0;
 
             return {
@@ -18959,18 +18959,18 @@ async function getNewContactsDistribution(client, batchId) {
             const datosErroneos = Number(daily.datos_erroneos || 0);
             const gestionesVenta = Number(daily.ventas || 0);
             const totalGestionado =
-              ventas +
+              gestionesVenta +
               seguimientos +
               rellamadas +
               noContesta +
               rechazos +
               datosErroneos;
-            const datosUtiles = ventas + seguimientos + rechazos;
-            const contacto = totalGestionado > 0
-              ? Math.round((datosUtiles / totalGestionado) * 100)
+            const totalSinError = totalGestionado - datosErroneos;
+            const efectividad = totalSinError > 0
+              ? Math.round((gestionesVenta / totalSinError) * 100)
               : 0;
-            const efectividad = datosUtiles > 0
-              ? Math.round((ventas / datosUtiles) * 100)
+            const contacto = totalSinError > 0
+              ? Math.round(((totalSinError - noContesta) / totalSinError) * 100)
               : 0;
             return {
               id: seller.id,
