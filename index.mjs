@@ -20868,9 +20868,8 @@ async function getNewContactsDistribution(client, batchId) {
           SELECT MIN((fecha_gestion AT TIME ZONE 'America/Montevideo')::date) AS primera
           FROM lead_management_history
           WHERE user_id = $1
-            AND organization_id = $2
           `,
-          [sellerId, organizationId]
+          [sellerId]
         );
         const primera = primeraGestionRes.rows[0]?.primera || null;
 
@@ -20898,7 +20897,7 @@ async function getNewContactsDistribution(client, batchId) {
             LEFT JOIN contacts c ON c.id = lmh.contact_id
             WHERE lmh.user_id = $1
               AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date BETWEEN $2::date AND $3::date
-              AND lmh.organization_id = $4
+              AND (lmh.organization_id = $4 OR lmh.organization_id IS NULL)
             ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
           )
           SELECT
