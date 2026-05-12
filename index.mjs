@@ -13703,6 +13703,21 @@ export const handler = async (event) => {
           nuevaOla = 2;
         }
 
+        let organizationId = null;
+        try {
+          const orgRes = await client.query(
+            `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
+            [batchId]
+          );
+          organizationId = orgRes.rows[0]?.organization_id || null;
+        } catch {}
+
+        const hasMgmtOrganizationId = await columnExists(
+          client,
+          "lead_management_history",
+          "organization_id"
+        );
+
         const mgmtResult = await client.query(
           `
           INSERT INTO lead_management_history (
@@ -13713,11 +13728,14 @@ export const handler = async (event) => {
             nota,
             fecha_gestion,
             proxima_accion
+            ${hasMgmtOrganizationId ? ", organization_id" : ""}
           )
-          VALUES ($1, $2, $3, $4, $5, now(), $6)
+          VALUES ($1, $2, $3, $4, $5, now(), $6${hasMgmtOrganizationId ? ", $7" : ""})
           RETURNING id
           `,
-          [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
+          hasMgmtOrganizationId
+            ? [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, organizationId]
+            : [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
         const gestionId = mgmtResult.rows[0]?.id ?? null;
 
