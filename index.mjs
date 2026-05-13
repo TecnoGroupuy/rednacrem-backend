@@ -13960,6 +13960,7 @@ export const handler = async (event) => {
             d.created_at,
             lcs.intentos,
             lcs.estado_venta,
+            reasig.nota AS reasignado_desde,
             (
               SELECT lmh.resultado
               FROM lead_management_history lmh
@@ -13986,6 +13987,15 @@ export const handler = async (event) => {
           LEFT JOIN lead_contact_status lcs
             ON lcs.contact_id = a.contact_id
             AND lcs.batch_id = a.batch_id
+          LEFT JOIN LATERAL (
+            SELECT nota
+            FROM lead_management_history lmh_r
+            WHERE lmh_r.contact_id = a.contact_id
+              AND lmh_r.batch_id = a.batch_id
+              AND lmh_r.resultado = 'reasignado'
+            ORDER BY lmh_r.fecha_gestion DESC
+            LIMIT 1
+          ) reasig ON true
           ${whereClause}
           ORDER BY a.fecha_agenda ASC
           `,
