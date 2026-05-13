@@ -2332,6 +2332,7 @@ function mapProductRowToApi(row) {
     observaciones: row.observaciones || "",
     precio: Number(row.precio || 0),
     activo: row.activo !== false,
+    disponible_venta: row.disponible_venta !== false,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -5154,6 +5155,9 @@ function validateProductPayload(body, options = {}) {
   const observaciones = normalizeText(body?.observaciones);
   const precio = body?.precio ?? body?.price ?? 0;
   const activo = body?.activo;
+  const rawDisponibleVenta = body?.disponible_venta ?? body?.disponibleVenta;
+  const hasDisponibleVenta =
+    body?.disponible_venta !== undefined || body?.disponibleVenta !== undefined;
 
   const errors = {};
 
@@ -5178,7 +5182,10 @@ function validateProductPayload(body, options = {}) {
       descripcion: descripcion || null,
       observaciones: observaciones || null,
       precio: Number.isNaN(parsedPrecio) ? 0 : parsedPrecio,
-      activo: activo === undefined ? true : Boolean(activo)
+      activo: activo === undefined ? true : Boolean(activo),
+      disponible_venta: isPatch
+        ? (hasDisponibleVenta ? Boolean(rawDisponibleVenta) : undefined)
+        : (hasDisponibleVenta ? Boolean(rawDisponibleVenta) : true)
     }
   };
 }
@@ -6551,14 +6558,26 @@ async function recordClientDocumentEvent(payload) {
   }
 }
 
-async function listProducts(organizationId) {
+async function listProducts(organizationId, options = {}) {
   const client = createDbClient();
 
   try {
     await client.connect();
     const values = [];
-    const whereClause = organizationId ? "WHERE organization_id = $1" : "";
-    if (organizationId) values.push(organizationId);
+    const whereParts = [];
+    let idx = 1;
+
+    if (organizationId) {
+      whereParts.push(`organization_id = $${idx}`);
+      values.push(organizationId);
+      idx += 1;
+    }
+
+    if (options.onlyDisponibleVenta) {
+      whereParts.push("disponible_venta = true");
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
     const result = await client.query(
       `
       SELECT
@@ -6569,6 +6588,7 @@ async function listProducts(organizationId) {
         observaciones,
         precio,
         activo,
+        disponible_venta,
         created_at,
         updated_at
       FROM products
@@ -6598,9 +6618,10 @@ async function createProductRecord(payload, organizationId) {
         observaciones,
         precio,
         activo,
+        disponible_venta,
         organization_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
       `,
       [
@@ -6610,6 +6631,7 @@ async function createProductRecord(payload, organizationId) {
         payload.observaciones,
         payload.precio,
         payload.activo,
+        payload.disponible_venta !== undefined ? Boolean(payload.disponible_venta) : true,
         organizationId
       ]
     );
@@ -6632,7 +6654,8 @@ async function updateProductRecord(productId, payload, organizationId) {
       payload.descripcion || null,
       payload.observaciones || null,
       payload.precio ?? null,
-      payload.activo === undefined ? null : payload.activo
+      payload.activo === undefined ? null : payload.activo,
+      payload.disponible_venta === undefined ? null : payload.disponible_venta
     ];
     let orgClause = "";
     if (organizationId) {
@@ -6650,6 +6673,7 @@ async function updateProductRecord(productId, payload, organizationId) {
         observaciones = COALESCE($5, observaciones),
         precio = COALESCE($6, precio),
         activo = COALESCE($7, activo),
+        disponible_venta = COALESCE($8, disponible_venta),
         updated_at = now()
       WHERE id = $1
       ${orgClause}
@@ -11014,7 +11038,13 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const items = await listProducts(organizationId);
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const items = await listProducts(organizationId, {
+        onlyDisponibleVenta: dbUser?.role_key === "vendedor"
+      });
       return json(200, { ok: true, items });
     } catch (error) {
       return json(500, {
@@ -21231,7 +21261,14 @@ async function getNewContactsDistribution(client, batchId) {
         throw error;
       }
 
-      const item = await createProductRecord(validation.data, organizationId);
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const item = await createProductRecord(
+        { ...validation.data, disponible_venta: validation.data.disponible_venta ?? true },
+        organizationId
+      );
       return json(201, { ok: true, item });
     } catch (error) {
       return json(500, {
@@ -21283,6 +21320,10 @@ async function getNewContactsDistribution(client, batchId) {
           return json(error.status, { ok: false, message: error.message });
         }
         throw error;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
       }
 
       const item = await updateProductRecord(productMatch[1], validation.data, organizationId);
