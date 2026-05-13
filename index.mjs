@@ -18899,12 +18899,14 @@ async function getNewContactsDistribution(client, batchId) {
               noContesta +
               rechazos +
               datosErroneos;
-            const totalSinError = totalGestionado - datosErroneos;
-            const efectividad = totalSinError > 0
-              ? Math.round((gestionesVenta / totalSinError) * 100)
+            const datosUtiles = gestionesVenta + seguimientos + rechazos;
+            const datosInutiles = noContesta + rellamadas + datosErroneos;
+            const gestionesDelDia = datosUtiles + datosInutiles;
+            const contacto = datosUtiles > 0 && gestionesDelDia > 0
+              ? Math.round((datosUtiles / gestionesDelDia) * 100)
               : 0;
-            const contacto = totalSinError > 0
-              ? Math.round(((totalSinError - noContesta) / totalSinError) * 100)
+            const efectividad = datosUtiles > 0
+              ? Math.round((gestionesVenta / datosUtiles) * 100)
               : 0;
 
             return {
@@ -19063,12 +19065,14 @@ async function getNewContactsDistribution(client, batchId) {
               noContesta +
               rechazos +
               datosErroneos;
-            const totalSinError = totalGestionado - datosErroneos;
-            const efectividad = totalSinError > 0
-              ? Math.round((gestionesVenta / totalSinError) * 100)
+            const datosUtiles = gestionesVenta + seguimientos + rechazos;
+            const datosInutiles = noContesta + rellamadas + datosErroneos;
+            const gestionesDelDia = datosUtiles + datosInutiles;
+            const contacto = datosUtiles > 0 && gestionesDelDia > 0
+              ? Math.round((datosUtiles / gestionesDelDia) * 100)
               : 0;
-            const contacto = totalSinError > 0
-              ? Math.round(((totalSinError - noContesta) / totalSinError) * 100)
+            const efectividad = datosUtiles > 0
+              ? Math.round((gestionesVenta / datosUtiles) * 100)
               : 0;
             return {
               id: seller.id,
