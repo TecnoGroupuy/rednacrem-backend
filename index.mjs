@@ -21009,7 +21009,7 @@ async function getNewContactsDistribution(client, batchId) {
       if (authError) return authError;
       let dbError = requireDbUser(event, dbUser);
       if (dbError) return dbError;
-      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
       if (roleError) return roleError;
 
       const client = createDbClient();
@@ -21782,6 +21782,26 @@ async function getNewContactsDistribution(client, batchId) {
       const client = createDbClient();
       await client.connect();
       try {
+        // Verificar que el target es vendedor si quien ejecuta es supervisor
+        const targetUser = await client.query(
+          `SELECT role_key FROM users WHERE id = $1`,
+          [userId]
+        );
+
+        if (!targetUser.rows[0]) {
+          return json(404, { ok: false, message: "Usuario no encontrado" });
+        }
+
+        const targetRole = targetUser.rows[0].role_key;
+        const callerRole = dbUser?.role_key || dbUser?.role || null;
+
+        if (callerRole === "supervisor" && targetRole !== "vendedor") {
+          return json(403, {
+            ok: false,
+            message: "El supervisor solo puede desactivar vendedores"
+          });
+        }
+
         await client.query("BEGIN");
 
         const userValues = [userId];
