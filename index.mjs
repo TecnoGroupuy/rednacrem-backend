@@ -15361,7 +15361,27 @@ export const handler = async (event) => {
     }
   }
 
-async function redistributeNewContacts(client, batchId) {
+async function redistributeNewContacts(client, batchId, fromSellerId = null) {
+  let fromSellerNombre = null;
+  if (fromSellerId) {
+    const fromRes = await client.query(
+      `SELECT nombre, apellido FROM users WHERE id = $1`,
+      [fromSellerId]
+    );
+    if (fromRes.rows[0]) {
+      fromSellerNombre = `${fromRes.rows[0].nombre || ""} ${fromRes.rows[0].apellido || ""}`.trim();
+    }
+  }
+
+  let organizationId = null;
+  if (fromSellerNombre) {
+    const orgRes = await client.query(
+      `SELECT organization_id FROM lead_batches WHERE id = $1`,
+      [batchId]
+    );
+    organizationId = orgRes.rows[0]?.organization_id || null;
+  }
+
   const sellersRes = await client.query(
     `SELECT seller_id FROM lead_batch_sellers WHERE batch_id = $1 ORDER BY id ASC`,
     [batchId]
@@ -15371,7 +15391,7 @@ async function redistributeNewContacts(client, batchId) {
 
   const contactsRes = await client.query(
     `
-    SELECT contact_id
+    SELECT contact_id, assigned_to
     FROM lead_contact_status
     WHERE batch_id = $1
       AND estado_venta = 'nuevo'
@@ -15381,6 +15401,7 @@ async function redistributeNewContacts(client, batchId) {
   );
   if (!contactsRes.rows.length) return;
   const contactIds = contactsRes.rows.map((r) => r.contact_id);
+  const prevAssigned = contactsRes.rows.map((r) => r.assigned_to || null);
 
   const assignedTo = contactIds.map(
     (_contactId, index) => sellerIds[index % sellerIds.length]
@@ -15406,6 +15427,73 @@ async function redistributeNewContacts(client, batchId) {
       `,
       [contactChunk, assignedChunk, batchId]
     );
+  }
+
+  if (fromSellerNombre) {
+    const reasignados = contactIds
+      .map((contactId, index) => ({
+        contactId,
+        prevAssignedTo: prevAssigned[index],
+        assignedTo: assignedTo[index]
+      }))
+      .filter(
+        ({ prevAssignedTo, assignedTo: newSeller }) =>
+          prevAssignedTo === fromSellerId && newSeller && newSeller !== fromSellerId
+      );
+
+    if (reasignados.length) {
+      const hasOrgColumn = await columnExists(client, "lead_management_history", "organization_id");
+      const noteChunkSize = 500;
+      for (let i = 0; i < reasignados.length; i += noteChunkSize) {
+        const chunk = reasignados.slice(i, i + noteChunkSize);
+        const contactChunk = chunk.map((r) => r.contactId);
+        const sellerChunk = chunk.map((r) => r.assignedTo);
+
+        if (hasOrgColumn) {
+          await client.query(
+            `
+            INSERT INTO lead_management_history
+              (contact_id, batch_id, user_id, resultado, nota, fecha_gestion, organization_id)
+            SELECT
+              UNNEST($1::uuid[]) AS contact_id,
+              $2 AS batch_id,
+              UNNEST($3::uuid[]) AS user_id,
+              'reasignado' AS resultado,
+              $4 AS nota,
+              NOW() AS fecha_gestion,
+              $5 AS organization_id
+            `,
+            [
+              contactChunk,
+              batchId,
+              sellerChunk,
+              `Contacto reasignado desde ${fromSellerNombre}`,
+              organizationId
+            ]
+          );
+        } else {
+          await client.query(
+            `
+            INSERT INTO lead_management_history
+              (contact_id, batch_id, user_id, resultado, nota, fecha_gestion)
+            SELECT
+              UNNEST($1::uuid[]) AS contact_id,
+              $2 AS batch_id,
+              UNNEST($3::uuid[]) AS user_id,
+              'reasignado' AS resultado,
+              $4 AS nota,
+              NOW() AS fecha_gestion
+            `,
+            [
+              contactChunk,
+              batchId,
+              sellerChunk,
+              `Contacto reasignado desde ${fromSellerNombre}`
+            ]
+          );
+        }
+      }
+    }
   }
 }
 
@@ -21874,6 +21962,30 @@ async function getNewContactsDistribution(client, batchId) {
           `,
           deleteValues
         );
+
+        // Redistribuir contactos "nuevo" del vendedor desactivado en lotes activos
+        const lotesValues = [userId];
+        let lotesOrgClause = "";
+        if (organizationId) {
+          lotesValues.push(organizationId);
+          lotesOrgClause = "AND lb.organization_id = $2";
+        }
+        const lotesRes = await client.query(
+          `
+          SELECT DISTINCT lcs.batch_id
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          WHERE lcs.assigned_to = $1
+            AND lcs.estado_venta = 'nuevo'
+            AND lb.estado IN ('activo', 'asignado')
+            ${lotesOrgClause}
+          `,
+          lotesValues
+        );
+        for (const lote of lotesRes.rows || []) {
+          if (!lote?.batch_id) continue;
+          await redistributeNewContacts(client, lote.batch_id, userId);
+        }
 
         const pendientesValues = [userId];
         let pendientesOrgClause = "";
