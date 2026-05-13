@@ -6320,7 +6320,7 @@ async function getClientDocumentData(clientId, organizationId) {
         cp.carencia_cuotas,
         s.id AS sale_id,
         COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
-        s.medio_pago,
+        COALESCE(pm.nombre, s.medio_pago) AS medio_pago,
         s.seller_origin,
         s.seller_name_snapshot,
         s.seller_user_id AS seller_id,
@@ -6336,6 +6336,8 @@ async function getClientDocumentData(clientId, organizationId) {
       ) cp ON true
       LEFT JOIN sales s
         ON s.id = cp.sale_id
+      LEFT JOIN payment_methods pm
+        ON pm.id = s.payment_method_id
       ${userJoin}
       WHERE c.id = $1
       ${orgClause}
@@ -6431,7 +6433,7 @@ async function getClientDetailData(clientId, organizationId) {
       SELECT
         cp.*,
         COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
-        s.medio_pago,
+        COALESCE(pm.nombre, s.medio_pago) AS medio_pago,
         s.seller_origin,
         s.seller_name_snapshot,
         s.seller_user_id AS seller_id,
@@ -6439,6 +6441,8 @@ async function getClientDetailData(clientId, organizationId) {
       FROM contact_products cp
       LEFT JOIN sales s
         ON s.id = cp.sale_id
+      LEFT JOIN payment_methods pm
+        ON pm.id = s.payment_method_id
       ${userJoin}
       WHERE cp.contact_id = $1
       ${productsOrgClause}
