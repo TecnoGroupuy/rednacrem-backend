@@ -6689,6 +6689,43 @@ async function listProducts(organizationId, options = {}) {
   }
 }
 
+async function listPaymentMethods(organizationId) {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+    const cols = await getTableColumns(client, "payment_methods");
+    if (!cols.has("id") || !cols.has("nombre")) {
+      throw new Error("payment_methods table/columns missing");
+    }
+    if (!cols.has("organization_id")) {
+      throw new Error("payment_methods.organization_id column is missing");
+    }
+    if (!cols.has("activo")) {
+      throw new Error("payment_methods.activo column is missing");
+    }
+
+    const result = await client.query(
+      `
+      SELECT id, nombre, activo
+      FROM payment_methods
+      WHERE organization_id = $1
+        AND activo = true
+      ORDER BY nombre ASC
+      `,
+      [organizationId]
+    );
+
+    return (result.rows || []).map((row) => ({
+      id: row.id,
+      nombre: row.nombre,
+      activo: row.activo !== false
+    }));
+  } finally {
+    await client.end();
+  }
+}
+
 async function createProductRecord(payload, organizationId) {
   const client = createDbClient();
 
@@ -11176,6 +11213,52 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to list products",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/payment-methods")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      if (!organizationId && dbUser?.role_key === "superadministrador") {
+        const orgParam = getQueryParam(event, "organization_id");
+        organizationId = orgParam && isValidUuid(orgParam) ? orgParam : null;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const items = await listPaymentMethods(organizationId);
+      return json(200, { ok: true, items });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list payment methods",
         error: error.message
       });
     }
