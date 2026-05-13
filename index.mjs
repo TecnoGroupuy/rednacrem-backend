@@ -2333,6 +2333,7 @@ function mapProductRowToApi(row) {
     precio: Number(row.precio || 0),
     activo: row.activo !== false,
     disponible_venta: row.disponible_venta !== false,
+    coberturas: Array.isArray(row.coberturas) ? row.coberturas : [],
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -5153,6 +5154,7 @@ function validateProductPayload(body, options = {}) {
   const categoria = normalizeText(body?.categoria || "General");
   const descripcion = normalizeText(body?.descripcion);
   const observaciones = normalizeText(body?.observaciones);
+  const coberturasRaw = body?.coberturas;
   const precio = body?.precio ?? body?.price ?? 0;
   const activo = body?.activo;
   const rawDisponibleVenta = body?.disponible_venta ?? body?.disponibleVenta;
@@ -5170,6 +5172,17 @@ function validateProductPayload(body, options = {}) {
     errors.precio = ["precio invï¿½lido"];
   }
 
+  let coberturas = undefined;
+  if (coberturasRaw !== undefined) {
+    if (!Array.isArray(coberturasRaw)) {
+      errors.coberturas = ["coberturas debe ser un array"];
+    } else {
+      coberturas = coberturasRaw
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean);
+    }
+  }
+
   if (Object.keys(errors).length > 0) {
     return { valid: false, errors };
   }
@@ -5185,7 +5198,8 @@ function validateProductPayload(body, options = {}) {
       activo: activo === undefined ? true : Boolean(activo),
       disponible_venta: isPatch
         ? (hasDisponibleVenta ? Boolean(rawDisponibleVenta) : undefined)
-        : (hasDisponibleVenta ? Boolean(rawDisponibleVenta) : true)
+        : (hasDisponibleVenta ? Boolean(rawDisponibleVenta) : true),
+      coberturas: isPatch ? coberturas : (coberturas ?? [])
     }
   };
 }
@@ -5228,6 +5242,17 @@ function validateProductPatch(body) {
       errors.precio = ["precio inválido (debe ser > 0)"];
     } else {
       data.precio = parsedPrecio;
+    }
+  }
+
+  if (has("coberturas")) {
+    const raw = body?.coberturas;
+    if (!Array.isArray(raw)) {
+      errors.coberturas = ["coberturas debe ser un array"];
+    } else {
+      data.coberturas = raw
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean);
     }
   }
 
@@ -6731,32 +6756,64 @@ async function createProductRecord(payload, organizationId) {
 
   try {
     await client.connect();
-    const result = await client.query(
-      `
-      INSERT INTO products (
-        nombre,
-        categoria,
-        descripcion,
-        observaciones,
-        precio,
-        activo,
-        disponible_venta,
-        organization_id
+    const cols = await getTableColumns(client, "products");
+    const hasCoberturas = cols.has("coberturas");
+
+    const result = hasCoberturas
+      ? await client.query(
+        `
+        INSERT INTO products (
+          nombre,
+          categoria,
+          descripcion,
+          observaciones,
+          precio,
+          activo,
+          disponible_venta,
+          coberturas,
+          organization_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING *
+        `,
+        [
+          payload.nombre,
+          payload.categoria,
+          payload.descripcion,
+          payload.observaciones,
+          payload.precio,
+          payload.activo,
+          payload.disponible_venta !== undefined ? Boolean(payload.disponible_venta) : true,
+          Array.isArray(payload.coberturas) ? payload.coberturas : [],
+          organizationId
+        ]
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-      `,
-      [
-        payload.nombre,
-        payload.categoria,
-        payload.descripcion,
-        payload.observaciones,
-        payload.precio,
-        payload.activo,
-        payload.disponible_venta !== undefined ? Boolean(payload.disponible_venta) : true,
-        organizationId
-      ]
-    );
+      : await client.query(
+        `
+        INSERT INTO products (
+          nombre,
+          categoria,
+          descripcion,
+          observaciones,
+          precio,
+          activo,
+          disponible_venta,
+          organization_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *
+        `,
+        [
+          payload.nombre,
+          payload.categoria,
+          payload.descripcion,
+          payload.observaciones,
+          payload.precio,
+          payload.activo,
+          payload.disponible_venta !== undefined ? Boolean(payload.disponible_venta) : true,
+          organizationId
+        ]
+      );
 
     return mapProductRowToApi(result.rows[0]);
   } finally {
@@ -6794,6 +6851,13 @@ async function updateProductRecord(productId, payload, organizationId) {
         throw new Error("products.disponible_venta column is missing");
       }
       pushSet("disponible_venta", payload.disponible_venta);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(payload, "coberturas")) {
+      if (!cols.has("coberturas")) {
+        throw new Error("products.coberturas column is missing");
+      }
+      pushSet("coberturas", Array.isArray(payload.coberturas) ? payload.coberturas : []);
     }
 
     if (!setParts.length) {
