@@ -7347,9 +7347,8 @@ function requireAuthenticated(event, authUser) {
 
 function requireDbUser(event, dbUser) {
   if (!dbUser) {
-    return json(404, {
-      ok: false,
-      message: "User not found in database"
+    return json(403, {
+      error: "Usuario no registrado. Contacte al administrador de su organización."
     });
   }
 
@@ -8625,11 +8624,8 @@ export const handler = async (event) => {
       const dbUser = await findCurrentUserFromClaims(mergedClaims);
 
       if (!dbUser) {
-        return json(404, {
-          ok: false,
-          message: "User not found in database",
-          cognitoSub: authUser.sub,
-          email: authUser.email
+        return json(403, {
+          error: "Usuario no registrado. Contacte al administrador de su organización."
         });
       }
 

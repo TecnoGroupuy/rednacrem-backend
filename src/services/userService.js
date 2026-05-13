@@ -98,68 +98,14 @@ export async function findCurrentUserFromClaims(claims) {
     const byEmail = await findUserByEmail(email);
     console.log("[DEBUG_ME] byEmail resultado:", byEmail ? byEmail.id : "null");
     if (byEmail) {
-      if (sub && !byEmail.cognito_sub) {
+      if (sub && (!byEmail.cognito_sub || byEmail.cognito_sub !== sub)) {
         await updateUserById(byEmail.id, { cognito_sub: sub });
       }
       return await ensureUserRole(byEmail, desiredRole);
     }
   }
 
-  if (!email) return null;
-
-  const nombre = claims.given_name || claims.name || "Usuario";
-  const apellido = claims.family_name || "";
-  const nameParts = (!claims.given_name && !claims.family_name)
-    ? splitName(claims.name || "")
-    : { nombre, apellido };
-
-  const roleKey = isValidRole(desiredRole) ? desiredRole : "vendedor";
-  const status = isValidUserStatus("approved") ? "approved" : "pending";
-
-  return await withTransaction(async (client) => {
-    const created = await insertUser(
-      {
-        cognitoSub: sub || null,
-        email,
-        nombre: nameParts.nombre || "Usuario",
-        apellido: nameParts.apellido || "",
-        telefono: claims.phone_number || null,
-        roleKey,
-        status,
-        createdBy: null,
-        approvedBy: null,
-        approvedAt: status === "approved" ? new Date() : null,
-        rejectedBy: null,
-        rejectedAt: null,
-        rejectionReason: null,
-        lastLoginAt: null
-      },
-      client
-    );
-
-    await insertRoleHistory(
-      {
-        userId: created.id,
-        oldRole: null,
-        newRole: created.role_key,
-        changedBy: null,
-        reason: "auto_create_from_cognito"
-      },
-      client
-    );
-    await insertStatusHistory(
-      {
-        userId: created.id,
-        oldStatus: null,
-        newStatus: created.status,
-        changedBy: null,
-        reason: "auto_create_from_cognito"
-      },
-      client
-    );
-
-    return created;
-  });
+  return null;
 }
 
 export async function getBusinessSession({ claims, user, touchLastLogin = true }) {
