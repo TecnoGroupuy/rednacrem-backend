@@ -6457,6 +6457,7 @@ async function getClientDetailData(clientId, organizationId) {
       `
       SELECT
         cp.*,
+        p.coberturas,
         COALESCE(s.fecha_venta, s.created_at) AS sale_fecha,
         COALESCE(pm.nombre, s.medio_pago) AS medio_pago,
         s.seller_origin,
@@ -6464,6 +6465,8 @@ async function getClientDetailData(clientId, organizationId) {
         s.seller_user_id AS seller_id,
         ${userSelect}
       FROM contact_products cp
+      LEFT JOIN products p
+        ON p.id = cp.product_id
       LEFT JOIN sales s
         ON s.id = cp.sale_id
       LEFT JOIN payment_methods pm
@@ -6489,6 +6492,7 @@ async function getClientDetailData(clientId, organizationId) {
         plan: row.plan,
         precio: row.precio,
         estado: row.estado,
+        coberturas: row.coberturas,
         fechaAlta: row.fecha_alta,
         fecha_alta: row.fecha_alta,
         fechaBaja: row.fecha_baja,
@@ -6645,6 +6649,7 @@ async function listProducts(organizationId, options = {}) {
     const hasOrganizationId = cols.has("organization_id");
     const hasDisponibleVenta = cols.has("disponible_venta");
     const hasActivo = cols.has("activo");
+    const hasCoberturas = cols.has("coberturas");
 
     if (!hasOrganizationId) {
       throw new Error("products.organization_id column is missing");
@@ -6699,6 +6704,7 @@ async function listProducts(organizationId, options = {}) {
         precio,
         activo,
         ${hasDisponibleVenta ? "disponible_venta," : ""}
+        ${hasCoberturas ? "coberturas," : ""}
         created_at,
         updated_at
       FROM products
