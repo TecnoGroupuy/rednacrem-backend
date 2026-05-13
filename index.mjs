@@ -6563,21 +6563,54 @@ async function listProducts(organizationId, options = {}) {
 
   try {
     await client.connect();
+
+    const cols = await getTableColumns(client, "products");
+    const hasOrganizationId = cols.has("organization_id");
+    const hasDisponibleVenta = cols.has("disponible_venta");
+    const hasActivo = cols.has("activo");
+
+    if (!hasOrganizationId) {
+      throw new Error("products.organization_id column is missing");
+    }
+
     const values = [];
     const whereParts = [];
     let idx = 1;
 
-    if (organizationId) {
-      whereParts.push(`organization_id = $${idx}`);
-      values.push(organizationId);
+    whereParts.push(`organization_id = $${idx}`);
+    values.push(organizationId);
+    idx += 1;
+
+    const search = normalizeText(options.search || "");
+    if (search) {
+      whereParts.push(`nombre ILIKE $${idx}`);
+      values.push(`%${search}%`);
       idx += 1;
     }
 
-    if (options.onlyDisponibleVenta) {
-      whereParts.push("disponible_venta = true");
+    const isVendor = options.roleKey === "vendedor";
+    if (isVendor) {
+      if (hasDisponibleVenta) whereParts.push("disponible_venta = true");
+      if (hasActivo) whereParts.push("activo = true");
+    } else {
+      if (options.disponible !== undefined && hasDisponibleVenta) {
+        whereParts.push(`disponible_venta = $${idx}`);
+        values.push(Boolean(options.disponible));
+        idx += 1;
+      }
+      if (options.activo !== undefined && hasActivo) {
+        whereParts.push(`activo = $${idx}`);
+        values.push(Boolean(options.activo));
+        idx += 1;
+      }
     }
 
-    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+    const whereClause = `WHERE ${whereParts.join(" AND ")}`;
+    const orderParts = [];
+    if (hasDisponibleVenta) orderParts.push("disponible_venta DESC");
+    if (hasActivo) orderParts.push("activo DESC");
+    orderParts.push("nombre ASC");
+    const orderClause = `ORDER BY ${orderParts.join(", ")}`;
     const result = await client.query(
       `
       SELECT
@@ -6588,12 +6621,12 @@ async function listProducts(organizationId, options = {}) {
         observaciones,
         precio,
         activo,
-        disponible_venta,
+        ${hasDisponibleVenta ? "disponible_venta," : ""}
         created_at,
         updated_at
       FROM products
       ${whereClause}
-      ORDER BY created_at DESC, nombre ASC
+      ${orderClause}
       `,
       values
     );
@@ -11042,8 +11075,30 @@ export const handler = async (event) => {
         return json(400, { ok: false, message: "organization_id requerido" });
       }
 
+      const search = normalizeText(getQueryParam(event, "search") || "");
+      const disponibleRaw = getQueryParam(event, "disponible");
+      const activoRaw = getQueryParam(event, "activo");
+      const parseBoolParam = (value) => {
+        if (value === undefined || value === null || value === "") return undefined;
+        const text = String(value).trim().toLowerCase();
+        if (text === "true") return true;
+        if (text === "false") return false;
+        return "__invalid__";
+      };
+      const disponible = parseBoolParam(disponibleRaw);
+      const activo = parseBoolParam(activoRaw);
+      if (disponible === "__invalid__") {
+        return json(400, { ok: false, message: "disponible inválido (true/false)" });
+      }
+      if (activo === "__invalid__") {
+        return json(400, { ok: false, message: "activo inválido (true/false)" });
+      }
+
       const items = await listProducts(organizationId, {
-        onlyDisponibleVenta: dbUser?.role_key === "vendedor"
+        roleKey: dbUser?.role_key,
+        search,
+        disponible,
+        activo
       });
       return json(200, { ok: true, items });
     } catch (error) {
