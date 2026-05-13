@@ -33,6 +33,21 @@ async function main() {
 
   await client.connect();
 
+  async function columnExists(tableName, columnName) {
+    const r = await client.query(
+      `
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1
+        AND column_name = $2
+      LIMIT 1
+      `,
+      [tableName, columnName],
+    );
+    return r.rowCount > 0;
+  }
+
   const patterns = [
     { label: "tiene '?'", sqlLike: "%?%" },
     // U+FFFD replacement character (common when decoding fails)
@@ -120,24 +135,29 @@ async function main() {
 
     // Same transformations for sales.product_snapshot (text)
     let totalSalesTouched = 0;
-    for (const [from, to] of updates) {
-      const r = await client.query(
-        `UPDATE public.sales
-         SET product_snapshot = REPLACE(product_snapshot, $1, $2)
-         WHERE product_snapshot LIKE '%' || $1 || '%'
-         RETURNING 1`,
-        [from, to],
-      );
-      totalSalesTouched += r.rowCount;
-    }
-    if (replaceQuestionMark) {
-      const r = await client.query(
-        `UPDATE public.sales
-         SET product_snapshot = REPLACE(product_snapshot, '?', 'Ó')
-         WHERE product_snapshot LIKE '%?%'
-         RETURNING 1`,
-      );
-      totalSalesTouched += r.rowCount;
+    const hasProductSnapshot = await columnExists("sales", "product_snapshot");
+    if (!hasProductSnapshot) {
+      console.log("\napply: sales.product_snapshot no existe -> se omite.");
+    } else {
+      for (const [from, to] of updates) {
+        const r = await client.query(
+          `UPDATE public.sales
+           SET product_snapshot = REPLACE(product_snapshot, $1, $2)
+           WHERE product_snapshot LIKE '%' || $1 || '%'
+           RETURNING 1`,
+          [from, to],
+        );
+        totalSalesTouched += r.rowCount;
+      }
+      if (replaceQuestionMark) {
+        const r = await client.query(
+          `UPDATE public.sales
+           SET product_snapshot = REPLACE(product_snapshot, '?', 'Ó')
+           WHERE product_snapshot LIKE '%?%'
+           RETURNING 1`,
+        );
+        totalSalesTouched += r.rowCount;
+      }
     }
 
     console.log(`\napply: contact_products filas tocadas (suma de updates): ${totalTouched}`);
@@ -162,4 +182,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-
