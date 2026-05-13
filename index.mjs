@@ -5190,6 +5190,54 @@ function validateProductPayload(body, options = {}) {
   };
 }
 
+function validateProductPatch(body) {
+  const errors = {};
+  const data = {};
+  const has = (key) => Object.prototype.hasOwnProperty.call(body || {}, key);
+
+  if (has("nombre")) {
+    const nombre = normalizeText(body?.nombre);
+    if (!nombre) errors.nombre = ["nombre inválido"];
+    else data.nombre = nombre;
+  }
+
+  if (has("categoria")) {
+    const categoria = normalizeText(body?.categoria);
+    if (!categoria) errors.categoria = ["categoria inválida"];
+    else data.categoria = categoria;
+  }
+
+  if (has("descripcion")) {
+    const descripcion = normalizeText(body?.descripcion);
+    data.descripcion = descripcion || null;
+  }
+
+  if (has("activo")) {
+    data.activo = Boolean(body?.activo);
+  }
+
+  if (has("disponible_venta") || has("disponibleVenta")) {
+    const raw = has("disponible_venta") ? body?.disponible_venta : body?.disponibleVenta;
+    data.disponible_venta = Boolean(raw);
+  }
+
+  if (has("precio") || has("price")) {
+    const rawPrecio = body?.precio ?? body?.price;
+    const parsedPrecio = Number(String(rawPrecio).replace(/[^0-9.-]/g, ""));
+    if (!Number.isFinite(parsedPrecio) || parsedPrecio <= 0) {
+      errors.precio = ["precio inválido (debe ser > 0)"];
+    } else {
+      data.precio = parsedPrecio;
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { valid: false, errors };
+  }
+
+  return { valid: true, data };
+}
+
 function validateManualTicketPayload(body) {
   const clienteId = normalizeText(body?.clienteId || body?.cliente_id);
   const tipoSolicitud = normalizeText(body?.tipoSolicitud || body?.tipo_solicitud);
@@ -6680,36 +6728,55 @@ async function updateProductRecord(productId, payload, organizationId) {
 
   try {
     await client.connect();
-    const values = [
-      productId,
-      payload.nombre || null,
-      payload.categoria || null,
-      payload.descripcion || null,
-      payload.observaciones || null,
-      payload.precio ?? null,
-      payload.activo === undefined ? null : payload.activo,
-      payload.disponible_venta === undefined ? null : payload.disponible_venta
-    ];
-    let orgClause = "";
-    if (organizationId) {
-      values.push(organizationId);
-      orgClause = `AND organization_id = $${values.length}`;
+    const cols = await getTableColumns(client, "products");
+    if (!cols.has("organization_id")) {
+      throw new Error("products.organization_id column is missing");
     }
+
+    const setParts = [];
+    const values = [];
+    let idx = 1;
+    const pushSet = (col, val) => {
+      setParts.push(`${col} = $${idx}`);
+      values.push(val);
+      idx += 1;
+    };
+
+    if (Object.prototype.hasOwnProperty.call(payload, "nombre")) pushSet("nombre", payload.nombre);
+    if (Object.prototype.hasOwnProperty.call(payload, "categoria")) pushSet("categoria", payload.categoria);
+    if (Object.prototype.hasOwnProperty.call(payload, "descripcion")) pushSet("descripcion", payload.descripcion);
+    if (Object.prototype.hasOwnProperty.call(payload, "precio")) pushSet("precio", payload.precio);
+    if (Object.prototype.hasOwnProperty.call(payload, "activo")) pushSet("activo", payload.activo);
+
+    if (Object.prototype.hasOwnProperty.call(payload, "disponible_venta")) {
+      if (!cols.has("disponible_venta")) {
+        throw new Error("products.disponible_venta column is missing");
+      }
+      pushSet("disponible_venta", payload.disponible_venta);
+    }
+
+    if (!setParts.length) {
+      const sel = await client.query(
+        `SELECT * FROM products WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+        [productId, organizationId]
+      );
+      if (!sel.rows[0]) return null;
+      return mapProductRowToApi(sel.rows[0]);
+    }
+
+    values.push(productId);
+    const idParam = idx;
+    idx += 1;
+    values.push(organizationId);
+    const orgParam = idx;
 
     const result = await client.query(
       `
       UPDATE products
-      SET
-        nombre = COALESCE($2, nombre),
-        categoria = COALESCE($3, categoria),
-        descripcion = COALESCE($4, descripcion),
-        observaciones = COALESCE($5, observaciones),
-        precio = COALESCE($6, precio),
-        activo = COALESCE($7, activo),
-        disponible_venta = COALESCE($8, disponible_venta),
-        updated_at = now()
-      WHERE id = $1
-      ${orgClause}
+      SET ${setParts.join(", ")},
+          updated_at = now()
+      WHERE id = $${idParam}
+        AND organization_id = $${orgParam}
       RETURNING *
       `,
       values
@@ -21343,13 +21410,17 @@ async function getNewContactsDistribution(client, batchId) {
       });
     }
 
-    const validation = validateProductPayload(body, { partial: true });
+    const validation = validateProductPatch(body);
     if (!validation.valid) {
       return json(422, {
         ok: false,
         message: "Validation failed",
         errors: validation.errors
       });
+    }
+
+    if (Object.keys(validation.data || {}).length === 0) {
+      return json(400, { ok: false, message: "No fields to update" });
     }
 
     try {
