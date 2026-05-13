@@ -13997,7 +13997,7 @@ export const handler = async (event) => {
             LIMIT 1
           ) reasig ON true
           ${whereClause}
-          ORDER BY a.fecha_agenda ASC
+          ORDER BY a.fecha_agenda DESC
           `,
           values
         );
