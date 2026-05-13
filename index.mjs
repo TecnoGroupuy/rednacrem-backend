@@ -21766,7 +21766,7 @@ async function getNewContactsDistribution(client, batchId) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
       if (roleError) return roleError;
 
       let organizationId = null;
