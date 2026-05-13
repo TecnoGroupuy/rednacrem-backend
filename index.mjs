@@ -21223,6 +21223,7 @@ async function getNewContactsDistribution(client, batchId) {
       const client = createDbClient();
       await client.connect();
       try {
+        const incluirInactivos = getQueryParam(event, "incluir_inactivos") === "true";
         const result = await client.query(
           `SELECT
              u.id,
@@ -21237,8 +21238,13 @@ async function getNewContactsDistribution(client, batchId) {
            FROM organization_users ou
            JOIN users u ON u.id = ou.user_id
            WHERE ou.organization_id = $1
-             AND ou.activo = true
              AND u.role_key IN ('vendedor', 'atencion_cliente')
+             ${incluirInactivos ? "" : "AND ou.activo = true"}
+             ${
+               incluirInactivos
+                 ? "AND u.status IN ('baja', 'inactive')"
+                 : "AND u.status IN ('approved', 'pausado', 'blocked')"
+             }
            ORDER BY u.nombre ASC`,
           [organizationId]
         );
