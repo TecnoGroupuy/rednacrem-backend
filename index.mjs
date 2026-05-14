@@ -6738,7 +6738,7 @@ async function listPaymentMethods(organizationId) {
 
     const result = await client.query(
       `
-      SELECT id, nombre, activo
+      SELECT id, nombre
       FROM payment_methods
       WHERE organization_id = $1
         AND activo = true
@@ -6749,8 +6749,7 @@ async function listPaymentMethods(organizationId) {
 
     return (result.rows || []).map((row) => ({
       id: row.id,
-      nombre: row.nombre,
-      activo: row.activo !== false
+      nombre: row.nombre
     }));
   } finally {
     await client.end();
@@ -8053,6 +8052,7 @@ export const handler = async (event) => {
   const clientDocumentSentMatch = path.match(/\/clients\/([^/]+)\/document\/sent$/);
   const productMatch = path.match(/\/products\/([^/]+)$/);
   const clientDetailMatch = path.match(/\/clients\/([^/]+)$/);
+  const clientMedioPagoMatch = path.match(/\/clients\/([^/]+)\/medio-pago$/);
   const contactDetailMatch = path.match(/\/contacts\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
@@ -11223,6 +11223,62 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "PATCH" && clientMedioPagoMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      if (!["supervisor", "superadministrador"].includes(dbUser?.role_key)) {
+        return json(403, { ok: false, message: "Forbidden" });
+      }
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const bodyRaw = safeParseBody(event);
+      if (bodyRaw === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+      const medioPago = normalizeText(body?.medio_pago || "");
+      if (!medioPago) return json(400, { ok: false, message: "medio_pago requerido" });
+
+      const contactId = clientMedioPagoMatch[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const salesCols = await getTableColumns(client, "sales");
+        const values = [medioPago, contactId];
+        const orgClause = organizationId && salesCols.has("organization_id") ? " AND organization_id = $3" : "";
+        if (orgClause) values.push(organizationId);
+
+        const result = await client.query(
+          `UPDATE sales SET medio_pago = $1 WHERE contact_id = $2${orgClause}`,
+          values
+        );
+
+        return json(200, { ok: true, updated: result.rowCount });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update medio_pago", error: error.message });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/products")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -11314,17 +11370,12 @@ export const handler = async (event) => {
         throw error;
       }
 
-      if (!organizationId && dbUser?.role_key === "superadministrador") {
-        const orgParam = getQueryParam(event, "organization_id");
-        organizationId = orgParam && isValidUuid(orgParam) ? orgParam : null;
-      }
-
       if (!organizationId) {
         return json(400, { ok: false, message: "organization_id requerido" });
       }
 
       const items = await listPaymentMethods(organizationId);
-      return json(200, { ok: true, items });
+      return json(200, items);
     } catch (error) {
       return json(500, {
         ok: false,
