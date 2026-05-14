@@ -6756,6 +6756,43 @@ async function listPaymentMethods(organizationId) {
   }
 }
 
+async function listAvailableProducts(organizationId) {
+  const client = createDbClient();
+
+  try {
+    await client.connect();
+    const cols = await getTableColumns(client, "products");
+    if (!cols.has("id") || !cols.has("nombre") || !cols.has("precio")) {
+      throw new Error("products table/columns missing");
+    }
+    if (!cols.has("organization_id")) {
+      throw new Error("products.organization_id column is missing");
+    }
+    if (!cols.has("activo")) {
+      throw new Error("products.activo column is missing");
+    }
+
+    const result = await client.query(
+      `
+      SELECT id, nombre, precio
+      FROM products
+      WHERE organization_id = $1
+        AND activo = true
+      ORDER BY nombre ASC
+      `,
+      [organizationId]
+    );
+
+    return (result.rows || []).map((row) => ({
+      id: row.id,
+      nombre: row.nombre,
+      precio: row.precio !== null && row.precio !== undefined ? Number(row.precio) : null
+    }));
+  } finally {
+    await client.end();
+  }
+}
+
 async function createProductRecord(payload, organizationId) {
   const client = createDbClient();
 
@@ -8053,6 +8090,7 @@ export const handler = async (event) => {
   const productMatch = path.match(/\/products\/([^/]+)$/);
   const clientDetailMatch = path.match(/\/clients\/([^/]+)$/);
   const clientMedioPagoMatch = path.match(/\/clients\/([^/]+)\/medio-pago$/);
+  const clientProductoMatch = path.match(/\/clients\/([^/]+)\/producto$/);
   const contactDetailMatch = path.match(/\/contacts\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
@@ -11276,6 +11314,105 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to update medio_pago", error: error.message });
+    }
+  }
+
+  if (method === "PATCH" && clientProductoMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      if (!["supervisor", "superadministrador"].includes(dbUser?.role_key)) {
+        return json(403, { ok: false, message: "Forbidden" });
+      }
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const bodyRaw = safeParseBody(event);
+      if (bodyRaw === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+      const productId = String(body?.product_id || "").trim();
+      if (!productId) return json(400, { ok: false, message: "product_id requerido" });
+      if (!isValidUuid(productId)) return json(400, { ok: false, message: "product_id inválido" });
+
+      const contactId = clientProductoMatch[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const cpCols = await getTableColumns(client, "contact_products");
+        const values = [productId, contactId];
+        const orgClause =
+          organizationId && cpCols.has("organization_id") ? " AND organization_id = $3" : "";
+        if (orgClause) values.push(organizationId);
+
+        const result = await client.query(
+          `UPDATE contact_products SET product_id = $1 WHERE contact_id = $2${orgClause}`,
+          values
+        );
+
+        return json(200, { ok: true, updated: result.rowCount });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update producto", error: error.message });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/products/available")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const items = await listAvailableProducts(organizationId);
+      return json(200, items);
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list available products",
+        error: error.message
+      });
     }
   }
 
