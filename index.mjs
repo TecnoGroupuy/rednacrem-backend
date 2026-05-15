@@ -18883,18 +18883,65 @@ async function getNewContactsDistribution(client, batchId) {
           `
         );
 
-        return json(200, {
-          ok: true,
-          success: true,
-          items: res.rows
-        });
+      return json(200, {
+        ok: true,
+        success: true,
+        items: res.rows
+      });
+    } finally {
+      await client.end();
+    }
+  } catch (error) {
+    return json(500, {
+      ok: false,
+      message: "Failed to load codificaciones catalog",
+      error: error.message
+    });
+  }
+}
+
+  if (method === "GET" && path.endsWith("/origen-dato/list")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      try {
+        await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const res = await client.query(
+          `
+          SELECT valor, label
+          FROM origen_dato_catalog
+          WHERE activo = true
+          ORDER BY label ASC
+          `
+        );
+
+        return json(200, { ok: true, items: res.rows });
       } finally {
         await client.end();
       }
     } catch (error) {
       return json(500, {
         ok: false,
-        message: "Failed to load codificaciones catalog",
+        message: "Failed to list origen_dato catalog",
         error: error.message
       });
     }
