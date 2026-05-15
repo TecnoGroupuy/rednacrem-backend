@@ -11791,6 +11791,14 @@ export const handler = async (event) => {
       if (dbUser?.role_key === "vendedor") {
         sellerId = dbUser.id;
       }
+      console.log(
+        "[recupero/contactos] dbUser.role_key:",
+        dbUser?.role_key,
+        "| dbUser.id:",
+        dbUser?.id,
+        "| sellerId resuelto:",
+        sellerId
+      );
 
       const productoRaw = getQueryParam(event, "producto");
       const searchRaw = getQueryParam(event, "search");
