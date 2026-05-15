@@ -18917,9 +18917,15 @@ async function getNewContactsDistribution(client, batchId) {
         await resolveOrganizationIdForRequest(dbUser, event);
       } catch (error) {
         if (error?.status) {
-          return json(error.status, { ok: false, message: error.message });
+          const msg = String(error.message || "");
+          if (error.status === 400 && /organization_id requerido/i.test(msg)) {
+            // Este catálogo no depende de la organización; no bloquear si no se puede resolver.
+          } else {
+            return json(error.status, { ok: false, message: error.message });
+          }
+        } else {
+          throw error;
         }
-        throw error;
       }
 
       const client = createDbClient();
