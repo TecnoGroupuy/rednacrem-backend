@@ -869,7 +869,8 @@ async function fetchRecuperoContactos({
   page,
   limit,
   filters,
-  organizationId
+  organizationId,
+  sellerId
 }) {
   const sortableColumns = {
     edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
@@ -900,6 +901,20 @@ async function fetchRecuperoContactos({
   conditions.push(`($${idx}::uuid IS NULL OR c.organization_id = $${idx}::uuid)`);
   values.push(organizationId ?? null);
   idx += 1;
+
+  if (sellerId) {
+    conditions.push(`c.id IN (
+      SELECT lcs.contact_id
+      FROM lead_contact_status lcs
+      JOIN lead_batches lb ON lb.id = lcs.batch_id
+      WHERE lcs.assigned_to = $${idx}::uuid
+        AND lb.tipo = 'recupero'
+        AND lb.organization_id = $${idx + 1}::uuid
+    )`);
+    values.push(sellerId);
+    values.push(organizationId ?? null);
+    idx += 2;
+  }
 
   console.log("[recupero] organizationId type:", typeof organizationId, "value:", organizationId);
   console.log("[recupero] values array:", values);
@@ -11290,6 +11305,16 @@ export const handler = async (event) => {
         throw error;
       }
 
+      let sellerId = null;
+      if (dbUser?.role_key === "vendedor") {
+        sellerId = dbUser.id;
+      }
+
+      let sellerId = null;
+      if (dbUser?.role_key === "vendedor") {
+        sellerId = dbUser.id;
+      }
+
       const bodyRaw = safeParseBody(event);
       if (bodyRaw === null) return json(400, { ok: false, message: "Invalid JSON body" });
       const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
@@ -11762,6 +11787,11 @@ export const handler = async (event) => {
         throw error;
       }
 
+      let sellerId = null;
+      if (dbUser?.role_key === "vendedor") {
+        sellerId = dbUser.id;
+      }
+
       const productoRaw = getQueryParam(event, "producto");
       const searchRaw = getQueryParam(event, "search");
       const sortRaw = getQueryParam(event, "sort");
@@ -11804,7 +11834,8 @@ export const handler = async (event) => {
           page,
           limit,
           filters: null,
-          organizationId
+          organizationId,
+          sellerId
         });
         return safeResponse({
           data,
@@ -11963,7 +11994,8 @@ export const handler = async (event) => {
             page,
             limit,
             filters: emptyPayload ? null : filters,
-            organizationId
+            organizationId,
+            sellerId
           });
         } finally {
           await client.end();
