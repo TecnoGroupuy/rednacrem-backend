@@ -8088,6 +8088,7 @@ export const handler = async (event) => {
   const clientDocumentMatch = path.match(/\/clients\/([^/]+)\/document$/);
   const clientDocumentSentMatch = path.match(/\/clients\/([^/]+)\/document\/sent$/);
   const productMatch = path.match(/\/products\/([^/]+)$/);
+  const productsAvailableMatch = path.match(/\/products\/available$/);
   const clientDetailMatch = path.match(/\/clients\/([^/]+)$/);
   const clientMedioPagoMatch = path.match(/\/clients\/([^/]+)\/medio-pago$/);
   const clientProductoMatch = path.match(/\/clients\/([^/]+)\/producto$/);
