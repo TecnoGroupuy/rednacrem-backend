@@ -18947,6 +18947,170 @@ async function getNewContactsDistribution(client, batchId) {
     }
   }
 
+  if (method === "GET" && path.endsWith("/lead-batches/contacts/check-phone")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const telefono = normalizeText(getQueryParam(event, "telefono") || "");
+      if (!telefono) {
+        return json(400, { ok: false, message: "Teléfono requerido" });
+      }
+      const tel = telefono.replace(/[\s\-]/g, "").trim();
+
+      const advertencias = [];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        // 1) no_call_entries (schema real no tiene "motivo", lo devolvemos como null)
+        {
+          const res = await client.query(
+            `
+            SELECT NULL::text AS motivo, fecha_carga
+            FROM no_call_entries
+            WHERE numero = $1
+            LIMIT 1
+            `,
+            [tel]
+          );
+
+          if (res.rows.length) {
+            advertencias.push({
+              tipo: "no_llamar",
+              motivo: res.rows[0]?.motivo ?? null,
+              fecha_carga: res.rows[0]?.fecha_carga ?? null
+            });
+          }
+        }
+
+        // 2) datos_para_trabajar (con vendedor asignado y último resultado)
+        {
+          const lmhCols = await getTableColumns(client, "lead_management_history");
+          const hasMgmtOrgId = lmhCols.has("organization_id");
+          const mgmtOrgClause = hasMgmtOrgId ? "AND organization_id = $3" : "";
+
+          const res = await client.query(
+            `
+            SELECT
+              dpt.id, dpt.nombre, dpt.apellido,
+              lb.nombre AS lote_nombre,
+              u.nombre AS vendedor_nombre, u.apellido AS vendedor_apellido,
+              lmh.resultado AS ultimo_resultado,
+              lmh.fecha_gestion AS ultima_gestion
+            FROM datos_para_trabajar dpt
+            LEFT JOIN lead_contact_status lcs ON lcs.contact_id = dpt.id
+            LEFT JOIN lead_batches lb ON lb.id = lcs.batch_id
+            LEFT JOIN users u ON u.id = lcs.assigned_to
+            LEFT JOIN LATERAL (
+              SELECT resultado, fecha_gestion
+              FROM lead_management_history
+              WHERE contact_id = dpt.id
+              ${mgmtOrgClause}
+              ORDER BY fecha_gestion DESC
+              LIMIT 1
+            ) lmh ON true
+            WHERE dpt.organization_id = $1
+              AND (dpt.celular = $2 OR dpt.telefono = $2)
+            LIMIT 1
+            `,
+            hasMgmtOrgId ? [organizationId, tel, organizationId] : [organizationId, tel]
+          );
+
+          if (res.rows.length) {
+            const row = res.rows[0];
+            advertencias.push({
+              tipo: "datos_para_trabajar",
+              nombre: row.nombre ?? null,
+              apellido: row.apellido ?? null,
+              lote_nombre: row.lote_nombre ?? null,
+              vendedor_nombre: row.vendedor_nombre ?? null,
+              vendedor_apellido: row.vendedor_apellido ?? null,
+              ultimo_resultado: row.ultimo_resultado ?? null,
+              ultima_gestion: row.ultima_gestion ?? null
+            });
+          }
+        }
+
+        // 3) cliente en contacts + contact_products
+        {
+          const contactCols = await getTableColumns(client, "contacts");
+          const cpCols = await getTableColumns(client, "contact_products");
+
+          const hasContactsOrgId = contactCols.has("organization_id");
+          const hasCpOrgId = cpCols.has("organization_id");
+
+          const values = [organizationId, tel];
+          const cOrgClause = hasContactsOrgId ? "AND c.organization_id = $1" : "";
+          const cpOrgClause = hasCpOrgId ? "AND cp.organization_id = $1" : "";
+
+          const res = await client.query(
+            `
+            SELECT
+              c.id, c.nombre, c.apellido,
+              cp.nombre_producto, cp.plan, cp.estado,
+              cp.fecha_alta, cp.fecha_baja
+            FROM contacts c
+            JOIN contact_products cp ON cp.contact_id = c.id
+            WHERE (c.celular = $2 OR c.telefono = $2)
+              ${cOrgClause}
+              ${cpOrgClause}
+            ORDER BY cp.fecha_alta DESC
+            LIMIT 1
+            `,
+            values
+          );
+
+          if (res.rows.length) {
+            const row = res.rows[0];
+            advertencias.push({
+              tipo: "cliente",
+              nombre: row.nombre ?? null,
+              apellido: row.apellido ?? null,
+              nombre_producto: row.nombre_producto ?? null,
+              plan: row.plan ?? null,
+              estado: row.estado ?? null,
+              fecha_alta: row.fecha_alta ?? null,
+              fecha_baja: row.fecha_baja ?? null
+            });
+          }
+        }
+
+        return json(200, { ok: true, advertencias });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to check phone",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/api/codificaciones")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
