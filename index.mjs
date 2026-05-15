@@ -8097,6 +8097,7 @@ export const handler = async (event) => {
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
   const manualTicketCloseMatch = path.match(/\/manual-tickets\/([^/]+)\/close$/);
+  const leadBatchManualContactMatch = path.match(/\/lead-batches\/([^/]+)\/contacts\/manual$/);
   console.log("REQUEST", {
     method,
     path,
@@ -16196,6 +16197,346 @@ async function getNewContactsDistribution(client, batchId) {
       return json(500, {
         ok: false,
         message: "Failed to add contacts to batch",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && leadBatchManualContactMatch) {
+    const batchId = leadBatchManualContactMatch?.[1];
+    if (!batchId || !isValidUuid(batchId)) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const bodyRaw = safeParseBody(event);
+    if (bodyRaw === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+
+    const nombre = normalizeText(body?.nombre || "");
+    const apellido = normalizeText(body?.apellido || "");
+    const celularRaw = normalizeText(body?.celular || "");
+    const telefonoRaw = normalizeText(body?.telefono || "");
+    const documento = normalizeText(body?.documento || "") || null;
+    const correoElectronico = normalizeEmail(body?.correo_electronico || body?.correoElectronico) || null;
+    const departamento = normalizeText(body?.departamento || "") || null;
+    const origenDato = normalizeText(body?.origen_dato || body?.origenDato) || "manual";
+    const mensaje = normalizeText(body?.mensaje || "") || null;
+    const sellerId = body?.seller_id && isValidUuid(body.seller_id) ? body.seller_id : null;
+
+    const stripUY = (n) => {
+      if (!n) return n;
+      n = String(n).trim().replace(/^\+598/, "");
+      if (n.startsWith("9")) n = "0" + n;
+      return n;
+    };
+    const celular = stripUY(celularRaw);
+    const telefono = telefonoRaw ? stripUY(telefonoRaw) : null;
+
+    if (!nombre || !apellido || !celular) {
+      return json(400, { ok: false, message: "Nombre, apellido y celular son requeridos" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const userId = dbUser?.id || null;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+        try {
+          // 5) Validar lote
+          const loteRes = await client.query(
+            `
+            SELECT id, estado
+            FROM lead_batches
+            WHERE id = $1
+              AND organization_id = $2
+            LIMIT 1
+            `,
+            [batchId, organizationId]
+          );
+          if (!loteRes.rows.length) {
+            await client.query("ROLLBACK");
+            return json(404, { ok: false, message: "Lote no encontrado" });
+          }
+
+          // 6) UPSERT lead en datos_para_trabajar (lookup por documento o celular)
+          const leadCols = await getTableColumns(client, "datos_para_trabajar");
+          const searchByDocumento = Boolean(documento);
+          const lookupValues = searchByDocumento
+            ? [organizationId, documento]
+            : [organizationId, celular];
+          const lookupSql = searchByDocumento
+            ? "organization_id = $1 AND documento = $2"
+            : "organization_id = $1 AND celular = $2";
+
+          const existingRes = await client.query(
+            `
+            SELECT *
+            FROM datos_para_trabajar
+            WHERE ${lookupSql}
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            lookupValues
+          );
+
+          let leadId = null;
+          let wasCreated = false;
+
+          if (existingRes.rows.length) {
+            const row = existingRes.rows[0];
+            leadId = row.id;
+            wasCreated = false;
+
+            const updateParts = [];
+            const updateValues = [];
+            let idx = 1;
+
+            const setIfEmpty = (col, value) => {
+              if (!leadCols.has(col)) return;
+              if (value === null || value === undefined || value === "") return;
+              const current = row[col];
+              if (current !== null && current !== undefined && String(current).trim() !== "") return;
+              updateParts.push(`${col} = $${idx}`);
+              updateValues.push(value);
+              idx += 1;
+            };
+
+            setIfEmpty("correo_electronico", correoElectronico);
+            setIfEmpty("departamento", departamento);
+            setIfEmpty("telefono", telefono);
+
+            if (updateParts.length) {
+              updateValues.push(leadId);
+              await client.query(
+                `UPDATE datos_para_trabajar SET ${updateParts.join(", ")}, updated_at = now() WHERE id = $${idx}`,
+                updateValues
+              );
+            }
+          } else {
+            wasCreated = true;
+
+            const columns = [];
+            const placeholders = [];
+            const values = [];
+            let idx = 1;
+            const addCol = (col, value) => {
+              if (!leadCols.has(col)) return;
+              columns.push(col);
+              placeholders.push(`$${idx}`);
+              values.push(value);
+              idx += 1;
+            };
+
+            addCol("nombre", nombre);
+            addCol("apellido", apellido);
+            addCol("celular", celular);
+            addCol("telefono", telefono);
+            addCol("documento", documento);
+            addCol("correo_electronico", correoElectronico);
+            addCol("departamento", departamento);
+            addCol("origen_dato", origenDato || "manual");
+            addCol("organization_id", organizationId);
+
+            const insertRes = await client.query(
+              `
+              INSERT INTO datos_para_trabajar (${columns.join(", ")})
+              VALUES (${placeholders.join(", ")})
+              RETURNING id
+              `,
+              values
+            );
+            leadId = insertRes.rows[0]?.id || null;
+          }
+
+          if (!leadId) {
+            throw new Error("No se pudo resolver leadId");
+          }
+
+          // 7) lead_batch_contacts (copiar patrón add-contacts)
+          {
+            const insertValues = [batchId, leadId];
+            let orgCols = "";
+            let orgVals = "";
+            if (organizationId) {
+              insertValues.push(organizationId);
+              orgCols = ", organization_id";
+              orgVals = ", $3";
+            }
+            await client.query(
+              `
+              INSERT INTO lead_batch_contacts (batch_id, contact_id${orgCols})
+              VALUES ($1, $2${orgVals})
+              ON CONFLICT DO NOTHING
+              `,
+              insertValues
+            );
+          }
+
+          // 8) Determinar assigned_to
+          let assignedTo = null;
+          if (sellerId) {
+            const sellerRes = await client.query(
+              `
+              SELECT seller_id
+              FROM lead_batch_sellers
+              WHERE batch_id = $1 AND seller_id = $2
+              LIMIT 1
+              `,
+              [batchId, sellerId]
+            );
+            if (!sellerRes.rows.length) {
+              await client.query("ROLLBACK");
+              return json(400, { ok: false, message: "Vendedor no pertenece al lote" });
+            }
+            assignedTo = sellerId;
+          } else {
+            const sellersRes = await client.query(
+              `SELECT seller_id FROM lead_batch_sellers WHERE batch_id = $1 ORDER BY id ASC`,
+              [batchId]
+            );
+            const sellerIds = sellersRes.rows.map((r) => r.seller_id).filter(Boolean);
+            if (!sellerIds.length) {
+              throw new Error("El lote no tiene vendedores");
+            }
+
+            const countsRes = await client.query(
+              `
+              SELECT assigned_to, COUNT(*)::int AS total
+              FROM lead_contact_status
+              WHERE batch_id = $1
+              GROUP BY assigned_to
+              `,
+              [batchId]
+            );
+            const counts = new Map(
+              countsRes.rows
+                .filter((r) => r.assigned_to)
+                .map((r) => [r.assigned_to, Number(r.total) || 0])
+            );
+
+            assignedTo = sellerIds.reduce((best, current) => {
+              if (!best) return current;
+              const bestCount = counts.get(best) ?? 0;
+              const curCount = counts.get(current) ?? 0;
+              if (curCount < bestCount) return current;
+              return best;
+            }, null);
+          }
+
+          // 9) lead_contact_status (copiar patrón add-contacts)
+          {
+            const statusValues = [leadId, batchId, assignedTo];
+            let orgCols = "";
+            let orgVals = "";
+            let orgUpdate = "";
+            if (organizationId) {
+              statusValues.push(organizationId);
+              orgCols = ", organization_id";
+              orgVals = ", $4";
+              orgUpdate = ", organization_id = $4";
+            }
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id, batch_id, assigned_to, estado_venta, intentos${orgCols}
+              )
+              VALUES ($1, $2, $3, 'nuevo', 0${orgVals})
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = EXCLUDED.assigned_to,
+                estado_venta = 'nuevo',
+                intentos = 0,
+                updated_at = now()
+                ${orgUpdate}
+              `,
+              statusValues
+            );
+          }
+
+          // 10) lead_management_history (si hay mensaje)
+          if (mensaje) {
+            const hasOrgColumn = await columnExists(client, "lead_management_history", "organization_id");
+
+            if (hasOrgColumn) {
+              await client.query(
+                `
+                INSERT INTO lead_management_history
+                  (contact_id, batch_id, user_id, resultado, nota, fecha_gestion, organization_id)
+                SELECT
+                  $1 AS contact_id,
+                  $2 AS batch_id,
+                  $3 AS user_id,
+                  'seguimiento' AS resultado,
+                  $4 AS nota,
+                  (NOW() AT TIME ZONE 'America/Montevideo') AS fecha_gestion,
+                  $5 AS organization_id
+                `,
+                [leadId, batchId, userId, mensaje, organizationId]
+              );
+            } else {
+              await client.query(
+                `
+                INSERT INTO lead_management_history
+                  (contact_id, batch_id, user_id, resultado, nota, fecha_gestion)
+                SELECT
+                  $1 AS contact_id,
+                  $2 AS batch_id,
+                  $3 AS user_id,
+                  'seguimiento' AS resultado,
+                  $4 AS nota,
+                  (NOW() AT TIME ZONE 'America/Montevideo') AS fecha_gestion
+                `,
+                [leadId, batchId, userId, mensaje]
+              );
+            }
+          }
+
+          await client.query("COMMIT");
+          return json(200, { ok: true, contact_id: leadId, assigned_to: assignedTo, created: wasCreated });
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to add manual contact to batch",
         error: error.message
       });
     }
