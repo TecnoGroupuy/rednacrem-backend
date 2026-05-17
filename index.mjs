@@ -11940,6 +11940,11 @@ export const handler = async (event) => {
         throw error;
       }
 
+      let sellerId = null;
+      if (dbUser?.role_key === "vendedor") {
+        sellerId = dbUser.id;
+      }
+
       payloadHash = hashPayload({
         producto,
         departamento,
@@ -11950,7 +11955,9 @@ export const handler = async (event) => {
         sortDir,
         page,
         limit,
-        filters: emptyPayload ? null : filters
+        filters: emptyPayload ? null : filters,
+        _sellerId: sellerId,
+        _organizationId: organizationId
       });
       rulesCount = countFilterRules(filters);
 
