@@ -904,16 +904,16 @@ async function fetchRecuperoContactos({
 
   if (sellerId) {
     conditions.push(`c.id IN (
-      SELECT lcs.contact_id
-      FROM lead_contact_status lcs
+      SELECT d2.contact_id
+      FROM datos_para_trabajar d2
+      JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
       JOIN lead_batches lb ON lb.id = lcs.batch_id
       WHERE lcs.assigned_to = $${idx}::uuid
         AND lb.tipo = 'recupero'
-        AND lb.organization_id = $${idx + 1}::uuid
+        AND d2.contact_id IS NOT NULL
     )`);
     values.push(sellerId);
-    values.push(organizationId ?? null);
-    idx += 2;
+    idx += 1;
   }
 
   console.log("[recupero] organizationId type:", typeof organizationId, "value:", organizationId);
