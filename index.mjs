@@ -903,15 +903,7 @@ async function fetchRecuperoContactos({
   idx += 1;
 
   if (sellerId) {
-    conditions.push(`c.id IN (
-      SELECT d2.contact_id
-      FROM datos_para_trabajar d2
-      JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
-      JOIN lead_batches lb ON lb.id = lcs.batch_id
-      WHERE lcs.assigned_to = $${idx}::uuid
-        AND lb.tipo = 'recupero'
-        AND d2.contact_id IS NOT NULL
-    )`);
+    conditions.push(`lote.vendedor_asignado_id = $${idx}::uuid`);
     values.push(sellerId);
     idx += 1;
   }
