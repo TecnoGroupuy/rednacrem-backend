@@ -14253,6 +14253,27 @@ export const handler = async (event) => {
           nuevaOla = 2;
         }
 
+        // Si acumula 5 gestiones "no_contesta" en el mismo lote -> incontactable
+        if (effectiveResultado === "no_contesta") {
+          const noContactaRes = await client.query(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM lead_management_history
+            WHERE contact_id = $1
+              AND batch_id = $2
+              AND resultado = 'no_contesta'
+            `,
+            [leadId, batchId]
+          );
+          const noContactaCount = Number(noContactaRes.rows[0]?.total || 0);
+          if (noContactaCount >= 4) {
+            const incontactableCatalog = await getLeadStatusCatalogEntry(client, "incontactable");
+            if (incontactableCatalog) {
+              effectiveResultado = "incontactable";
+            }
+          }
+        }
+
         let organizationId = null;
         try {
           const orgRes = await client.query(
