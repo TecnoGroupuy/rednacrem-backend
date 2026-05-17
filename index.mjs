@@ -903,7 +903,20 @@ async function fetchRecuperoContactos({
   idx += 1;
 
   if (sellerId) {
-    conditions.push(`lote.vendedor_asignado_id = $${idx}::uuid`);
+    conditions.push(`EXISTS (
+      SELECT 1
+      FROM datos_para_trabajar d3
+      JOIN lead_contact_status lcs3 ON lcs3.contact_id = d3.id
+      JOIN lead_batches lb3 ON lb3.id = lcs3.batch_id
+      WHERE lb3.tipo = 'recupero'
+        AND lb3.estado IN ('activo', 'asignado')
+        AND lcs3.assigned_to = $${idx}::uuid
+        AND (
+          d3.contact_id = c.id
+          OR REGEXP_REPLACE(COALESCE(d3.celular, d3.telefono, ''), '[^0-9]', '', 'g')
+             = REGEXP_REPLACE(COALESCE(NULLIF(c.celular,''), NULLIF(c.telefono,'')), '[^0-9]', '', 'g')
+        )
+    )`);
     values.push(sellerId);
     idx += 1;
   }
