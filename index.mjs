@@ -23285,6 +23285,49 @@ async function getNewContactsDistribution(client, batchId) {
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/me/modulos")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      const roleKey = dbUser?.role_key || null;
+      if (roleKey !== "vendedor" && roleKey !== "atencion_cliente") {
+        return json(200, { ok: true, modulos: { recupero: true } });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const res = await client.query(
+          `
+          SELECT COUNT(*)::int AS count
+          FROM lead_batch_sellers lbs
+          JOIN lead_batches lb ON lb.id = lbs.batch_id
+          WHERE lbs.seller_id = $1
+            AND lb.tipo = 'recupero'
+            AND lb.estado IN ('activo', 'asignado')
+          `,
+          [dbUser.id]
+        );
+        const count = res.rows[0]?.count ?? 0;
+        return json(200, { ok: true, modulos: { recupero: count > 0 } });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load user modules",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path.endsWith("/organizations")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
