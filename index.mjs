@@ -11320,11 +11320,6 @@ export const handler = async (event) => {
         sellerId = dbUser.id;
       }
 
-      let sellerId = null;
-      if (dbUser?.role_key === "vendedor") {
-        sellerId = dbUser.id;
-      }
-
       const bodyRaw = safeParseBody(event);
       if (bodyRaw === null) return json(400, { ok: false, message: "Invalid JSON body" });
       const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
