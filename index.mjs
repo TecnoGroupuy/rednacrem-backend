@@ -872,6 +872,7 @@ async function fetchRecuperoContactos({
   organizationId,
   sellerId
 }) {
+  console.log("[recupero-fn] sellerId recibido:", sellerId);
   const sortableColumns = {
     edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
     telefono: "c.telefono",
@@ -11800,6 +11801,9 @@ export const handler = async (event) => {
       if (dbUser?.role_key === "vendedor") {
         sellerId = dbUser.id;
       }
+      console.log("[recupero-seller] dbUser.role_key:", dbUser?.role_key);
+      console.log("[recupero-seller] dbUser.id:", dbUser?.id);
+      console.log("[recupero-seller] sellerId calculado:", sellerId);
       console.log(
         "[recupero/contactos] dbUser.role_key:",
         dbUser?.role_key,
