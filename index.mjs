@@ -1310,6 +1310,10 @@ async function fetchRecuperoContactos({
   let itemsRes;
   try {
     console.log("[recupero] starting itemsRes query");
+    console.log("[recupero-sql] sellerId:", sellerId);
+    console.log("[recupero-sql] conditions count:", conditions.length);
+    console.log("[recupero-sql] last condition:", conditions[conditions.length - 1]);
+    console.log("[recupero-sql] values:", JSON.stringify(values));
     itemsRes = await client.query(
       `
       SELECT DISTINCT ON (c.telefono)
