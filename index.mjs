@@ -11877,8 +11877,60 @@ export const handler = async (event) => {
           organizationId,
           sellerId
         });
+
+        let tabCounts = {
+          disponibles: 0,
+          en_gestion: 0,
+          recuperados: 0,
+          rechazados: 0
+        };
+        if (organizationId) {
+          const [gestionRes, recuperadosRes, rechazadosRes] = await Promise.all([
+            client.query(
+              `
+              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lb.estado IN ('activo', 'asignado')
+                AND lcs.estado_venta IN ('nuevo', 'no_contesta', 'rellamar', 'seguimiento')
+                AND lb.organization_id = $1
+              `,
+              [organizationId]
+            ),
+            client.query(
+              `
+              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lcs.estado_venta = 'venta'
+                AND lb.organization_id = $1
+              `,
+              [organizationId]
+            ),
+            client.query(
+              `
+              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lcs.estado_venta = 'rechazo'
+                AND lb.organization_id = $1
+              `,
+              [organizationId]
+            )
+          ]);
+          const metricsTotal = Number(data?.metrics?.total ?? data?.total ?? 0);
+          tabCounts = {
+            disponibles: metricsTotal,
+            en_gestion: Number(gestionRes.rows[0]?.total || 0),
+            recuperados: Number(recuperadosRes.rows[0]?.total || 0),
+            rechazados: Number(rechazadosRes.rows[0]?.total || 0)
+          };
+        }
         return safeResponse({
-          data,
+          data: { ...data, tab_counts: tabCounts },
           emptyCondition,
           meta: { source: "recupero-contactos", request_id: requestId, empty_payload: false }
         });
