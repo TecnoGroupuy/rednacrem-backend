@@ -12093,6 +12093,19 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const offset = (page - 1) * limit;
@@ -12117,18 +12130,22 @@ export const handler = async (event) => {
             LEFT JOIN lead_batch_contacts lbc ON lbc.batch_id = lb.id
             LEFT JOIN users u ON u.id = COALESCE(lb.seller_id, lb.asignado_a)
             WHERE lb.tipo = 'recupero'
+              AND lb.organization_id = $3
             GROUP BY lb.id, u.nombre, u.apellido, u.id
             ORDER BY lb.created_at DESC
             LIMIT $1 OFFSET $2
             `,
-            [limit, offset]
+            [limit, offset, organizationId]
           ),
           client.query(
             `
             SELECT COUNT(*) AS total
             FROM lead_batches
             WHERE tipo = 'recupero'
+              AND organization_id = $1
             `
+            ,
+            [organizationId]
           )
         ]);
 
@@ -12193,6 +12210,19 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const body = safeParseBody(event);
       if (body === null) {
         return json(400, { ok: false, message: "Invalid JSON body" });
@@ -12221,11 +12251,11 @@ export const handler = async (event) => {
 
         const batchRes = await client.query(
           `
-          INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a)
-          VALUES ($1, 'asignado', $2, 'recupero', $3, $3)
+          INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a, organization_id)
+          VALUES ($1, 'asignado', $2, 'recupero', $3, $3, $4)
           RETURNING id
           `,
-          [nombre, dbUser?.id || null, sellerIds[0] || null]
+          [nombre, dbUser?.id || null, sellerIds[0] || null, organizationId]
         );
         const batchId = batchRes.rows[0]?.id;
 
@@ -12235,8 +12265,9 @@ export const handler = async (event) => {
                  direccion, departamento, email
           FROM contacts
           WHERE id = ANY($1::uuid[])
+            AND organization_id = $2
           `,
-          [contactIds]
+          [contactIds, organizationId]
         );
         const contactById = new Map();
         for (const row of contactsRes.rows) contactById.set(row.id, row);
@@ -12402,6 +12433,19 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -12421,24 +12465,32 @@ export const handler = async (event) => {
             FROM (
               SELECT cp.motivo_baja_detalle AS val
               FROM contact_products cp
+              JOIN contacts c ON c.id = cp.contact_id
               WHERE cp.estado = 'baja'
+                AND c.organization_id = $1
                 AND cp.motivo_baja_detalle IS NOT NULL
                 AND cp.motivo_baja_detalle <> ''
               UNION ALL
               SELECT ems.motivo_baja AS val
               FROM external_management_status ems
+              JOIN contacts c ON c.id = ems.contact_id
               WHERE ems.motivo_baja IS NOT NULL
                 AND ems.motivo_baja <> ''
+                AND c.organization_id = $1
               UNION ALL
               SELECT cp.motivo_baja AS val
               FROM contact_products cp
+              JOIN contacts c ON c.id = cp.contact_id
               WHERE cp.estado = 'baja'
+                AND c.organization_id = $1
                 AND cp.motivo_baja IS NOT NULL
                 AND cp.motivo_baja <> ''
             ) s
             GROUP BY LOWER(TRIM(val))
             ORDER BY label
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
@@ -12446,19 +12498,24 @@ export const handler = async (event) => {
             FROM (
               SELECT ems.estado_normalizado AS val
               FROM external_management_status ems
+              JOIN contacts c ON c.id = ems.contact_id
               WHERE ems.estado_normalizado IS NOT NULL
                 AND ems.estado_normalizado <> ''
+                AND c.organization_id = $1
               UNION ALL
               SELECT lmh.resultado AS val
               FROM lead_management_history lmh
               JOIN lead_batches lb ON lb.id = lmh.batch_id
               WHERE lb.tipo = 'recupero'
+                AND lb.organization_id = $1
                 AND lmh.resultado IS NOT NULL
                 AND lmh.resultado <> ''
             ) s
             GROUP BY LOWER(TRIM(val))
             ORDER BY label
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
@@ -12466,12 +12523,15 @@ export const handler = async (event) => {
             FROM contact_products cp
             JOIN contacts c ON c.id = cp.contact_id
             WHERE cp.estado = 'baja'
+              AND c.organization_id = $1
               AND cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'
               AND cp.nombre_producto IS NOT NULL
               AND cp.nombre_producto <> ''
             GROUP BY LOWER(TRIM(cp.nombre_producto))
             ORDER BY label
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
@@ -12479,11 +12539,14 @@ export const handler = async (event) => {
             FROM contacts c
             JOIN contact_products cp ON cp.contact_id = c.id
             WHERE cp.estado = 'baja'
+              AND c.organization_id = $1
               AND c.departamento IS NOT NULL
               AND c.departamento <> ''
             GROUP BY LOWER(TRIM(c.departamento))
             ORDER BY label
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
@@ -12493,32 +12556,42 @@ export const handler = async (event) => {
             JOIN lead_batches lb ON lb.id = lcs.batch_id
             JOIN users u ON u.id = lcs.assigned_to
             WHERE lb.tipo = 'recupero'
+              AND lb.organization_id = $1
               AND lcs.assigned_to IS NOT NULL
             GROUP BY value, label
             ORDER BY label
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
             SELECT LOWER(TRIM(nombre)) AS value, MAX(TRIM(nombre)) AS label
             FROM lead_batches
             WHERE tipo = 'recupero'
+              AND organization_id = $1
               AND nombre IS NOT NULL
               AND nombre <> ''
             GROUP BY LOWER(TRIM(nombre))
             ORDER BY label
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
             SELECT EXISTS(
               SELECT 1
               FROM contact_products cp
+              JOIN contacts c ON c.id = cp.contact_id
               WHERE cp.estado = 'baja'
+                AND c.organization_id = $1
                 AND (cp.motivo_baja_detalle IS NULL OR cp.motivo_baja_detalle = '')
                 AND (cp.motivo_baja IS NULL OR cp.motivo_baja = '')
             ) AS has_null
             `
+            ,
+            [organizationId]
           ),
           client.query(
             `
@@ -12533,13 +12606,17 @@ export const handler = async (event) => {
                 JOIN lead_batches lb ON lb.id = lmh.batch_id
                 WHERE lmh.contact_id = c.id
                   AND lb.tipo = 'recupero'
+                  AND lb.organization_id = $1
                 ORDER BY lmh.fecha_gestion DESC
                 LIMIT 1
               ) gestion ON true
               WHERE cp.estado = 'baja'
+                AND c.organization_id = $1
                 AND COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL
             ) AS has_null
             `
+            ,
+            [organizationId]
           )
         ]);
 
@@ -18926,6 +19003,19 @@ async function getNewContactsDistribution(client, batchId) {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -18934,9 +19024,10 @@ async function getNewContactsDistribution(client, batchId) {
           SELECT id, error_report_csv
           FROM recupero_import_jobs
           WHERE id = $1
+            AND organization_id = $2
           LIMIT 1
           `,
-          [jobId]
+          [jobId, organizationId]
         );
         if (!jobRes.rows.length) {
           return json(404, { ok: false, message: "Job no encontrado" });
@@ -18982,6 +19073,19 @@ async function getNewContactsDistribution(client, batchId) {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -19001,9 +19105,10 @@ async function getNewContactsDistribution(client, batchId) {
             error_report_csv
           FROM recupero_import_jobs
           WHERE id = $1
+            AND organization_id = $2
           LIMIT 1
           `,
-          [jobId]
+          [jobId, organizationId]
         );
         if (!jobRes.rows.length) {
           return json(404, { ok: false, message: "Job no encontrado" });
