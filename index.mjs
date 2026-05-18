@@ -14372,17 +14372,21 @@ export const handler = async (event) => {
           // Venta y dato_erroneo son siempre finales
           const estadosFinalesPermanentes = ["venta", "dato_erroneo"];
           if (estadosFinalesPermanentes.includes(currentEstadoVenta)) {
-            const latestGestion = await client.query(
-              `
-              SELECT id
-              FROM lead_management_history
-              WHERE contact_id = $1
-              ORDER BY fecha_gestion DESC
-              LIMIT 1
-              `,
-              [resolvedLeadId]
-            );
-            const existingGestionId = latestGestion.rows[0]?.id ?? null;
+            const hasMgmtId = await columnExists(client, "lead_management_history", "id");
+            let existingGestionId = null;
+            if (hasMgmtId) {
+              const latestGestion = await client.query(
+                `
+                SELECT id
+                FROM lead_management_history
+                WHERE contact_id = $1
+                ORDER BY fecha_gestion DESC
+                LIMIT 1
+                `,
+                [resolvedLeadId]
+              );
+              existingGestionId = latestGestion.rows[0]?.id ?? null;
+            }
             await client.query("ROLLBACK");
             return json(409, {
               ok: false,
@@ -14476,6 +14480,7 @@ export const handler = async (event) => {
           organizationId = orgRes.rows[0]?.organization_id || null;
         } catch {}
 
+        const hasMgmtId = await columnExists(client, "lead_management_history", "id");
         const hasMgmtOrganizationId = await columnExists(
           client,
           "lead_management_history",
@@ -14495,13 +14500,13 @@ export const handler = async (event) => {
             ${hasMgmtOrganizationId ? ", organization_id" : ""}
           )
           VALUES ($1, $2, $3, $4, $5, now(), $6${hasMgmtOrganizationId ? ", $7" : ""})
-          RETURNING id
+          RETURNING ${hasMgmtId ? "id" : "contact_id"}
           `,
           hasMgmtOrganizationId
             ? [resolvedLeadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, organizationId]
             : [resolvedLeadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
-        const gestionId = mgmtResult.rows[0]?.id ?? null;
+        const gestionId = hasMgmtId ? (mgmtResult.rows[0]?.id ?? null) : null;
 
         const updateLeadStatus = await client.query(
           `
