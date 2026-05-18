@@ -14840,6 +14840,24 @@ export const handler = async (event) => {
           `,
           statusValues
         );
+
+        const sellerIncontactableRes = await client.query(
+          `
+          SELECT
+            lcs.assigned_to,
+            u.nombre,
+            u.apellido,
+            COUNT(*)::int AS incontactables
+          FROM lead_contact_status lcs
+          LEFT JOIN users u ON u.id = lcs.assigned_to
+          WHERE lcs.batch_id = $1
+            AND lcs.estado_venta = 'incontactable'
+            ${organizationId ? "AND lcs.organization_id = $2" : ""}
+          GROUP BY lcs.assigned_to, u.nombre, u.apellido
+          `,
+          organizationId ? [batchId, organizationId] : [batchId]
+        );
+
         const totalValues = [batchId];
         const totalOrgClause = organizationId ? "AND organization_id = $2" : "";
         if (organizationId) totalValues.push(organizationId);
@@ -14857,7 +14875,17 @@ export const handler = async (event) => {
           success: true,
           data: {
             total_contactos: totalRes.rows[0]?.total || 0,
-            estados: statusRes.rows
+            estados: statusRes.rows,
+            incontactables_total: (sellerIncontactableRes.rows || []).reduce(
+              (sum, r) => sum + Number(r.incontactables || 0),
+              0
+            ),
+            incontactables_por_vendedor: (sellerIncontactableRes.rows || []).map((r) => ({
+              seller_id: r.assigned_to,
+              nombre: r.nombre,
+              apellido: r.apellido,
+              total: Number(r.incontactables || 0)
+            }))
           },
           error: null
         });
