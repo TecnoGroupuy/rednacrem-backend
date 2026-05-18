@@ -15024,10 +15024,20 @@ export const handler = async (event) => {
         const totalValues = [batchId];
         const totalOrgClause = organizationId ? "AND organization_id = $2" : "";
         if (organizationId) totalValues.push(organizationId);
-        const totalRes = await client.query(
+        const totalBatchContacts = await client.query(
           `
           SELECT COUNT(*)::int AS total
           FROM lead_batch_contacts
+          WHERE batch_id = $1
+          ${totalOrgClause}
+          `,
+          totalValues
+        );
+
+        const totalLcsContacts = await client.query(
+          `
+          SELECT COUNT(DISTINCT contact_id)::int AS total
+          FROM lead_contact_status
           WHERE batch_id = $1
           ${totalOrgClause}
           `,
@@ -15065,7 +15075,10 @@ export const handler = async (event) => {
           .filter((r) => r.estado_venta === estado)
           .reduce((s, r) => s + Number(r.total || 0), 0);
 
-        const totalContactos = Number(totalRes.rows[0]?.total || 0);
+        const totalContactos = Math.max(
+          Number(totalBatchContacts.rows[0]?.total || 0),
+          Number(totalLcsContacts.rows[0]?.total || 0)
+        );
         const totalVendidos = getTotal("venta");
         const totalNoContesta = getTotal("no_contesta");
         const totalIncontactables = getTotal("incontactable");
