@@ -864,6 +864,7 @@ async function fetchRecuperoContactos({
   search,
   motivoBaja,
   tab,
+  loteId,
   sortField,
   sortDir,
   page,
@@ -1105,6 +1106,14 @@ async function fetchRecuperoContactos({
       values.push(lotes);
       idx += 1;
     }
+  }
+
+  let loteIdParam = null;
+  if (loteId && isValidUuid(loteId)) {
+    loteIdParam = idx;
+    conditions.push(`lote.batch_id = $${loteIdParam}::uuid`);
+    values.push(loteId);
+    idx += 1;
   }
 
   const filterFields = {
@@ -1383,6 +1392,7 @@ async function fetchRecuperoContactos({
         JOIN lead_batches lb ON lb.id = lmh.batch_id
         WHERE lmh.contact_id = d.id
           AND lb.tipo = 'recupero'
+          ${loteIdParam ? `AND lmh.batch_id = $${loteIdParam}::uuid` : ""}
         ORDER BY lmh.fecha_gestion DESC
         LIMIT 1
       ) gestion ON true
@@ -1438,6 +1448,7 @@ async function fetchRecuperoContactos({
         JOIN lead_batches lb ON lb.id = lmh.batch_id
         WHERE lmh.contact_id = d.id
           AND lb.tipo = 'recupero'
+          ${loteIdParam ? `AND lmh.batch_id = $${loteIdParam}::uuid` : ""}
         ORDER BY lmh.fecha_gestion DESC
         LIMIT 1
       ) gestion ON true
@@ -11826,6 +11837,7 @@ export const handler = async (event) => {
       const departamentoRaw = getQueryParam(event, "departamento");
       const motivoBajaRaw = getQueryParam(event, "motivo_baja");
       const tabRaw = getQueryParam(event, "tab");
+      const loteId = getQueryParam(event, "lote_id") || null;
       const producto = productoRaw ? productoRaw.trim() : "";
       const departamento = departamentoRaw ? departamentoRaw.trim() : "";
       const search = searchRaw ? searchRaw.trim() : "";
@@ -11856,6 +11868,7 @@ export const handler = async (event) => {
           search,
           motivoBaja,
           tab,
+          loteId,
           sortField: sort,
           sortDir: dir,
           page,
