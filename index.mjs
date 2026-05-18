@@ -14293,36 +14293,6 @@ export const handler = async (event) => {
       try {
         await client.query("BEGIN");
 
-        // leadId puede ser datos_para_trabajar.id (normal) o contacts.id (recupero).
-        // lead_contact_status.contact_id referencia datos_para_trabajar.id, asi que resolvemos el id real.
-        let resolvedLeadId = leadId;
-
-        const directRes = await client.query(
-          `
-          SELECT id
-          FROM lead_contact_status
-          WHERE contact_id = $1
-            AND assigned_to = $2
-          LIMIT 1
-          `,
-          [leadId, dbUser.id]
-        );
-
-        if (!directRes.rows.length) {
-          const dptRes = await client.query(
-            `
-            SELECT id
-            FROM datos_para_trabajar
-            WHERE contact_id = $1
-            LIMIT 1
-            `,
-            [leadId]
-          );
-          if (dptRes.rows[0]?.id) {
-            resolvedLeadId = dptRes.rows[0].id;
-          }
-        }
-
         const currentStatusRes = await client.query(
           `
           SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
@@ -14331,7 +14301,7 @@ export const handler = async (event) => {
             AND assigned_to = $2
           LIMIT 1
           `,
-          [resolvedLeadId, dbUser.id]
+          [leadId, dbUser.id]
         );
 
         if (!currentStatusRes.rows.length) {
@@ -14372,21 +14342,17 @@ export const handler = async (event) => {
           // Venta y dato_erroneo son siempre finales
           const estadosFinalesPermanentes = ["venta", "dato_erroneo"];
           if (estadosFinalesPermanentes.includes(currentEstadoVenta)) {
-            const hasMgmtId = await columnExists(client, "lead_management_history", "id");
-            let existingGestionId = null;
-            if (hasMgmtId) {
-              const latestGestion = await client.query(
-                `
-                SELECT id
-                FROM lead_management_history
-                WHERE contact_id = $1
-                ORDER BY fecha_gestion DESC
-                LIMIT 1
-                `,
-                [resolvedLeadId]
-              );
-              existingGestionId = latestGestion.rows[0]?.id ?? null;
-            }
+            const latestGestion = await client.query(
+              `
+              SELECT id
+              FROM lead_management_history
+              WHERE contact_id = $1
+              ORDER BY fecha_gestion DESC
+              LIMIT 1
+              `,
+              [leadId]
+            );
+            const existingGestionId = latestGestion.rows[0]?.id ?? null;
             await client.query("ROLLBACK");
             return json(409, {
               ok: false,
@@ -14460,7 +14426,7 @@ export const handler = async (event) => {
               AND batch_id = $2
               AND resultado = 'no_contesta'
             `,
-            [resolvedLeadId, batchId]
+            [leadId, batchId]
           );
           const noContactaCount = Number(noContactaRes.rows[0]?.total || 0);
           if (noContactaCount >= 4) {
@@ -14480,7 +14446,6 @@ export const handler = async (event) => {
           organizationId = orgRes.rows[0]?.organization_id || null;
         } catch {}
 
-        const hasMgmtId = await columnExists(client, "lead_management_history", "id");
         const hasMgmtOrganizationId = await columnExists(
           client,
           "lead_management_history",
@@ -14500,13 +14465,13 @@ export const handler = async (event) => {
             ${hasMgmtOrganizationId ? ", organization_id" : ""}
           )
           VALUES ($1, $2, $3, $4, $5, now(), $6${hasMgmtOrganizationId ? ", $7" : ""})
-          RETURNING ${hasMgmtId ? "id" : "contact_id"}
+          RETURNING id
           `,
           hasMgmtOrganizationId
-            ? [resolvedLeadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, organizationId]
-            : [resolvedLeadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
+            ? [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, organizationId]
+            : [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
-        const gestionId = hasMgmtId ? (mgmtResult.rows[0]?.id ?? null) : null;
+        const gestionId = mgmtResult.rows[0]?.id ?? null;
 
         const updateLeadStatus = await client.query(
           `
@@ -14522,7 +14487,7 @@ export const handler = async (event) => {
             AND batch_id = $5
           RETURNING contact_id
           `,
-          [resolvedLeadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+          [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
         );
         if (!updateLeadStatus.rows.length) {
           await client.query(
@@ -14549,7 +14514,7 @@ export const handler = async (event) => {
               ultimo_intento_at = now(),
               updated_at = now()
             `,
-            [resolvedLeadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+            [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
           );
         }
 
@@ -14562,7 +14527,7 @@ export const handler = async (event) => {
               AND batch_id = $2
               AND cumplida = false
             `,
-            [resolvedLeadId, batchId]
+            [leadId, batchId]
           );
         }
 
@@ -14577,7 +14542,7 @@ export const handler = async (event) => {
             ORDER BY created_at DESC
             LIMIT 1
             `,
-            [resolvedLeadId, batchId]
+            [leadId, batchId]
           );
 
           if (agendaRes.rows.length) {
@@ -14604,7 +14569,7 @@ export const handler = async (event) => {
               )
               VALUES ($1, $2, $3, $4, $5)
               `,
-              [resolvedLeadId, assignedTo, batchId, fechaAgenda, nota || null]
+              [leadId, assignedTo, batchId, fechaAgenda, nota || null]
             );
           }
         }
@@ -14615,7 +14580,7 @@ export const handler = async (event) => {
           SET estado = 'trabajado', updated_at = now()
           WHERE id = $1 AND estado <> 'bloqueado'
           `,
-          [resolvedLeadId]
+          [leadId]
         );
 
         await client.query("COMMIT");
