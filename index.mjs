@@ -14882,6 +14882,21 @@ export const handler = async (event) => {
           organizationId ? [batchId, organizationId] : [batchId]
         );
 
+        const fechasRes = await client.query(
+          `
+          SELECT
+            MIN(d.created_at) AS primer_dato,
+            MAX(d.created_at) AS ultimo_dato,
+            DATE_PART('day', MAX(d.created_at) - MIN(d.created_at))::int
+              AS dias_transcurridos
+          FROM datos_para_trabajar d
+          JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
+          WHERE lbc.batch_id = $1
+          ${organizationId ? "AND lbc.organization_id = $2" : ""}
+          `,
+          organizationId ? [batchId, organizationId] : [batchId]
+        );
+
         const estados = statusRes.rows || [];
         const getTotal = (estado) => estados
           .filter((r) => r.estado_venta === estado)
@@ -14937,7 +14952,10 @@ export const handler = async (event) => {
               total_contactados: totalContactados,
               pct_avance: pctAvance,
               pct_contactabilidad: pctContactabilidad,
-              pct_conversion: pctConversion
+              pct_conversion: pctConversion,
+              primer_dato: fechasRes.rows[0]?.primer_dato || null,
+              ultimo_dato: fechasRes.rows[0]?.ultimo_dato || null,
+              dias_transcurridos: fechasRes.rows[0]?.dias_transcurridos || 0
             }
           },
           error: null
