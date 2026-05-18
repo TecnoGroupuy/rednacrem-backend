@@ -14870,11 +14870,49 @@ export const handler = async (event) => {
           `,
           totalValues
         );
+
+        const contactadosRes = await client.query(
+          `
+          SELECT COUNT(DISTINCT contact_id)::int AS total
+          FROM lead_management_history
+          WHERE batch_id = $1
+            AND resultado IN ('venta', 'rechazo', 'seguimiento', 'rellamar')
+            ${organizationId ? "AND organization_id = $2" : ""}
+          `,
+          organizationId ? [batchId, organizationId] : [batchId]
+        );
+
+        const estados = statusRes.rows || [];
+        const getTotal = (estado) => estados
+          .filter((r) => r.estado_venta === estado)
+          .reduce((s, r) => s + Number(r.total || 0), 0);
+
+        const totalContactos = Number(totalRes.rows[0]?.total || 0);
+        const totalVendidos = getTotal("venta");
+        const totalNoContesta = getTotal("no_contesta");
+        const totalIncontactables = getTotal("incontactable");
+        const totalRechazos = getTotal("rechazo");
+        const totalDatoErroneo = getTotal("dato_erroneo");
+        const totalNuevos = getTotal("nuevo");
+        const totalEnProceso = getTotal("seguimiento") + getTotal("rellamar");
+        const totalGestionados = totalContactos - totalNuevos;
+        const totalContactados = Number(contactadosRes.rows[0]?.total || 0);
+
+        const pctAvance = totalContactos > 0
+          ? Math.round((totalGestionados / totalContactos) * 100)
+          : 0;
+        const pctContactabilidad = totalContactos > 0
+          ? Math.round((totalContactados / totalContactos) * 100)
+          : 0;
+        const pctConversion = totalContactados > 0
+          ? Math.round((totalVendidos / totalContactados) * 100)
+          : 0;
+
         return json(200, {
           ok: true,
           success: true,
           data: {
-            total_contactos: totalRes.rows[0]?.total || 0,
+            total_contactos: totalContactos,
             estados: statusRes.rows,
             incontactables_total: (sellerIncontactableRes.rows || []).reduce(
               (sum, r) => sum + Number(r.incontactables || 0),
@@ -14885,7 +14923,22 @@ export const handler = async (event) => {
               nombre: r.nombre,
               apellido: r.apellido,
               total: Number(r.incontactables || 0)
-            }))
+            })),
+            informe: {
+              total_contactos: totalContactos,
+              total_gestionados: totalGestionados,
+              total_nuevos: totalNuevos,
+              total_vendidos: totalVendidos,
+              total_no_contesta: totalNoContesta,
+              total_incontactables: totalIncontactables,
+              total_rechazos: totalRechazos,
+              total_dato_erroneo: totalDatoErroneo,
+              total_en_proceso: totalEnProceso,
+              total_contactados: totalContactados,
+              pct_avance: pctAvance,
+              pct_contactabilidad: pctContactabilidad,
+              pct_conversion: pctConversion
+            }
           },
           error: null
         });
