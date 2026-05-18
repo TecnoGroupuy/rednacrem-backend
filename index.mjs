@@ -1239,8 +1239,9 @@ async function fetchRecuperoContactos({
 
   const baseConditions = [...conditions];
 
-  if (tab) {
-    if (tab === "disponibles") {
+  const tabKey = String(tab || "").trim().toLowerCase().replace(/\s+/g, "_");
+  if (tabKey) {
+    if (tabKey === "disponibles") {
       conditions.push(`
         NOT EXISTS (
           SELECT 1
@@ -1251,7 +1252,7 @@ async function fetchRecuperoContactos({
             AND lb.estado IN ('activo', 'asignado')
         )
       `);
-    } else if (tab === "en_lote") {
+    } else if (tabKey === "en_lote") {
       conditions.push(`
         EXISTS (
           SELECT 1
@@ -1261,7 +1262,7 @@ async function fetchRecuperoContactos({
             AND lb.tipo = 'recupero'
         )
       `);
-    } else if (tab === "asignados") {
+    } else if (tabKey === "asignados") {
       conditions.push(`
         EXISTS (
           SELECT 1
@@ -1273,7 +1274,7 @@ async function fetchRecuperoContactos({
             AND lcs.assigned_to IS NOT NULL
         )
       `);
-    } else if (tab === "gestionados") {
+    } else if (tabKey === "gestionados") {
       conditions.push(`
         (
           EXISTS (
@@ -1288,11 +1289,21 @@ async function fetchRecuperoContactos({
           OR COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NOT NULL
         )
       `);
-    } else if (tab === "recuperados") {
+    } else if (tabKey === "nuevos" || tabKey === "nuevo") {
+      conditions.push(`COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL`);
+    } else if (tabKey === "seguimiento") {
+      conditions.push(
+        `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('seguimiento', 'rellamar', 'volver_a_llamar')`
+      );
+    } else if (tabKey === "no_contacto" || tabKey === "no_contesta") {
+      conditions.push(
+        `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'no_contesta'`
+      );
+    } else if (tabKey === "recuperados" || tabKey === "recuperado") {
       conditions.push(
         `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('venta', 'alta')`
       );
-    } else if (tab === "rechazados") {
+    } else if (tabKey === "rechazados" || tabKey === "rechazos") {
       conditions.push(
         `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'rechazo'`
       );
