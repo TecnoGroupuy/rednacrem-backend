@@ -12672,6 +12672,16 @@ export const handler = async (event) => {
         return json(401, { ok: false, message: "Seller id requerido" });
       }
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -12700,6 +12710,7 @@ export const handler = async (event) => {
             AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($5::text IS NULL OR lb.tipo != $5)
+            AND ($6::uuid IS NULL OR lb.organization_id = $6)
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
@@ -12717,7 +12728,7 @@ export const handler = async (event) => {
             )
             ${countExtra}
           `,
-          [sellerId, tipo, search, origenDato, tipoExcluir]
+          [sellerId, tipo, search, origenDato, tipoExcluir, organizationId]
         );
         const result = await client.query(
           `
@@ -12757,6 +12768,7 @@ export const handler = async (event) => {
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($7::text IS NULL OR lb.tipo != $7)
+            AND ($8::uuid IS NULL OR lb.organization_id = $8)
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
@@ -12776,7 +12788,7 @@ export const handler = async (event) => {
           ORDER BY lcs.intentos ASC, lcs.updated_at DESC, lcs.contact_id ASC
           LIMIT $5 OFFSET $6
           `,
-          [sellerId, tipo, search, origenDato, limit, offset, tipoExcluir]
+          [sellerId, tipo, search, origenDato, limit, offset, tipoExcluir, organizationId]
         );
         const total = parseInt(countResult.rows[0]?.count || "0", 10);
 
