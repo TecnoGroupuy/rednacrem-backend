@@ -12831,6 +12831,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -12851,10 +12861,11 @@ export const handler = async (event) => {
           WHERE lbs.seller_id = $1
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND ($3::uuid IS NULL OR lb.organization_id = $3)
           ORDER BY lb.created_at DESC
           LIMIT 1
           `,
-          [dbUser.id, tipo]
+          [dbUser.id, tipo, organizationId]
         );
 
         if (!batchRes.rows.length) {
@@ -13040,6 +13051,16 @@ export const handler = async (event) => {
       batchTipo = hasTipo ? tipo : null;
       console.log("[daily-stats] userId:", sellerId, "fecha:", fecha);
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -13055,8 +13076,9 @@ export const handler = async (event) => {
             AND lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND ($3::uuid IS NULL OR lb.organization_id = $3)
           `,
-          [sellerId, batchTipo]
+          [sellerId, batchTipo, organizationId]
         );
 
         const statsResult = await client.query(
@@ -13084,10 +13106,11 @@ export const handler = async (event) => {
             WHERE lmh.user_id = $1
               AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
               AND ($3::text IS NULL OR lb.tipo = $3)
+              AND ($4::uuid IS NULL OR lb.organization_id = $4)
             ORDER BY lmh.contact_id, lmh.fecha_gestion DESC
           ) last_gestiones
           `,
-          [sellerId, fecha, batchTipo]
+          [sellerId, fecha, batchTipo, organizationId]
         );
         const salesStatsRes = await client.query(
           `
@@ -13316,6 +13339,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -13331,10 +13364,11 @@ export const handler = async (event) => {
           WHERE lbs.seller_id = $1
             AND lb.estado IN ('activo', 'asignado')
             AND lcs.assigned_to = $1
+            AND ($2::uuid IS NULL OR lb.organization_id = $2)
           GROUP BY lcs.estado_venta, lcs.ola_actual
           ORDER BY lcs.ola_actual, lcs.estado_venta
           `,
-          [dbUser.id]
+          [dbUser.id, organizationId]
         );
         return json(200, {
           ok: true,
@@ -13674,6 +13708,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -13705,9 +13749,10 @@ export const handler = async (event) => {
           LEFT JOIN lead_batches lb ON lb.id = lcs.batch_id
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE d.id = $1
+            AND ($2::uuid IS NULL OR d.organization_id = $2)
           LIMIT 1
           `,
-          [leadId]
+          [leadId, organizationId]
         );
 
         if (!leadRes.rows.length) {
@@ -13806,6 +13851,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -13818,9 +13873,10 @@ export const handler = async (event) => {
           SELECT id, nombre, apellido, telefono, celular, ${hasContactIdCol ? "contact_id" : "NULL::uuid AS contact_id"}
           FROM datos_para_trabajar
           WHERE id = $1
+            AND ($2::uuid IS NULL OR organization_id = $2)
           LIMIT 1
           `,
-          [leadId]
+          [leadId, organizationId]
         );
 
         const lead = leadRes.rows[0];
@@ -13849,9 +13905,10 @@ export const handler = async (event) => {
           SELECT id, nombre, apellido, telefono, celular, documento, status
           FROM contacts
           WHERE id = $1
+            AND ($2::uuid IS NULL OR organization_id = $2)
           LIMIT 1
           `,
-          [contactId]
+          [contactId, organizationId]
         );
         const contact = contactRes.rows[0];
         if (!contact) {
