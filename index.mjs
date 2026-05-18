@@ -12655,11 +12655,11 @@ export const handler = async (event) => {
       } else if (tabNormalized === "recuperado") {
         tabWhere = "AND lcs.estado_venta IN ('venta')";
       } else {
-        tabWhere = "AND lcs.estado_venta != 'dato_erroneo'";
+        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')";
       }
       const tabWhereCount = tabWhere.replace(/^AND\s+/, "");
       const countExtra =
-        tabWhereCount && tabWhereCount !== "lcs.estado_venta != 'dato_erroneo'"
+        tabWhereCount && tabWhereCount !== "lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')"
           ? `AND ${tabWhereCount}`
           : "";
 
@@ -12693,7 +12693,7 @@ export const handler = async (event) => {
           LEFT JOIN contacts c ON c.id = d.contact_id
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
-            AND lcs.estado_venta != 'dato_erroneo'
+            AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
