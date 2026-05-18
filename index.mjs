@@ -12634,6 +12634,10 @@ export const handler = async (event) => {
       const tipoRaw = getQueryParam(event, "tipo");
       const tipoNormalized = tipoRaw ? String(tipoRaw).trim().toLowerCase() : "";
       const tipo = BATCH_TIPOS.includes(tipoNormalized) ? tipoNormalized : null;
+      const tipoExcluirRaw = getQueryParam(event, "tipo_excluir");
+      const tipoExcluir = tipoExcluirRaw
+        ? String(tipoExcluirRaw).trim().toLowerCase()
+        : null;
       const searchRaw = String(getQueryParam(event, "search") || "").trim();
       const search = searchRaw ? `%${searchRaw}%` : null;
       const origenDatoRaw = String(getQueryParam(event, "origen_dato") || "").trim();
@@ -12695,6 +12699,7 @@ export const handler = async (event) => {
             AND lb.estado IN ('activo', 'asignado')
             AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND ($5::text IS NULL OR lb.tipo != $5)
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
@@ -12712,7 +12717,7 @@ export const handler = async (event) => {
             )
             ${countExtra}
           `,
-          [sellerId, tipo, search, origenDato]
+          [sellerId, tipo, search, origenDato, tipoExcluir]
         );
         const result = await client.query(
           `
@@ -12751,6 +12756,7 @@ export const handler = async (event) => {
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
+            AND ($7::text IS NULL OR lb.tipo != $7)
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
@@ -12770,7 +12776,7 @@ export const handler = async (event) => {
           ORDER BY lcs.intentos ASC, lcs.updated_at DESC, lcs.contact_id ASC
           LIMIT $5 OFFSET $6
           `,
-          [sellerId, tipo, search, origenDato, limit, offset]
+          [sellerId, tipo, search, origenDato, limit, offset, tipoExcluir]
         );
         const total = parseInt(countResult.rows[0]?.count || "0", 10);
 
