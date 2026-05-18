@@ -12827,7 +12827,7 @@ export const handler = async (event) => {
             ${dLocalidad}                           AS localidad,
             d.nota                                  AS nota,
             ${dFechaLead}                            AS fecha_lead,
-            COALESCE(d.origen_dato, 'recupero')     AS origen_dato,
+            COALESCE(d.origen_dato, '')            AS origen_dato,
             lb.tipo                                 AS lote_tipo,
             lcs.estado_venta,
             lcs.batch_id,
