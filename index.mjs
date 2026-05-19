@@ -807,6 +807,7 @@ const RECUPERO_SIMPLE_FILTER_FIELDS = new Set([
   "fecha_baja_desde",
   "fecha_baja_hasta",
   "motivo_baja",
+  "motivo_normalizado",
   "ultimo_estado",
   "producto",
   "departamento",
@@ -1138,13 +1139,25 @@ async function fetchRecuperoContactos({
       values.push(lotes);
       idx += 1;
     }
+
+    if (motivoNormalizado == null) {
+      const motivoNormalizadoFromFilters = simpleFilters.motivo_normalizado;
+      const motivoNormalizadoList = normalizeArrayValue(motivoNormalizadoFromFilters, normalizeLowerValue);
+      if (motivoNormalizadoList.length) {
+        conditions.push(`(${motivoNormalizadoExpr}) = ANY($${idx}::text[])`);
+        values.push(motivoNormalizadoList);
+        idx += 1;
+      }
+    }
   }
 
-  const motivoNormalizadoList = normalizeArrayValue(motivoNormalizado, normalizeLowerValue);
-  if (motivoNormalizadoList.length) {
-    conditions.push(`(${motivoNormalizadoExpr}) = ANY($${idx}::text[])`);
-    values.push(motivoNormalizadoList);
-    idx += 1;
+  if (motivoNormalizado != null) {
+    const motivoNormalizadoList = normalizeArrayValue(motivoNormalizado, normalizeLowerValue);
+    if (motivoNormalizadoList.length) {
+      conditions.push(`(${motivoNormalizadoExpr}) = ANY($${idx}::text[])`);
+      values.push(motivoNormalizadoList);
+      idx += 1;
+    }
   }
 
   let loteIdParam = null;
