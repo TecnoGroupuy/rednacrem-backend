@@ -863,6 +863,7 @@ async function fetchRecuperoContactos({
   departamento,
   search,
   motivoBaja,
+  motivoNormalizado,
   tab,
   loteId,
   sortField,
@@ -899,6 +900,37 @@ async function fetchRecuperoContactos({
 
   const values = [];
   let idx = 1;
+  const motivoNormalizadoExpr = `
+    CASE
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
+        THEN 'fallecimiento'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) IN ('BAJA', 'BAJA ')
+        OR cp.motivo_baja_detalle IS NULL
+        OR TRIM(cp.motivo_baja_detalle) = ''
+        OR cp.motivo_baja_detalle = '?'
+        THEN 'sin_detalle'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
+        THEN 'voluntaria'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
+        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALTA DE PAGO%'
+        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN LIQUIDEZ%'
+        THEN 'falta_de_pago'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ANTEL%'
+        THEN 'baja_antel'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%BPS%'
+        THEN 'baja_bps'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%AUDIT%'
+        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADMINISTRAT%'
+        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADIMINISTRAT%'
+        THEN 'administrativa'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%REPETIDA%'
+        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ACTIVACI%'
+        THEN 'error_activacion'
+      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%NO LLAMAR%'
+        THEN 'no_llamar'
+      ELSE 'otro'
+    END
+  `;
 
   conditions.push(`($${idx}::uuid IS NULL OR c.organization_id = $${idx}::uuid)`);
   values.push(organizationId ?? null);
@@ -1106,6 +1138,13 @@ async function fetchRecuperoContactos({
       values.push(lotes);
       idx += 1;
     }
+  }
+
+  const motivoNormalizadoList = normalizeArrayValue(motivoNormalizado, normalizeLowerValue);
+  if (motivoNormalizadoList.length) {
+    conditions.push(`(${motivoNormalizadoExpr}) = ANY($${idx}::text[])`);
+    values.push(motivoNormalizadoList);
+    idx += 1;
   }
 
   let loteIdParam = null;
@@ -1367,6 +1406,7 @@ async function fetchRecuperoContactos({
         cp.fecha_baja,
         COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
         COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja_detalle,
+        (${motivoNormalizadoExpr}) AS motivo_normalizado,
         lote.batch_id,
         lote.nombre_lote,
         lote.vendedor_asignado_id,
@@ -11856,6 +11896,7 @@ export const handler = async (event) => {
       const dirRaw = getQueryParam(event, "dir");
       const departamentoRaw = getQueryParam(event, "departamento");
       const motivoBajaRaw = getQueryParam(event, "motivo_baja");
+      const motivoNormalizadoRaw = getQueryParam(event, "motivo_normalizado");
       const tabRaw = getQueryParam(event, "tab");
       const loteId = getQueryParam(event, "lote_id") || null;
       const producto = productoRaw ? productoRaw.trim() : "";
@@ -11864,6 +11905,7 @@ export const handler = async (event) => {
       const sort = sortRaw ? sortRaw.trim() : "";
       const dir = dirRaw === "desc" ? "DESC" : "ASC";
       const motivoBaja = motivoBajaRaw ? motivoBajaRaw.trim() : "";
+      const motivoNormalizado = motivoNormalizadoRaw ? String(motivoNormalizadoRaw).split(",") : null;
       const tab = tabRaw ? tabRaw.trim().toLowerCase() : "";
 
       const sortableColumns = {
@@ -11887,6 +11929,7 @@ export const handler = async (event) => {
           departamento,
           search,
           motivoBaja,
+          motivoNormalizado,
           tab,
           loteId,
           sortField: sort,
@@ -12008,6 +12051,7 @@ export const handler = async (event) => {
       const departamento = body?.departamento ? String(body.departamento).trim() : "";
       const search = body?.search ? String(body.search).trim() : "";
       const motivoBaja = body?.motivo_baja ? String(body.motivo_baja).trim() : "";
+      const motivoNormalizado = body?.motivo_normalizado ?? null;
       const tab = body?.tab ? String(body.tab).trim().toLowerCase() : "";
       const sortField = body?.sort?.field ? String(body.sort.field).trim() : "";
       const sortDir = body?.sort?.dir === "desc" ? "DESC" : "ASC";
@@ -12054,6 +12098,7 @@ export const handler = async (event) => {
         departamento,
         search,
         motivoBaja,
+        motivoNormalizado,
         tab,
         sortField,
         sortDir,
@@ -12107,6 +12152,7 @@ export const handler = async (event) => {
             departamento,
             search,
             motivoBaja,
+            motivoNormalizado,
             tab,
             sortField,
             sortDir,
