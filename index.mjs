@@ -13075,6 +13075,11 @@ export const handler = async (event) => {
             lcs.estado_venta,
             lcs.batch_id,
             lb.nombre                               AS lote_nombre,
+            prod.nombre_producto,
+            prod.precio,
+            prod.fecha_baja,
+            prod.motivo_baja_detalle,
+            prod.motivo_normalizado,
             (SELECT MAX(lmh.created_at)
              FROM lead_management_history lmh
              WHERE lmh.contact_id = COALESCE(d.id, c.id)
@@ -13084,6 +13089,47 @@ export const handler = async (event) => {
           LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           ${contactJoin}
           JOIN lead_batches lb ON lb.id = lcs.batch_id
+          LEFT JOIN LATERAL (
+            SELECT
+              cp.nombre_producto,
+              cp.precio,
+              cp.fecha_baja,
+              cp.motivo_baja_detalle,
+              CASE
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
+                  THEN 'fallecimiento'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) IN ('BAJA','BAJA ')
+                  OR cp.motivo_baja_detalle IS NULL
+                  OR TRIM(cp.motivo_baja_detalle) = ''
+                  THEN 'sin_detalle'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
+                  THEN 'voluntaria'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALTA DE PAGO%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN LIQUIDEZ%'
+                  THEN 'falta_de_pago'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ANTEL%'
+                  THEN 'baja_antel'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%BPS%'
+                  THEN 'baja_bps'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%AUDIT%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADMINISTRAT%'
+                  THEN 'administrativa'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%REPETIDA%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ACTIVACI%'
+                  THEN 'error_activacion'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%NO LLAMAR%'
+                  THEN 'no_llamar'
+                ELSE 'otro'
+              END AS motivo_normalizado
+            FROM contact_products cp
+            WHERE lb.tipo = 'recupero'
+              AND c.id IS NOT NULL
+              AND cp.contact_id = c.id
+              AND cp.estado = 'baja'
+            ORDER BY cp.fecha_baja DESC NULLS LAST
+            LIMIT 1
+          ) prod ON true
           WHERE lcs.assigned_to = $1
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
