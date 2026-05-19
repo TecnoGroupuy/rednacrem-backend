@@ -1321,6 +1321,7 @@ async function fetchRecuperoContactos({
 
   const where = conditions.join(" AND ");
   const baseWhere = baseConditions.join(" AND ");
+  const distinctKeyExpr = "COALESCE(NULLIF(c.documento,''), NULLIF(c.telefono,''), NULLIF(c.celular,''), c.id::text)";
   const orderExpr = sortField && sortableColumns[sortField] ? sortableColumns[sortField] : null;
   const isFechaBajaOrder = (orderExpr || "cp.fecha_baja") === "cp.fecha_baja";
   const fechaDir = isFechaBajaOrder ? (orderExpr ? sortDir : "DESC") : null;
@@ -1352,7 +1353,7 @@ async function fetchRecuperoContactos({
     itemsRes = await client.query(
       `
       ${orderByOuter ? "SELECT * FROM (" : ""}
-      SELECT DISTINCT ON (c.telefono)
+      SELECT DISTINCT ON (${distinctKeyExpr})
         c.id,
         c.nombre,
         c.apellido,
@@ -1412,7 +1413,10 @@ async function fetchRecuperoContactos({
         LIMIT 1
       ) gestion ON true
       WHERE ${where}
-      ORDER BY c.telefono, ${orderByInner}, c.id
+      ORDER BY
+        ${distinctKeyExpr},
+        c.created_at DESC,
+        cp.fecha_baja DESC NULLS LAST
       ${orderByOuter ? ") subq ORDER BY " + orderByOuter + ", id" : ""}
       LIMIT $${idx} OFFSET $${idx + 1}
       `,
@@ -1430,7 +1434,7 @@ async function fetchRecuperoContactos({
     console.log("[recupero] starting countRes query");
     countRes = await client.query(
       `
-      SELECT COUNT(DISTINCT c.telefono) AS total
+      SELECT COUNT(DISTINCT ${distinctKeyExpr})::int AS total
       FROM contacts c
       JOIN contact_products cp ON cp.contact_id = c.id
       LEFT JOIN external_management_status ems
