@@ -1321,9 +1321,15 @@ async function fetchRecuperoContactos({
 
   const where = conditions.join(" AND ");
   const baseWhere = baseConditions.join(" AND ");
-  const orderBy = sortField && sortableColumns[sortField]
-    ? `${sortableColumns[sortField]} ${sortDir}`
-    : "cp.fecha_baja DESC";
+  const orderExpr = sortField && sortableColumns[sortField] ? sortableColumns[sortField] : null;
+  let orderBy = orderExpr ? `${orderExpr} ${sortDir}` : "cp.fecha_baja DESC";
+  if ((orderExpr || "cp.fecha_baja") === "cp.fecha_baja") {
+    const fechaDir = orderExpr ? sortDir : "DESC";
+    orderBy = `
+      CASE WHEN cp.fecha_baja < '2000-01-01'::date THEN 1 ELSE 0 END ASC,
+      cp.fecha_baja ${fechaDir}
+    `;
+  }
 
   console.log("[recupero] organizationId:", organizationId);
   console.log("[recupero] params:", { producto, tab, page });
