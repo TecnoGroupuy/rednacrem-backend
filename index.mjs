@@ -1403,7 +1403,7 @@ async function fetchRecuperoContactos({
         LIMIT 1
       ) gestion ON true
       WHERE ${where}
-      ORDER BY c.telefono, ${orderBy}
+      ORDER BY ${orderBy}, c.id
       LIMIT $${idx} OFFSET $${idx + 1}
       `,
       [...values, limit, offset]
