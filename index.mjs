@@ -1322,14 +1322,22 @@ async function fetchRecuperoContactos({
   const where = conditions.join(" AND ");
   const baseWhere = baseConditions.join(" AND ");
   const orderExpr = sortField && sortableColumns[sortField] ? sortableColumns[sortField] : null;
-  let orderBy = orderExpr ? `${orderExpr} ${sortDir}` : "cp.fecha_baja DESC";
-  if ((orderExpr || "cp.fecha_baja") === "cp.fecha_baja") {
-    const fechaDir = orderExpr ? sortDir : "DESC";
-    orderBy = `
+  const isFechaBajaOrder = (orderExpr || "cp.fecha_baja") === "cp.fecha_baja";
+  const fechaDir = isFechaBajaOrder ? (orderExpr ? sortDir : "DESC") : null;
+  const orderByInner = isFechaBajaOrder
+    ? `
       CASE WHEN cp.fecha_baja < '2000-01-01'::date THEN 1 ELSE 0 END ASC,
       cp.fecha_baja ${fechaDir}
-    `;
-  }
+    `
+    : orderExpr
+    ? `${orderExpr} ${sortDir}`
+    : "cp.fecha_baja DESC";
+  const orderByOuter = isFechaBajaOrder
+    ? `
+      CASE WHEN fecha_baja < '2000-01-01'::date THEN 1 ELSE 0 END ASC,
+      fecha_baja ${fechaDir}
+    `
+    : null;
 
   console.log("[recupero] organizationId:", organizationId);
   console.log("[recupero] params:", { producto, tab, page });
@@ -1343,6 +1351,7 @@ async function fetchRecuperoContactos({
     console.log("[recupero-sql] values:", JSON.stringify(values));
     itemsRes = await client.query(
       `
+      ${orderByOuter ? "SELECT * FROM (" : ""}
       SELECT DISTINCT ON (c.telefono)
         c.id,
         c.nombre,
@@ -1403,7 +1412,8 @@ async function fetchRecuperoContactos({
         LIMIT 1
       ) gestion ON true
       WHERE ${where}
-      ORDER BY ${orderBy}, c.id
+      ORDER BY c.telefono, ${orderByInner}, c.id
+      ${orderByOuter ? ") subq ORDER BY " + orderByOuter + ", id" : ""}
       LIMIT $${idx} OFFSET $${idx + 1}
       `,
       [...values, limit, offset]
