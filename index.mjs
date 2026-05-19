@@ -14529,8 +14529,13 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "GET" && path.match(/\/leads\/([^/]+)\/management-history$/)) {
-    const match = path.match(/\/leads\/([^/]+)\/management-history$/);
+  if (
+    method === "GET" &&
+    (path.match(/\/leads\/([^/]+)\/management-history$/) || path.match(/\/leads\/([^/]+)\/history$/))
+  ) {
+    const match =
+      path.match(/\/leads\/([^/]+)\/management-history$/) ||
+      path.match(/\/leads\/([^/]+)\/history$/);
     const contactId = match?.[1];
     if (!contactId || !isValidUuid(contactId)) {
       return json(400, { ok: false, message: "Contact id requerido" });
