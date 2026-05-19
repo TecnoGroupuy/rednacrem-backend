@@ -12117,8 +12117,66 @@ export const handler = async (event) => {
       });
 
       responseSource = emptyPayload ? "base-list-fallback" : "recupero-search";
+
+      let tabCounts = {
+        disponibles: 0,
+        en_gestion: 0,
+        recuperados: 0,
+        rechazados: 0
+      };
+      if (organizationId) {
+        const client = createDbClient();
+        await client.connect();
+        try {
+          const [gestionRes, recuperadosRes, rechazadosRes] = await Promise.all([
+            client.query(
+              `
+              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lb.estado IN ('activo', 'asignado')
+                AND lcs.estado_venta IN ('nuevo', 'no_contesta', 'rellamar', 'seguimiento')
+                AND lb.organization_id = $1
+              `,
+              [organizationId]
+            ),
+            client.query(
+              `
+              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lcs.estado_venta = 'venta'
+                AND lb.organization_id = $1
+              `,
+              [organizationId]
+            ),
+            client.query(
+              `
+              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
+              FROM lead_contact_status lcs
+              JOIN lead_batches lb ON lb.id = lcs.batch_id
+              WHERE lb.tipo = 'recupero'
+                AND lcs.estado_venta = 'rechazo'
+                AND lb.organization_id = $1
+              `,
+              [organizationId]
+            )
+          ]);
+          const metricsTotal = Number(result?.data?.metrics?.total ?? result?.data?.total ?? 0);
+          tabCounts = {
+            disponibles: metricsTotal,
+            en_gestion: Number(gestionRes.rows[0]?.total || 0),
+            recuperados: Number(recuperadosRes.rows[0]?.total || 0),
+            rechazados: Number(rechazadosRes.rows[0]?.total || 0)
+          };
+        } finally {
+          await client.end();
+        }
+      }
       return safeResponse({
-        data: result.data,
+        data: { ...result.data, tab_counts: tabCounts },
         emptyCondition: result.emptyCondition,
         meta: {
           source: responseSource,
