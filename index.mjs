@@ -905,8 +905,7 @@ async function fetchRecuperoContactos({
     CASE
       WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
         THEN 'fallecimiento'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) IN ('BAJA', 'BAJA ')
-        OR cp.motivo_baja_detalle IS NULL
+      WHEN cp.motivo_baja_detalle IS NULL
         OR TRIM(cp.motivo_baja_detalle) = ''
         OR cp.motivo_baja_detalle = '?'
         THEN 'sin_detalle'
@@ -13098,9 +13097,9 @@ export const handler = async (event) => {
               CASE
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
                   THEN 'fallecimiento'
-                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) IN ('BAJA','BAJA ')
-                  OR cp.motivo_baja_detalle IS NULL
+                WHEN cp.motivo_baja_detalle IS NULL
                   OR TRIM(cp.motivo_baja_detalle) = ''
+                  OR cp.motivo_baja_detalle = '?'
                   THEN 'sin_detalle'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
                   THEN 'voluntaria'
