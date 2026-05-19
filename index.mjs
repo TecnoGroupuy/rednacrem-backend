@@ -14529,6 +14529,81 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.match(/\/leads\/([^/]+)\/management-history$/)) {
+    const match = path.match(/\/leads\/([^/]+)\/management-history$/);
+    const contactId = match?.[1];
+    if (!contactId || !isValidUuid(contactId)) {
+      return json(400, { ok: false, message: "Contact id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const hasMgmtId = await columnExists(client, "lead_management_history", "id");
+        const hasMgmtOrgId = await columnExists(client, "lead_management_history", "organization_id");
+
+        const orgClause = hasMgmtOrgId
+          ? "AND ($2::uuid IS NULL OR lmh.organization_id = $2::uuid)"
+          : "AND ($2::uuid IS NULL OR lb.organization_id = $2::uuid)";
+
+        const result = await client.query(
+          `
+          SELECT
+            ${hasMgmtId ? "lmh.id," : ""}
+            lmh.resultado,
+            lmh.nota,
+            (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo') AS fecha_gestion,
+            lmh.created_at,
+            lb.nombre AS lote_nombre,
+            lb.tipo AS lote_tipo,
+            COALESCE(
+              NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''),
+              u.nombre
+            ) AS vendedor
+          FROM lead_management_history lmh
+          LEFT JOIN lead_batches lb ON lb.id = lmh.batch_id
+          LEFT JOIN users u ON u.id = lmh.user_id
+          WHERE lmh.contact_id = $1
+          ${orgClause}
+          ORDER BY lmh.fecha_gestion DESC
+          LIMIT 50
+          `,
+          [contactId, organizationId || null]
+        );
+
+        return json(200, { ok: true, data: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load management history", error: error.message });
+    }
+  }
+
   if (method === "POST" && path.match(/\/leads\/([^/]+)\/management$/)) {
     const match = path.match(/\/leads\/([^/]+)\/management$/);
     const leadId = match?.[1];
