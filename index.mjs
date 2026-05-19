@@ -11945,10 +11945,11 @@ export const handler = async (event) => {
           disponibles: 0,
           en_gestion: 0,
           recuperados: 0,
-          rechazados: 0
+          rechazados: 0,
+          fallecidos: 0
         };
         if (organizationId) {
-          const [gestionRes, recuperadosRes, rechazadosRes] = await Promise.all([
+          const [gestionRes, recuperadosRes, rechazadosRes, fallecidosRes] = await Promise.all([
             client.query(
               `
               SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
@@ -11982,6 +11983,19 @@ export const handler = async (event) => {
                 AND lb.organization_id = $1
               `,
               [organizationId]
+            ),
+            client.query(
+              `
+              SELECT COUNT(DISTINCT
+                COALESCE(NULLIF(c.documento,''), NULLIF(c.telefono,''), NULLIF(c.celular,''), c.id::text)
+              )::int AS total
+              FROM contacts c
+              JOIN contact_products cp ON cp.contact_id = c.id
+              WHERE cp.estado = 'baja'
+                AND UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
+                AND c.organization_id = $1
+              `,
+              [organizationId]
             )
           ]);
           const metricsTotal = Number(data?.metrics?.total ?? data?.total ?? 0);
@@ -11989,7 +12003,8 @@ export const handler = async (event) => {
             disponibles: metricsTotal,
             en_gestion: Number(gestionRes.rows[0]?.total || 0),
             recuperados: Number(recuperadosRes.rows[0]?.total || 0),
-            rechazados: Number(rechazadosRes.rows[0]?.total || 0)
+            rechazados: Number(rechazadosRes.rows[0]?.total || 0),
+            fallecidos: Number(fallecidosRes.rows[0]?.total || 0)
           };
         }
         return safeResponse({
@@ -12188,13 +12203,14 @@ export const handler = async (event) => {
         disponibles: 0,
         en_gestion: 0,
         recuperados: 0,
-        rechazados: 0
+        rechazados: 0,
+        fallecidos: 0
       };
       if (organizationId) {
         const client = createDbClient();
         await client.connect();
         try {
-          const [gestionRes, recuperadosRes, rechazadosRes] = await Promise.all([
+          const [gestionRes, recuperadosRes, rechazadosRes, fallecidosRes] = await Promise.all([
             client.query(
               `
               SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
@@ -12228,6 +12244,19 @@ export const handler = async (event) => {
                 AND lb.organization_id = $1
               `,
               [organizationId]
+            ),
+            client.query(
+              `
+              SELECT COUNT(DISTINCT
+                COALESCE(NULLIF(c.documento,''), NULLIF(c.telefono,''), NULLIF(c.celular,''), c.id::text)
+              )::int AS total
+              FROM contacts c
+              JOIN contact_products cp ON cp.contact_id = c.id
+              WHERE cp.estado = 'baja'
+                AND UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
+                AND c.organization_id = $1
+              `,
+              [organizationId]
             )
           ]);
           const metricsTotal = Number(result?.data?.metrics?.total ?? result?.data?.total ?? 0);
@@ -12235,7 +12264,8 @@ export const handler = async (event) => {
             disponibles: metricsTotal,
             en_gestion: Number(gestionRes.rows[0]?.total || 0),
             recuperados: Number(recuperadosRes.rows[0]?.total || 0),
-            rechazados: Number(rechazadosRes.rows[0]?.total || 0)
+            rechazados: Number(rechazadosRes.rows[0]?.total || 0),
+            fallecidos: Number(fallecidosRes.rows[0]?.total || 0)
           };
         } finally {
           await client.end();
