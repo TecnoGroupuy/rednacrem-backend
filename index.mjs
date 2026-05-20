@@ -15965,8 +15965,8 @@ export const handler = async (event) => {
           i += 1;
         }
       } else {
-        // Por defecto, excluir datos de recupero en creaciÃ³n de lotes (solo CSV / guÃ­a telefÃ³nica)
-        conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
+        // Por defecto, excluir datos de recupero en creación de lotes
+        conditions.push(`(LOWER(COALESCE(origen_dato, '')) <> 'recupero')`);
       }
 
       if (organizationId) {
@@ -16129,8 +16129,8 @@ export const handler = async (event) => {
           i += 1;
         }
       } else {
-        // Por defecto, excluir datos de recupero en creaciÃ³n de lotes (solo CSV / guÃ­a telefÃ³nica)
-        conditions.push(`(origen_dato IS NULL OR origen_dato = '' OR origen_dato = 'Guia telefonica')`);
+        // Por defecto, excluir datos de recupero en creación de lotes
+        conditions.push(`(LOWER(COALESCE(origen_dato, '')) <> 'recupero')`);
       }
 
       if (organizationId) {
