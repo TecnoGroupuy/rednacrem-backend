@@ -20296,6 +20296,15 @@ async function getNewContactsDistribution(client, batchId) {
 
         const audit = insertRes.rows[0];
 
+        await client.query(
+          `UPDATE lead_contact_status
+           SET estado_venta = $1,
+               updated_at = now()
+           WHERE contact_id = $2
+             AND batch_id = $3`,
+          [resultadoInput, management.contact_id, management.batch_id]
+        );
+
         return json(201, {
           ok: true,
           success: true,
