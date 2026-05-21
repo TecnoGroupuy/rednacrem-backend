@@ -3938,6 +3938,7 @@ function buildDatosTrabajarInsertBatch(
     "localidad",
     "origen_dato",
     "estado",
+    "motivo_bloqueo",
     "fecha_lead",
     "nota",
     "organization_id",
@@ -3957,6 +3958,113 @@ function buildDatosTrabajarInsertBatch(
     `,
     values
   };
+}
+
+async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId) {
+  if (!orgId) {
+    return { estado: "nuevo", motivoBloqueo: null, prevContactId: null, prevAssignedTo: null };
+  }
+
+  // 1. Duplicado dentro del mismo import
+  if (importJobId && (tel || cel)) {
+    const dup = await client.query(
+      `
+      SELECT id
+      FROM datos_para_trabajar
+      WHERE import_job_id = $1
+        AND (
+          ($2::text IS NOT NULL AND (telefono = $2 OR celular = $2))
+          OR ($3::text IS NOT NULL AND (telefono = $3 OR celular = $3))
+        )
+        AND organization_id = $4
+      LIMIT 1
+      `,
+      [importJobId, tel || null, cel || null, orgId]
+    );
+    if (dup.rows.length) {
+      return {
+        estado: "bloqueado",
+        motivoBloqueo: "duplicado",
+        prevContactId: null,
+        prevAssignedTo: null
+      };
+    }
+  }
+
+  // 2. Registro previo en datos_para_trabajar
+  if (tel || cel) {
+    const prev = await client.query(
+      `
+      SELECT d.id, lcs.estado_venta, lcs.assigned_to, u.status as vendedor_status
+      FROM datos_para_trabajar d
+      LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
+      LEFT JOIN users u ON u.id = lcs.assigned_to
+      WHERE (
+          ($1::text IS NOT NULL AND (d.telefono = $1 OR d.celular = $1))
+       OR ($2::text IS NOT NULL AND (d.telefono = $2 OR d.celular = $2))
+      )
+        AND d.organization_id = $3
+        AND coalesce(d.estado, '') <> 'inactivo'
+      ORDER BY d.created_at DESC
+      LIMIT 1
+      `,
+      [tel || null, cel || null, orgId]
+    );
+
+    if (prev.rows.length) {
+      const { id: prevId, estado_venta, assigned_to, vendedor_status } = prev.rows[0];
+      if (estado_venta === "venta") {
+        return {
+          estado: "bloqueado",
+          motivoBloqueo: "cliente_existente",
+          prevContactId: prevId,
+          prevAssignedTo: null
+        };
+      }
+      if (estado_venta === "rechazo") {
+        return {
+          estado: "bloqueado",
+          motivoBloqueo: "rechazo",
+          prevContactId: prevId,
+          prevAssignedTo: null
+        };
+      }
+      const mismoVendedor = vendedor_status === "approved" ? assigned_to : null;
+      return {
+        estado: "nuevo",
+        motivoBloqueo: null,
+        prevContactId: prevId,
+        prevAssignedTo: mismoVendedor
+      };
+    }
+  }
+
+  // 3. Lista no-llamar
+  if (tel || cel) {
+    const noCall = await client.query(
+      `
+      SELECT numero
+      FROM no_call_entries
+      WHERE ($1::text IS NOT NULL AND numero = $1)
+         OR ($2::text IS NOT NULL AND numero = $2)
+      LIMIT 1
+      `,
+      [tel || null, cel || null]
+    );
+    if (noCall.rows.length) {
+      const esMeta = origenDato && String(origenDato).toLowerCase().includes("facebook");
+      if (!esMeta) {
+        return {
+          estado: "bloqueado",
+          motivoBloqueo: "no_llamar",
+          prevContactId: null,
+          prevAssignedTo: null
+        };
+      }
+    }
+  }
+
+  return { estado: "nuevo", motivoBloqueo: null, prevContactId: null, prevAssignedTo: null };
 }
 
 export async function processRecuperoImportJob(jobId) {
@@ -4386,30 +4494,6 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
       if (cel) normalizedNumbers.add(cel);
     }
 
-    let blockedNumbers = new Set();
-    if (normalizedNumbers.size) {
-      const normalizedList = Array.from(normalizedNumbers);
-      const res = await client.query(
-        `SELECT numero FROM no_call_entries WHERE numero = ANY($1::text[])`,
-        [normalizedList]
-      );
-      blockedNumbers = new Set(res.rows.map((r) => r.numero));
-
-      const contactsRes = await client.query(
-        `
-        SELECT telefono, celular
-        FROM contacts
-        WHERE telefono = ANY($1::text[])
-           OR celular = ANY($1::text[])
-        `,
-        [normalizedList]
-      );
-      for (const row of contactsRes.rows) {
-        if (row.telefono) blockedNumbers.add(row.telefono);
-        if (row.celular) blockedNumbers.add(row.celular);
-      }
-    }
-
     const maxMillis = options.maxMillis ?? null;
     const startedAt = Date.now();
     const batchSize = options.batchSize ?? 200;
@@ -4420,10 +4504,24 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
     for (let i = index; i < rows.length; i += 1) {
       const row = rows[i];
-      const tel = normalizeUyNumber(row.telefono);
-      const cel = normalizeUyNumber(row.celular);
-      const isBlocked =
-        (tel && blockedNumbers.has(tel)) || (cel && blockedNumbers.has(cel));
+      const tel = normalizeUyNumber(row.telefono) || null;
+      const cel = normalizeUyNumber(row.celular) || null;
+
+      const evalRes = await evaluarEstadoLead(
+        client,
+        tel,
+        cel,
+        row.origen_dato || null,
+        orgId,
+        importJobId
+      );
+
+      if (evalRes.estado === "nuevo" && evalRes.prevContactId) {
+        await client.query(
+          `UPDATE datos_para_trabajar SET estado = 'inactivo', updated_at = now() WHERE id = $1`,
+          [evalRes.prevContactId]
+        );
+      }
 
       const fechaLead = row.fecha_lead ? (parseDate(row.fecha_lead) || row.fecha_lead) : null;
       console.log('[debug email]', row.correo_electronico, row.email, JSON.stringify(Object.keys(row)));
@@ -4432,19 +4530,20 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         row.apellido || null,
         row.documento || null,
         row.fecha_nacimiento || null,
-        row.telefono || null,
-        row.celular || null,
+        tel,
+        cel,
         row.correo_electronico || row.email || null,
         row.direccion || null,
         row.departamento || null,
         row.localidad || null,
         row.origen_dato || null,
-        isBlocked ? "bloqueado" : "nuevo",
+        evalRes.estado,
+        evalRes.motivoBloqueo,
         fechaLead,
         row.nota || null
       ]);
 
-      if (isBlocked) blocked += 1;
+      if (evalRes.estado === "bloqueado") blocked += 1;
       inserted += 1;
       index += 1;
 
@@ -8475,49 +8574,20 @@ export const handler = async (event) => {
           return n.replace(/^\+598/, '').replace(/^598/, '').replace(/^0/, '');
         };
 
-        const telefonoNorm = normalizeForCompare(telefono);
-        const celularNorm = normalizeForCompare(celular);
+        const orgId = body?.organization_id || defaultOrgId;
+        const batchName = body?.batch_name || "Meta";
 
-        // 1. Detectar si ya es cliente en contacts
-        let isClient = false;
-        if (telefonoNorm || celularNorm || email) {
-          const clientRes = await client.query(
-            `SELECT id FROM contacts
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [defaultOrgId, telefonoNorm, celularNorm, email]
-          );
-          if (clientRes.rows.length) isClient = true;
-        }
+        const evalRes = await evaluarEstadoLead(
+          client,
+          telefono || null,
+          celular || null,
+          origenDato,
+          orgId,
+          null
+        );
 
-        // 2. Detectar duplicado solo si no es cliente
-        let isDuplicate = false;
-        if (!isClient && (telefonoNorm || celularNorm || email)) {
-          const dupRes = await client.query(
-            `SELECT id FROM datos_para_trabajar
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [defaultOrgId, telefonoNorm, celularNorm, email]
-          );
-          if (dupRes.rows.length) isDuplicate = true;
-        }
-
-        const estado = (isDuplicate || isClient) ? "bloqueado" : "nuevo";
-        const motivoBloqueo = isClient ? "cliente_existente" : isDuplicate ? "duplicado" : null;
+        const estado = evalRes.estado;
+        const motivoBloqueo = evalRes.motivoBloqueo;
 
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
@@ -8533,14 +8603,20 @@ export const handler = async (event) => {
           [
             nombre, apellido, telefono, celular,
             email, fechaNacimiento,
-            origenDato, estado, defaultOrgId,
+            origenDato, estado, orgId,
             nota, localidad, departamento, fechaLead, motivoBloqueo
           ]
         );
         const leadId = insertRes.rows[0]?.id;
+
+        if (estado === "nuevo" && evalRes.prevContactId) {
+          await client.query(
+            `UPDATE datos_para_trabajar SET estado = 'inactivo', updated_at = now() WHERE id = $1`,
+            [evalRes.prevContactId]
+          );
+        }
+
         if (leadId && estado === "nuevo") {
-          const batchName = body?.batch_name || 'Meta';
-          const orgId = body?.organization_id || defaultOrgId;
           const batchRes = await client.query(
             `SELECT id FROM lead_batches
              WHERE nombre = $1
@@ -8570,7 +8646,9 @@ export const handler = async (event) => {
             );
             const sellers = sellersRes.rows.map((r) => r.seller_id);
 
-            const assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
+            const assignedTo = evalRes.prevAssignedTo
+              ? evalRes.prevAssignedTo
+              : await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
             await client.query(
               `INSERT INTO lead_contact_status (
@@ -8584,7 +8662,7 @@ export const handler = async (event) => {
             );
           }
         }
-        responseData = { ok: true, id: leadId, estado, isDuplicate, isClient };
+        responseData = { ok: true, id: leadId, estado };
       } catch (dbError) {
         console.error("[DB_ERROR]", dbError?.message);
         responseData = { ok: false, error: dbError?.message };
@@ -8662,49 +8740,17 @@ export const handler = async (event) => {
           return n.replace(/^\+598/, "").replace(/^598/, "").replace(/^0/, "");
         };
 
-        const telefonoNorm = normalizeForCompare(telefono);
-        const celularNorm = normalizeForCompare(celular);
+        const evalRes = await evaluarEstadoLead(
+          client,
+          telefono || null,
+          celular || null,
+          origenDato,
+          orgId,
+          null
+        );
 
-        // 1. Detectar si ya es cliente en contacts
-        let isClient = false;
-        if (telefonoNorm || celularNorm || email) {
-          const clientRes = await client.query(
-            `SELECT id FROM contacts
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [orgId, telefonoNorm, celularNorm, email]
-          );
-          if (clientRes.rows.length) isClient = true;
-        }
-
-        // 2. Detectar duplicados en datos_para_trabajar
-        let isDuplicate = false;
-        if (!isClient && (telefonoNorm || celularNorm || email)) {
-          const dupRes = await client.query(
-            `SELECT id FROM datos_para_trabajar
-             WHERE organization_id = $1
-               AND (
-                 ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($2::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $2)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(telefono, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($3::text IS NOT NULL AND regexp_replace(regexp_replace(regexp_replace(celular, '^\\+598', ''), '^598', ''), '^0', '') = $3)
-                 OR ($4::text IS NOT NULL AND lower(email) = lower($4))
-               )
-             LIMIT 1`,
-            [orgId, telefonoNorm, celularNorm, email]
-          );
-          if (dupRes.rows.length) isDuplicate = true;
-        }
-
-        const estado = isDuplicate || isClient ? "bloqueado" : "nuevo";
-        const motivoBloqueo = isClient ? "cliente_existente" : isDuplicate ? "duplicado" : null;
+        const estado = evalRes.estado;
+        const motivoBloqueo = evalRes.motivoBloqueo;
 
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
@@ -8739,6 +8785,14 @@ export const handler = async (event) => {
           ]
         );
         const leadId = insertRes.rows[0]?.id;
+
+        if (estado === "nuevo" && evalRes.prevContactId) {
+          await client.query(
+            `UPDATE datos_para_trabajar SET estado = 'inactivo', updated_at = now() WHERE id = $1`,
+            [evalRes.prevContactId]
+          );
+        }
+
         if (leadId && estado === "nuevo") {
           const batchRes = await client.query(
             `SELECT id FROM lead_batches
@@ -8769,7 +8823,9 @@ export const handler = async (event) => {
             );
             const sellers = sellersRes.rows.map((r) => r.seller_id);
 
-            const assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
+            const assignedTo = evalRes.prevAssignedTo
+              ? evalRes.prevAssignedTo
+              : await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
             await client.query(
               `INSERT INTO lead_contact_status (
@@ -8783,7 +8839,7 @@ export const handler = async (event) => {
             );
           }
         }
-        responseData = { ok: true, id: leadId, estado, isDuplicate, isClient };
+        responseData = { ok: true, id: leadId, estado };
       } catch (dbError) {
         console.error("[DB_ERROR]", dbError?.message);
         responseData = { ok: false, error: dbError?.message };
