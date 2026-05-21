@@ -4045,13 +4045,13 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
       `
       SELECT c.id
       FROM contacts c
-      JOIN sales s ON s.contact_id = c.id OR s.titular_contact_id = c.id
+      JOIN contact_products cp ON cp.contact_id = c.id
       WHERE (
           ($1::text IS NOT NULL AND (c.telefono = $1 OR c.celular = $1))
        OR ($2::text IS NOT NULL AND (c.telefono = $2 OR c.celular = $2))
       )
         AND c.organization_id = $3
-        AND s.status = 'alta'
+        AND cp.estado = 'alta'
       LIMIT 1
       `,
       [tel || null, cel || null, orgId]
