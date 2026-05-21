@@ -19088,6 +19088,7 @@ async function getNewContactsDistribution(client, batchId) {
             d.email,
             d.fecha_nacimiento,
             d.estado,
+            d.motivo_bloqueo,
             d.origen_dato,
             d.created_at,
             lcs.estado_venta,
