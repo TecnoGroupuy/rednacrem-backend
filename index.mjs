@@ -4004,7 +4004,10 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
        OR ($2::text IS NOT NULL AND (d.telefono = $2 OR d.celular = $2))
       )
         AND d.organization_id = $3
-        AND coalesce(d.estado, '') <> 'inactivo'
+        AND NOT (
+          coalesce(d.estado, '') = 'bloqueado'
+          AND coalesce(d.motivo_bloqueo, '') = 'reemplazado'
+        )
       ORDER BY d.created_at DESC
       LIMIT 1
       `,
@@ -4545,7 +4548,11 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
       if (evalRes.estado === "nuevo" && evalRes.prevContactId) {
         await client.query(
-          `UPDATE datos_para_trabajar SET estado = 'inactivo', updated_at = now() WHERE id = $1`,
+          `UPDATE datos_para_trabajar
+           SET estado = 'bloqueado',
+               motivo_bloqueo = 'reemplazado',
+               updated_at = now()
+           WHERE id = $1`,
           [evalRes.prevContactId]
         );
       }
@@ -8638,7 +8645,11 @@ export const handler = async (event) => {
 
         if (estado === "nuevo" && evalRes.prevContactId) {
           await client.query(
-            `UPDATE datos_para_trabajar SET estado = 'inactivo', updated_at = now() WHERE id = $1`,
+            `UPDATE datos_para_trabajar
+             SET estado = 'bloqueado',
+                 motivo_bloqueo = 'reemplazado',
+                 updated_at = now()
+             WHERE id = $1`,
             [evalRes.prevContactId]
           );
         }
@@ -8815,7 +8826,11 @@ export const handler = async (event) => {
 
         if (estado === "nuevo" && evalRes.prevContactId) {
           await client.query(
-            `UPDATE datos_para_trabajar SET estado = 'inactivo', updated_at = now() WHERE id = $1`,
+            `UPDATE datos_para_trabajar
+             SET estado = 'bloqueado',
+                 motivo_bloqueo = 'reemplazado',
+                 updated_at = now()
+             WHERE id = $1`,
             [evalRes.prevContactId]
           );
         }
