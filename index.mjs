@@ -14881,6 +14881,85 @@ export const handler = async (event) => {
           validationErrors.push({ field: "estado_venta", message: "Estado no existe en catï¿½logo" });
         }
 
+        // Validaciones extra para venta: evitar duplicar ventas / clientes ya activos
+        if (resultadoInput === "venta") {
+          const leadRes = await client.query(
+            `
+            SELECT id, organization_id, nombre, telefono, celular, documento
+            FROM datos_para_trabajar
+            WHERE id = $1
+            LIMIT 1
+            `,
+            [leadId]
+          );
+          const lead = leadRes.rows[0] || null;
+          const leadOrgId = lead?.organization_id || organizationId || null;
+          const leadNombre = lead?.nombre || null;
+          const leadTelefono = lead?.telefono || null;
+          const leadCelular = lead?.celular || null;
+          const leadDocumento = lead?.documento || null;
+
+          // 1) Cliente ya activo (contact_products.estado='alta') por match de teléfono/celular
+          const clienteActivoRes = await client.query(
+            `
+            SELECT cp.id
+            FROM contacts c
+            JOIN contact_products cp ON cp.contact_id = c.id
+            WHERE cp.estado = 'alta'
+              AND ($1::uuid IS NULL OR c.organization_id = $1)
+              AND (
+                ($2::text IS NOT NULL AND (
+                  regexp_replace(coalesce(c.telefono,''), '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g')
+                  OR regexp_replace(coalesce(c.celular,''), '\\D', '', 'g') = regexp_replace($2, '\\D', '', 'g')
+                ))
+                OR ($3::text IS NOT NULL AND (
+                  regexp_replace(coalesce(c.telefono,''), '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g')
+                  OR regexp_replace(coalesce(c.celular,''), '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g')
+                ))
+              )
+            LIMIT 1
+            `,
+            [leadOrgId, leadTelefono, leadCelular]
+          );
+          if (clienteActivoRes.rows.length) {
+            await client.query("ROLLBACK");
+            return json(409, {
+              ok: false,
+              error: "El contacto ya tiene un producto activo. No se puede registrar una nueva venta."
+            });
+          }
+
+          // 2) Venta duplicada por documento o telefono+nombre (misma organizacion) mirando estado_venta previo 'venta'
+          const ventaDuplicadaRes = await client.query(
+            `
+            SELECT d2.id
+            FROM datos_para_trabajar d2
+            JOIN lead_contact_status lcs2 ON lcs2.contact_id = d2.id
+            WHERE d2.organization_id = $1
+              AND d2.id <> $2
+              AND lcs2.estado_venta = 'venta'
+              AND (
+                ($3::text IS NOT NULL AND d2.documento = $3)
+                OR (
+                  $4::text IS NOT NULL
+                  AND regexp_replace(coalesce(d2.telefono, d2.celular, ''), '\\D', '', 'g') = regexp_replace($4, '\\D', '', 'g')
+                  AND $5::text IS NOT NULL
+                  AND lower(trim(d2.nombre)) = lower(trim($5))
+                )
+              )
+            LIMIT 1
+            `,
+            [leadOrgId, leadId, leadDocumento, leadTelefono || leadCelular, leadNombre]
+          );
+          if (ventaDuplicadaRes.rows.length) {
+            await client.query("ROLLBACK");
+            return json(409, {
+              ok: false,
+              error: "Ya existe una venta registrada para este contacto."
+            });
+          }
+        }
+
         if (resultadoInput === "seguimiento" && !fechaAgenda) {
           validationErrors.push({ field: "fecha_agenda", message: "fecha_agenda requerida para seguimiento" });
         }
