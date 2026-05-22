@@ -12728,6 +12728,7 @@ export const handler = async (event) => {
               contact_id,
               batch_id,
               assigned_to,
+              organization_id,
               estado_venta,
               intentos,
               ultimo_intento_at,
@@ -12738,6 +12739,7 @@ export const handler = async (event) => {
               UNNEST($1::uuid[]),
               $2,
               $3,
+              $4,
               'nuevo',
               0,
               NULL,
@@ -12749,9 +12751,10 @@ export const handler = async (event) => {
               batch_id = EXCLUDED.batch_id,
               estado_venta = COALESCE(lead_contact_status.estado_venta, 'nuevo'),
               intentos = COALESCE(lead_contact_status.intentos, 0),
+              organization_id = COALESCE(EXCLUDED.organization_id, lead_contact_status.organization_id),
               updated_at = now()
             `,
-            [dptIds, batchId, assignedSellerId]
+            [dptIds, batchId, assignedSellerId, organizationId]
           );
         }
 
