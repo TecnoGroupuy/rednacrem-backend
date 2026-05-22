@@ -13418,6 +13418,7 @@ export const handler = async (event) => {
           LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           LEFT JOIN contacts c ON c.id = d.contact_id
           WHERE lcs.assigned_to = $1
+            AND COALESCE(lcs.estado_venta, '') != 'bloqueado'
             AND lb.estado IN ('activo', 'asignado')
             AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')
             AND ($2::text IS NULL OR lb.tipo = $2)
@@ -13523,6 +13524,7 @@ export const handler = async (event) => {
             LIMIT 1
           ) prod ON true
           WHERE lcs.assigned_to = $1
+            AND COALESCE(lcs.estado_venta, '') != 'bloqueado'
             AND lb.estado IN ('activo', 'asignado')
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($7::text IS NULL OR lb.tipo != $7)
