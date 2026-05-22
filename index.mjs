@@ -4586,6 +4586,22 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
           emailColumn
         });
         await client.query(sql, values);
+        if (importJobId && orgId) {
+          await client.query(
+            `
+            UPDATE lead_contact_status lcs
+            SET estado_venta = 'bloqueado',
+                updated_at = now()
+            FROM datos_para_trabajar d
+            WHERE d.import_job_id = $1
+              AND d.organization_id = $2
+              AND d.estado = 'bloqueado'
+              AND lcs.contact_id = d.id
+              AND lcs.estado_venta = 'nuevo'
+            `,
+            [importJobId, orgId]
+          );
+        }
         buffer = [];
       }
 
@@ -4595,6 +4611,22 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
             emailColumn
           });
           await client.query(sql, values);
+          if (importJobId && orgId) {
+            await client.query(
+              `
+              UPDATE lead_contact_status lcs
+              SET estado_venta = 'bloqueado',
+                  updated_at = now()
+              FROM datos_para_trabajar d
+              WHERE d.import_job_id = $1
+                AND d.organization_id = $2
+                AND d.estado = 'bloqueado'
+                AND lcs.contact_id = d.id
+                AND lcs.estado_venta = 'nuevo'
+              `,
+              [importJobId, orgId]
+            );
+          }
         }
         await client.query(
           `
@@ -4622,6 +4654,22 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         emailColumn
       });
       await client.query(sql, values);
+      if (importJobId && orgId) {
+        await client.query(
+          `
+          UPDATE lead_contact_status lcs
+          SET estado_venta = 'bloqueado',
+              updated_at = now()
+          FROM datos_para_trabajar d
+          WHERE d.import_job_id = $1
+            AND d.organization_id = $2
+            AND d.estado = 'bloqueado'
+            AND lcs.contact_id = d.id
+            AND lcs.estado_venta = 'nuevo'
+          `,
+          [importJobId, orgId]
+        );
+      }
     }
 
     await client.query(
