@@ -9440,6 +9440,7 @@ export const handler = async (event) => {
         const hasRelation = await columnExists(client, "sales", "relation");
         const hasProductId = await columnExists(client, "sales", "product_id");
         const hasContactProductProductId = await columnExists(client, "contact_products", "product_id");
+        const hasContactProductOrgId = await columnExists(client, "contact_products", "organization_id");
 
         const createManagementInContacts = false;
 
@@ -9464,6 +9465,59 @@ export const handler = async (event) => {
               organizationId ? [fields.documento, organizationId] : [fields.documento]
             );
             existingId = existingRes.rows[0]?.id || null;
+          }
+
+          if (!existingId) {
+            const telDigits = normalizePhoneDigits(fields.telefono || "");
+            const celDigits = normalizePhoneDigits(fields.celular || "");
+            if (telDigits || celDigits) {
+              const existingRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE ($1::uuid IS NULL OR organization_id = $1)
+                  AND (
+                    ($2::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $2
+                    ))
+                    OR ($3::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $3
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3
+                    ))
+                  )
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                `,
+                [organizationId || null, telDigits || "", celDigits || ""]
+              );
+              existingId = existingRes.rows[0]?.id || null;
+
+              if (existingId) {
+                const activeValues = [existingId];
+                const withOrg = Boolean(hasContactProductOrgId && organizationId);
+                const orgClause = withOrg ? "AND organization_id = $2" : "";
+                if (withOrg) activeValues.push(organizationId);
+                const activeRes = await client.query(
+                  `
+                  SELECT 1
+                  FROM contact_products
+                  WHERE contact_id = $1
+                    AND estado = 'alta'
+                    ${orgClause}
+                  LIMIT 1
+                  `,
+                  activeValues
+                );
+                if (activeRes.rows.length) {
+                  return {
+                    id: null,
+                    fields,
+                    error: { status: 409, message: "Este contacto ya tiene un producto activo" }
+                  };
+                }
+              }
+            }
           }
 
           if (existingId) {
@@ -9800,6 +9854,10 @@ export const handler = async (event) => {
         const managementLog = [];
 
         const main = await upsertContact(contactPayload);
+        if (main?.error) {
+          await client.query("ROLLBACK");
+          return json(main.error.status || 400, { ok: false, message: main.error.message });
+        }
         if (!main.id) {
           await client.query("ROLLBACK");
           return json(422, { ok: false, message: "Nombre y apellido son requeridos" });
