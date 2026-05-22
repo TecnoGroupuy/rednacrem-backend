@@ -12464,10 +12464,18 @@ export const handler = async (event) => {
               lb.criterios,
               lb.seller_id,
               lb.asignado_a,
-              COUNT(lbc.id) AS cantidad,
+              COUNT(DISTINCT lbc.id) AS cantidad,
+              COUNT(DISTINCT lcs.contact_id) AS total_contactos,
+              COUNT(DISTINCT CASE WHEN lcs.estado_venta != 'nuevo' THEN lcs.contact_id END) AS gestionado,
+              COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'venta' THEN lcs.contact_id END) AS ventas,
+              COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'rechazo' THEN lcs.contact_id END) AS rechazos,
+              COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'no_contesta' THEN lcs.contact_id END) AS no_contesta,
+              COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'dato_erroneo' THEN lcs.contact_id END) AS dato_erroneo,
+              COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'nuevo' THEN lcs.contact_id END) AS nuevos,
               COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
             FROM lead_batches lb
             LEFT JOIN lead_batch_contacts lbc ON lbc.batch_id = lb.id
+            LEFT JOIN lead_contact_status lcs ON lcs.batch_id = lb.id
             LEFT JOIN users u ON u.id = COALESCE(lb.seller_id, lb.asignado_a)
             WHERE lb.tipo = 'recupero'
               AND lb.organization_id = $3
@@ -12498,6 +12506,13 @@ export const handler = async (event) => {
             created_at: row.created_at,
             cantidad: Number(row.cantidad || 0),
             cantidad_datos: Number(row.cantidad || 0),
+            total_contactos: Number(row.total_contactos || 0),
+            gestionado: Number(row.gestionado || 0),
+            ventas: Number(row.ventas || 0),
+            rechazos: Number(row.rechazos || 0),
+            no_contesta: Number(row.no_contesta || 0),
+            dato_erroneo: Number(row.dato_erroneo || 0),
+            nuevos: Number(row.nuevos || 0),
             configuracion: row.criterios,
             criterios: row.criterios,
             vendedor_asignado_id: row.seller_id || row.asignado_a || null,
