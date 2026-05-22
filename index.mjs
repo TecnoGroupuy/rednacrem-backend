@@ -8654,6 +8654,19 @@ export const handler = async (event) => {
           );
         }
 
+        if (leadId && estado === "bloqueado") {
+          await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'bloqueado',
+                updated_at = now()
+            WHERE contact_id = $1
+              AND estado_venta = 'nuevo'
+            `,
+            [leadId]
+          );
+        }
+
         if (leadId && estado === "nuevo") {
           const batchRes = await client.query(
             `SELECT id FROM lead_batches
@@ -8823,6 +8836,19 @@ export const handler = async (event) => {
           ]
         );
         const leadId = insertRes.rows[0]?.id;
+
+        if (leadId && estado === "bloqueado") {
+          await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'bloqueado',
+                updated_at = now()
+            WHERE contact_id = $1
+              AND estado_venta = 'nuevo'
+            `,
+            [leadId]
+          );
+        }
 
         if (estado === "nuevo" && evalRes.prevContactId) {
           await client.query(
