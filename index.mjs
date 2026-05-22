@@ -8393,6 +8393,9 @@ export const handler = async (event) => {
   const clientMedioPagoMatch = path.match(/\/clients\/([^/]+)\/medio-pago$/);
   const clientProductoMatch = path.match(/\/clients\/([^/]+)\/producto$/);
   const contactDetailMatch = path.match(/\/contacts\/([^/]+)$/);
+  const contactProductBajaMatch =
+    path.match(/\/api\/contacts\/([^/]+)\/products\/([^/]+)\/baja$/) ||
+    path.match(/\/contacts\/([^/]+)\/products\/([^/]+)\/baja$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
@@ -11670,6 +11673,206 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to update producto", error: error.message });
+    }
+  }
+
+  if (method === "POST" && contactProductBajaMatch) {
+    const contactId = contactProductBajaMatch[1];
+    const productId = contactProductBajaMatch[2];
+    const bodyRaw = safeParseBody(event);
+    if (!contactId || !productId) {
+      return json(400, { ok: false, message: "contactId y productId requeridos" });
+    }
+    if (!isValidUuid(contactId) || !isValidUuid(productId)) {
+      return json(400, { ok: false, message: "contactId o productId inválido" });
+    }
+    if (bodyRaw === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      if (!["supervisor", "superadministrador"].includes(dbUser?.role_key)) {
+        return json(403, { ok: false, message: "Forbidden" });
+      }
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+      const motivoBaja = normalizeText(body?.motivo_baja) || null;
+      const motivoBajaDetalle = normalizeText(body?.motivo_baja_detalle) || null;
+      const observacion = normalizeText(body?.observacion) || null;
+      const fechaBaja = normalizeText(body?.fecha_baja) || null;
+
+      const ALLOWED_MOTIVOS = [
+        "Sin liquidez",
+        "Error en el pago",
+        "Baja por auditoria",
+        "Cuenta con otro servicio",
+        "Baja"
+      ];
+      if (!motivoBaja || !ALLOWED_MOTIVOS.includes(motivoBaja)) {
+        return json(400, { ok: false, message: "motivo_baja inválido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const contactRes = await client.query(
+          `SELECT id FROM contacts WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [contactId, organizationId]
+        );
+        if (!contactRes.rows.length) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Contacto no encontrado" });
+        }
+
+        const cpCols = await getTableColumns(client, "contact_products");
+        const cpOrgClause = cpCols.has("organization_id") ? "AND organization_id = $3" : "";
+        const cpValues = cpCols.has("organization_id")
+          ? [productId, contactId, organizationId]
+          : [productId, contactId];
+        const cpRes = await client.query(
+          `
+          SELECT id, estado
+          FROM contact_products
+          WHERE id = $1
+            AND contact_id = $2
+            ${cpOrgClause}
+          LIMIT 1
+          `,
+          cpValues
+        );
+        const cpRow = cpRes.rows[0] || null;
+        if (!cpRow) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Producto del contacto no encontrado" });
+        }
+        if (String(cpRow.estado || "").toLowerCase() === "baja") {
+          await client.query("ROLLBACK");
+          return json(409, { ok: false, message: "El producto ya está en baja" });
+        }
+
+        const updateValues = [motivoBaja, observacion || motivoBajaDetalle || null, productId, contactId];
+        let updateOrgClause = "";
+        if (cpCols.has("organization_id")) {
+          updateValues.push(organizationId);
+          updateOrgClause = `AND organization_id = $${updateValues.length}`;
+        }
+        await client.query(
+          `
+          UPDATE contact_products
+          SET
+            estado = 'baja',
+            motivo_baja = $1,
+            motivo_baja_detalle = $2,
+            fecha_baja = now()::date,
+            updated_at = now()
+          WHERE id = $3
+            AND contact_id = $4
+            ${updateOrgClause}
+          `,
+          updateValues
+        );
+
+        // Auditoría: crear ticket manual finalizado + closure (sin pasar por el flujo UI)
+        const actorName = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.id;
+        const ticketCols = await getTableColumns(client, "manual_tickets");
+        const ticketColumns = [];
+        const ticketParams = [];
+        const ticketValues = [];
+        let p = 1;
+        const pushTicketCol = (col, val) => {
+          if (!ticketCols.has(col)) return;
+          ticketColumns.push(col);
+          ticketParams.push(`$${p}`);
+          ticketValues.push(val ?? null);
+          p += 1;
+        };
+        pushTicketCol("cliente_id", contactId);
+        pushTicketCol("tipo_solicitud", "solicitud_baja");
+        pushTicketCol("tipo_solicitud_manual", "baja_manual");
+        pushTicketCol("resumen", `Baja manual producto ${productId}`);
+        pushTicketCol("prioridad", "media");
+        pushTicketCol("estado", "finalizada");
+        pushTicketCol("producto_contrato_id", productId);
+        pushTicketCol("organization_id", organizationId);
+        const ticketIns = await client.query(
+          `
+          INSERT INTO manual_tickets (${ticketColumns.join(", ")})
+          VALUES (${ticketParams.join(", ")})
+          RETURNING id
+          `,
+          ticketValues
+        );
+        const ticketId = ticketIns.rows[0]?.id || null;
+
+        const closureCols = await getTableColumns(client, "manual_ticket_closures");
+        if (ticketId && closureCols.size) {
+          const closureColumns = [];
+          const closureParams = [];
+          const closureValues = [];
+          let c = 1;
+          const pushClosureCol = (col, val) => {
+            if (!closureCols.has(col)) return;
+            closureColumns.push(col);
+            closureParams.push(`$${c}`);
+            closureValues.push(val ?? null);
+            c += 1;
+          };
+          pushClosureCol("ticket_id", ticketId);
+          pushClosureCol("resultado", "baja_confirmada");
+          pushClosureCol("usuario", actorName);
+          pushClosureCol("note", [
+            `motivo_baja=${motivoBaja}`,
+            fechaBaja ? `fecha_baja_input=${fechaBaja}` : null,
+            observacion ? `obs=${observacion}` : null
+          ]
+            .filter(Boolean)
+            .join(" | "));
+          if (closureColumns.length) {
+            await client.query(
+              `
+              INSERT INTO manual_ticket_closures (${closureColumns.join(", ")})
+              VALUES (${closureParams.join(", ")})
+              `,
+              closureValues
+            );
+          }
+        }
+
+        await client.query("COMMIT");
+        return json(200, { ok: true });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to baja producto", error: error.message });
     }
   }
 
