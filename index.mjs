@@ -11720,9 +11720,7 @@ export const handler = async (event) => {
 
       const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
       const motivoBaja = normalizeText(body?.motivo_baja) || null;
-      const motivoBajaDetalle = normalizeText(body?.motivo_baja_detalle) || null;
       const observacion = normalizeText(body?.observacion) || null;
-      const fechaBaja = normalizeText(body?.fecha_baja) || null;
 
       const ALLOWED_MOTIVOS = [
         "Sin liquidez",
@@ -11772,10 +11770,10 @@ export const handler = async (event) => {
         }
         if (String(cpRow.estado || "").toLowerCase() === "baja") {
           await client.query("ROLLBACK");
-          return json(409, { ok: false, message: "El producto ya está en baja" });
+          return json(409, { ok: false, message: "Este producto ya está dado de baja" });
         }
 
-        const updateValues = [motivoBaja, observacion || motivoBajaDetalle || null, productId, contactId];
+        const updateValues = [motivoBaja, observacion || null, productId, contactId];
         let updateOrgClause = "";
         if (cpCols.has("organization_id")) {
           updateValues.push(organizationId);
@@ -11788,7 +11786,7 @@ export const handler = async (event) => {
             estado = 'baja',
             motivo_baja = $1,
             motivo_baja_detalle = $2,
-            fecha_baja = now()::date,
+            fecha_baja = now(),
             updated_at = now()
           WHERE id = $3
             AND contact_id = $4
@@ -11796,6 +11794,28 @@ export const handler = async (event) => {
           `,
           updateValues
         );
+
+        // Auditoría (tabla dedicada): registrar quién dio de baja y cuándo
+        try {
+          await client.query(
+            `
+            INSERT INTO contact_product_baja_audit (
+              contact_id,
+              product_id,
+              motivo_baja,
+              observacion,
+              fecha_baja,
+              user_id,
+              organization_id
+            )
+            VALUES ($1, $2, $3, $4, now(), $5, $6)
+            `,
+            [contactId, productId, motivoBaja, observacion || null, dbUser?.id || null, organizationId]
+          );
+        } catch (auditError) {
+          // No romper el flujo por falta de tabla/permisos en auditoría
+          console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
+        }
 
         // Auditoría: crear ticket manual finalizado + closure (sin pasar por el flujo UI)
         const actorName = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.id;
@@ -11847,7 +11867,6 @@ export const handler = async (event) => {
           pushClosureCol("usuario", actorName);
           pushClosureCol("note", [
             `motivo_baja=${motivoBaja}`,
-            fechaBaja ? `fecha_baja_input=${fechaBaja}` : null,
             observacion ? `obs=${observacion}` : null
           ]
             .filter(Boolean)
