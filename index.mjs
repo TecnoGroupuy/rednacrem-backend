@@ -11749,6 +11749,7 @@ export const handler = async (event) => {
     }
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      const userId = dbUser?.id || null;
 
       let authError = requireAuthenticated(event, authUser);
       if (authError) return authError;
@@ -20783,7 +20784,7 @@ async function getNewContactsDistribution(client, batchId) {
             management.resultado,
             resultadoInput,
             motivo,
-            dbUser.id
+            userId
           ]
         );
 
@@ -20798,6 +20799,21 @@ async function getNewContactsDistribution(client, batchId) {
            WHERE contact_id = $2
              AND batch_id = $3`,
           [resultadoInput, management.contact_id, management.batch_id]
+        );
+
+        await client.query(
+          `
+          INSERT INTO lead_management_history
+            (contact_id, batch_id, user_id, resultado, nota, fecha_gestion)
+          VALUES ($1, $2, $3, $4, $5, NOW())
+          `,
+          [
+            management.contact_id,
+            management.batch_id,
+            userId,
+            resultadoInput,
+            "Corrección de codificación por supervisor"
+          ]
         );
 
         return json(201, {
