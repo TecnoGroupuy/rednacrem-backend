@@ -15626,6 +15626,12 @@ export const handler = async (event) => {
 
       const whereClause = `WHERE ${whereParts.join(" AND ")}`;
       try {
+        const hasSupervisorCorrectionColumn = await columnExists(
+          client,
+          "lead_management_history",
+          "es_correccion_supervisor"
+        );
+
         const res = await client.query(
           `
           SELECT
@@ -15651,6 +15657,7 @@ export const handler = async (event) => {
             lcs.intentos,
             lcs.estado_venta,
             reasig.nota AS reasignado_desde,
+            ultima_gestion.fecha_gestion AS ultima_fecha_gestion,
             (
               SELECT lmh.resultado
               FROM lead_management_history lmh
@@ -15686,6 +15693,15 @@ export const handler = async (event) => {
             ORDER BY lmh_r.fecha_gestion DESC
             LIMIT 1
           ) reasig ON true
+          LEFT JOIN LATERAL (
+            SELECT fecha_gestion, nota
+            FROM lead_management_history lmh
+            WHERE lmh.contact_id = a.contact_id
+              AND lmh.batch_id = a.batch_id
+              ${hasSupervisorCorrectionColumn ? "AND COALESCE(lmh.es_correccion_supervisor, false) = false" : ""}
+            ORDER BY lmh.fecha_gestion DESC
+            LIMIT 1
+          ) ultima_gestion ON true
           ${whereClause}
           ORDER BY a.fecha_agenda DESC
           `,
