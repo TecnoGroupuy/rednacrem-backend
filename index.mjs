@@ -13438,6 +13438,8 @@ export const handler = async (event) => {
       let tabWhere = "";
       if (tabNormalized === "nuevo") {
         tabWhere = "AND (lcs.intentos = 0 OR lcs.ultimo_intento_at IS NULL)";
+      } else if (tabNormalized === "rellamar") {
+        tabWhere = "AND lcs.estado_venta IN ('rellamar')";
       } else if (tabNormalized === "seguimiento") {
         tabWhere = "AND lcs.estado_venta IN ('seguimiento', 'interesado')";
       } else if (tabNormalized === "no_contesta") {
