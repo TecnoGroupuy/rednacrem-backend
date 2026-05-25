@@ -6461,6 +6461,15 @@ async function fetchCodificaciones(client, {
   const whereParts = [];
   const values = [];
 
+    const hasSupervisorCorrectionColumn = await columnExists(
+      client,
+      "lead_management_history",
+      "es_correccion_supervisor"
+    );
+    if (hasSupervisorCorrectionColumn) {
+      whereParts.push(`lmh.es_correccion_supervisor IS NOT TRUE`);
+    }
+
     if (sellerId) {
       values.push(sellerId);
       whereParts.push(`lmh.user_id = $${values.length}`);
@@ -15045,10 +15054,19 @@ export const handler = async (event) => {
       try {
         const hasMgmtId = await columnExists(client, "lead_management_history", "id");
         const hasMgmtOrgId = await columnExists(client, "lead_management_history", "organization_id");
+        const hasSupervisorCorrectionColumn = await columnExists(
+          client,
+          "lead_management_history",
+          "es_correccion_supervisor"
+        );
 
         const orgClause = hasMgmtOrgId
           ? "AND ($2::uuid IS NULL OR lmh.organization_id = $2::uuid)"
           : "AND ($2::uuid IS NULL OR lb.organization_id = $2::uuid)";
+
+        const supervisorCorrectionClause = hasSupervisorCorrectionColumn
+          ? "AND lmh.es_correccion_supervisor IS NOT TRUE"
+          : "";
 
         const result = await client.query(
           `
@@ -15069,6 +15087,7 @@ export const handler = async (event) => {
           LEFT JOIN users u ON u.id = lmh.user_id
           WHERE lmh.contact_id = $1
           ${orgClause}
+          ${supervisorCorrectionClause}
           ORDER BY lmh.fecha_gestion DESC
           LIMIT 50
           `,
@@ -20803,11 +20822,19 @@ async function getNewContactsDistribution(client, batchId) {
           [resultadoInput, management.contact_id, management.batch_id]
         );
 
+        const hasSupervisorCorrectionColumn = await columnExists(
+          client,
+          "lead_management_history",
+          "es_correccion_supervisor"
+        );
+
         await client.query(
           `
           INSERT INTO lead_management_history
-            (contact_id, batch_id, user_id, resultado, nota, fecha_gestion)
-          VALUES ($1, $2, $3, $4, $5, NOW())
+            (contact_id, batch_id, user_id, resultado, nota, fecha_gestion${
+              hasSupervisorCorrectionColumn ? ", es_correccion_supervisor" : ""
+            })
+          VALUES ($1, $2, $3, $4, $5, NOW()${hasSupervisorCorrectionColumn ? ", TRUE" : ""})
           `,
           [
             management.contact_id,
