@@ -15647,7 +15647,7 @@ export const handler = async (event) => {
             d.localidad,
             d.email AS correo_electronico,
             d.origen_dato,
-            d.created_at,
+            d.created_at AS fecha_ingreso,
             lcs.intentos,
             lcs.estado_venta,
             reasig.nota AS reasignado_desde,
