@@ -5894,6 +5894,32 @@ async function columnExists(client, tableName, columnName) {
   return cols.has(columnName);
 }
 
+async function hasUniqueIndex(client, tableName, columnNames = []) {
+  if (!client) throw new Error("hasUniqueIndex requires a db client");
+  if (!tableName) return false;
+  if (!Array.isArray(columnNames) || columnNames.length === 0) return false;
+
+  const res = await client.query(
+    `
+    SELECT indexdef
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = $1
+    `,
+    [tableName]
+  );
+
+  const targetCols = `(${columnNames.join(",")})`;
+  return res.rows.some((row) => {
+    const indexDef = String(row?.indexdef || "");
+    const normalized = indexDef
+      .toLowerCase()
+      .replaceAll('"', "")
+      .replaceAll(" ", "");
+    return normalized.includes("unique") && normalized.includes(targetCols);
+  });
+}
+
 function buildUserSelect(metadata) {
   return `
     SELECT
@@ -20821,6 +20847,92 @@ async function getNewContactsDistribution(client, batchId) {
              AND batch_id = $3`,
           [resultadoInput, management.contact_id, management.batch_id]
         );
+
+        const assignedRes = await client.query(
+          `
+          SELECT assigned_to
+          FROM lead_contact_status
+          WHERE contact_id = $1
+            AND batch_id = $2
+          LIMIT 1
+          `,
+          [management.contact_id, management.batch_id]
+        );
+        const sellerId = assignedRes.rows[0]?.assigned_to || null;
+
+        if (sellerId) {
+          const isAgendaResultado = ["rellamar", "seguimiento"].includes(resultadoInput);
+          const hasAgendaUniqueContactBatch = await hasUniqueIndex(client, "lead_agenda", [
+            "contact_id",
+            "batch_id"
+          ]);
+
+          if (isAgendaResultado) {
+            if (hasAgendaUniqueContactBatch) {
+              await client.query(
+                `
+                INSERT INTO lead_agenda (contact_id, seller_id, batch_id, fecha_agenda, nota, cumplida)
+                VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', $4, false)
+                ON CONFLICT (contact_id, batch_id) DO UPDATE
+                  SET cumplida = false,
+                      fecha_agenda = NOW() + INTERVAL '24 hours',
+                      nota = $4,
+                      seller_id = $2
+                `,
+                [management.contact_id, sellerId, management.batch_id, "Corrección de codificación por supervisor"]
+              );
+            } else {
+              const existingAgendaRes = await client.query(
+                `
+                SELECT id
+                FROM lead_agenda
+                WHERE contact_id = $1
+                  AND batch_id = $2
+                ORDER BY created_at DESC
+                LIMIT 1
+                `,
+                [management.contact_id, management.batch_id]
+              );
+
+              if (existingAgendaRes.rows.length) {
+                await client.query(
+                  `
+                  UPDATE lead_agenda
+                  SET cumplida = false,
+                      fecha_agenda = NOW() + INTERVAL '24 hours',
+                      nota = $2,
+                      seller_id = $3
+                  WHERE id = $1
+                  `,
+                  [
+                    existingAgendaRes.rows[0].id,
+                    "Corrección de codificación por supervisor",
+                    sellerId
+                  ]
+                );
+              } else {
+                await client.query(
+                  `
+                  INSERT INTO lead_agenda (contact_id, seller_id, batch_id, fecha_agenda, nota, cumplida)
+                  VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', $4, false)
+                  `,
+                  [management.contact_id, sellerId, management.batch_id, "Corrección de codificación por supervisor"]
+                );
+              }
+            }
+          } else {
+            await client.query(
+              `
+              UPDATE lead_agenda
+              SET cumplida = true
+              WHERE contact_id = $1
+                AND batch_id = $2
+                AND cumplida = false
+              `,
+              [management.contact_id, management.batch_id]
+            );
+          }
+        }
 
         const hasSupervisorCorrectionColumn = await columnExists(
           client,
