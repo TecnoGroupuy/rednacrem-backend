@@ -20786,7 +20786,7 @@ async function getNewContactsDistribution(client, batchId) {
             management.resultado,
             resultadoInput,
             motivo,
-            userId
+            dbUser.id
           ]
         );
 
@@ -20812,7 +20812,7 @@ async function getNewContactsDistribution(client, batchId) {
           [
             management.contact_id,
             management.batch_id,
-            userId,
+            dbUser.id,
             resultadoInput,
             "Corrección de codificación por supervisor"
           ]
