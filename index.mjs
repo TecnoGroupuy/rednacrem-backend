@@ -5918,6 +5918,21 @@ async function columnExists(client, tableName, columnName) {
   return cols.has(columnName);
 }
 
+async function isLeadBlockedInDpt(client, contactId) {
+  if (!client) throw new Error("isLeadBlockedInDpt requires a db client");
+  if (!contactId) return false;
+  const res = await client.query(
+    `
+    SELECT estado
+    FROM datos_para_trabajar
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [contactId]
+  );
+  return res.rows[0]?.estado === "bloqueado";
+}
+
 async function hasUniqueIndex(client, tableName, columnNames = []) {
   if (!client) throw new Error("hasUniqueIndex requires a db client");
   if (!tableName) return false;
@@ -8627,6 +8642,8 @@ export const handler = async (event) => {
             const assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
             // Insertar en lead_contact_status
+            const isBlocked = await isLeadBlockedInDpt(client, leadId);
+            if (isBlocked) continue;
             await client.query(
               `
               INSERT INTO lead_contact_status (
@@ -8811,6 +8828,10 @@ export const handler = async (event) => {
               ? evalRes.prevAssignedTo
               : await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
+            const isBlocked = await isLeadBlockedInDpt(client, leadId);
+            if (isBlocked) {
+              responseData = { ok: true, id: leadId, estado: "bloqueado" };
+            } else {
             await client.query(
               `INSERT INTO lead_contact_status (
                  contact_id, estado_venta, intentos,
@@ -8821,6 +8842,7 @@ export const handler = async (event) => {
                  estado_venta = 'nuevo', updated_at = now()`,
               [leadId, batchId, assignedTo, orgId]
             );
+            }
           }
         }
         responseData = { ok: true, id: leadId, estado };
@@ -9005,16 +9027,19 @@ export const handler = async (event) => {
               ? evalRes.prevAssignedTo
               : await getNextSellerForBatchRoundRobin(client, batchId, sellers);
 
-            await client.query(
-              `INSERT INTO lead_contact_status (
-                 contact_id, estado_venta, intentos,
-                 batch_id, assigned_to, organization_id
-               ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
-               ON CONFLICT (contact_id) DO UPDATE SET
-                 batch_id = $2, assigned_to = $3,
-                 estado_venta = 'nuevo', updated_at = now()`,
-              [leadId, batchId, assignedTo, orgId]
-            );
+            const isBlocked = await isLeadBlockedInDpt(client, leadId);
+            if (!isBlocked) {
+              await client.query(
+                `INSERT INTO lead_contact_status (
+                   contact_id, estado_venta, intentos,
+                   batch_id, assigned_to, organization_id
+                 ) VALUES ($1, 'nuevo', 0, $2, $3, $4)
+                 ON CONFLICT (contact_id) DO UPDATE SET
+                   batch_id = $2, assigned_to = $3,
+                   estado_venta = 'nuevo', updated_at = now()`,
+                [leadId, batchId, assignedTo, orgId]
+              );
+            }
           }
         }
         responseData = { ok: true, id: leadId, estado };
@@ -9179,6 +9204,11 @@ export const handler = async (event) => {
 
         if (sellers.length) {
           assignedTo = await getNextSellerForBatchRoundRobin(client, batchId, sellers);
+
+          const isBlocked = await isLeadBlockedInDpt(client, leadId);
+          if (isBlocked) {
+            return json(200, { ok: true, id: leadId, asignado_a: null, skipped: "blocked" });
+          }
 
           await client.query(
             `
@@ -10079,31 +10109,34 @@ export const handler = async (event) => {
             }
           }
 
-          await client.query(
-            `
-            INSERT INTO lead_contact_status (
-              contact_id,
-              estado_venta,
-              intentos,
-              proxima_accion,
-              batch_id,
-              assigned_to,
-              ola_actual,
-              ultimo_intento_at
-            )
-            VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
-            ON CONFLICT (contact_id) DO UPDATE
-            SET
-              estado_venta = 'venta',
-              intentos = COALESCE(lead_contact_status.intentos, 0) + 1,
-              batch_id = EXCLUDED.batch_id,
-              assigned_to = EXCLUDED.assigned_to,
-              ola_actual = 1,
-              ultimo_intento_at = now(),
-              updated_at = now()
-            `,
-            [leadId, principal.batchId, safeSellerId]
-          );
+          const isBlocked = await isLeadBlockedInDpt(client, leadId);
+          if (!isBlocked) {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                proxima_accion,
+                batch_id,
+                assigned_to,
+                ola_actual,
+                ultimo_intento_at
+              )
+              VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                estado_venta = 'venta',
+                intentos = COALESCE(lead_contact_status.intentos, 0) + 1,
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = EXCLUDED.assigned_to,
+                ola_actual = 1,
+                ultimo_intento_at = now(),
+                updated_at = now()
+              `,
+              [leadId, principal.batchId, safeSellerId]
+            );
+          }
 
           if (!createManagementInContacts) {
             return {
@@ -13135,7 +13168,23 @@ export const handler = async (event) => {
         const dptIds = contactIds
           .map((id) => dptIdsByContact.get(id))
           .filter(Boolean);
-        if (dptIds.length) {
+        let dptIdsToAssign = dptIds;
+        if (dptIdsToAssign.length) {
+          const blockedRes = await client.query(
+            `
+            SELECT id
+            FROM datos_para_trabajar
+            WHERE id = ANY($1::uuid[])
+              AND estado = 'bloqueado'
+            `,
+            [dptIdsToAssign]
+          );
+          if (blockedRes.rows.length) {
+            const blockedIds = new Set(blockedRes.rows.map((r) => r.id));
+            dptIdsToAssign = dptIdsToAssign.filter((id) => !blockedIds.has(id));
+          }
+        }
+        if (dptIdsToAssign.length) {
           await client.query(
             `
             INSERT INTO lead_contact_status (
@@ -13168,7 +13217,7 @@ export const handler = async (event) => {
               organization_id = COALESCE(EXCLUDED.organization_id, lead_contact_status.organization_id),
               updated_at = now()
             `,
-            [dptIds, batchId, assignedSellerId, organizationId]
+            [dptIdsToAssign, batchId, assignedSellerId, organizationId]
           );
         }
 
@@ -14534,32 +14583,35 @@ export const handler = async (event) => {
             [leadId, batchId, dbUser?.id || null]
           );
         } else {
-          await client.query(
-            `
-            INSERT INTO lead_contact_status (
-              contact_id,
-              estado_venta,
-              intentos,
-              proxima_accion,
-              batch_id,
-              assigned_to,
-              ola_actual,
-              ultimo_intento_at
-            )
-            VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
-            ON CONFLICT (contact_id) DO UPDATE
-            SET
-              estado_venta = 'nuevo',
-              intentos = COALESCE(lead_contact_status.intentos, 0),
-              proxima_accion = NULL,
-              batch_id = EXCLUDED.batch_id,
-              assigned_to = EXCLUDED.assigned_to,
-              ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
-              ultimo_intento_at = now(),
-              updated_at = now()
-            `,
-            [leadId, batchId, dbUser?.id || null]
-          );
+          const isBlocked = await isLeadBlockedInDpt(client, leadId);
+          if (!isBlocked) {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                proxima_accion,
+                batch_id,
+                assigned_to,
+                ola_actual,
+                ultimo_intento_at
+              )
+              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                estado_venta = 'nuevo',
+                intentos = COALESCE(lead_contact_status.intentos, 0),
+                proxima_accion = NULL,
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = EXCLUDED.assigned_to,
+                ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
+                ultimo_intento_at = now(),
+                updated_at = now()
+              `,
+              [leadId, batchId, dbUser?.id || null]
+            );
+          }
         }
 
         await client.query("COMMIT");
@@ -15470,6 +15522,8 @@ export const handler = async (event) => {
           [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
         );
         if (!updateLeadStatus.rows.length) {
+          const isBlocked = await isLeadBlockedInDpt(client, leadId);
+          if (!isBlocked) {
           await client.query(
             `
             INSERT INTO lead_contact_status (
@@ -15496,6 +15550,7 @@ export const handler = async (event) => {
             `,
             [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
           );
+          }
         }
 
         if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
@@ -17498,6 +17553,8 @@ async function getNewContactsDistribution(client, batchId) {
 
           // 8) Crear / resetear lead_contact_status para los nuevos contactos (sin vendedor)
           for (const contactId of nuevosIds) {
+            const isBlocked = await isLeadBlockedInDpt(client, contactId);
+            if (isBlocked) continue;
             const statusValues = [contactId, batchId];
             let orgCols = "";
             let orgVals = "";
@@ -17804,6 +17861,11 @@ async function getNewContactsDistribution(client, batchId) {
 
           // 9) lead_contact_status (copiar patrón add-contacts)
           {
+            const isBlocked = await isLeadBlockedInDpt(client, leadId);
+            if (isBlocked) {
+              await client.query("ROLLBACK");
+              return json(409, { ok: false, message: "Lead bloqueado; no se puede asignar vendedor" });
+            }
             const statusValues = [leadId, batchId, assignedTo];
             let orgCols = "";
             let orgVals = "";
@@ -18414,6 +18476,9 @@ async function getNewContactsDistribution(client, batchId) {
           const contactId = contactIds[i];
           const assignedTo = sellers[i % sellers.length];
           distribution.set(assignedTo, (distribution.get(assignedTo) || 0) + 1);
+
+          const isBlocked = await isLeadBlockedInDpt(client, contactId);
+          if (isBlocked) continue;
 
           await client.query(
             `
