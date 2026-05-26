@@ -4016,23 +4016,47 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
 
     if (prev.rows.length) {
       const { id: prevId, estado_venta, assigned_to, vendedor_status } = prev.rows[0];
-      if (estado_venta === "venta") {
+
+      if (["venta", "rechazo"].includes(estado_venta)) {
         return {
           estado: "bloqueado",
           motivoBloqueo: "cliente_existente",
-          prevContactId: prevId,
+          prevContactId: null,
           prevAssignedTo: null
         };
       }
-      if (estado_venta === "rechazo") {
+
+      if (["no_contesta", "rellamar", "seguimiento", "dato_erroneo"].includes(estado_venta)) {
         return {
           estado: "bloqueado",
-          motivoBloqueo: "rechazo",
-          prevContactId: prevId,
+          motivoBloqueo: "reemplazado",
+          prevContactId: null,
           prevAssignedTo: null
         };
       }
+
+      if (estado_venta && estado_venta !== "nuevo") {
+        return {
+          estado: "bloqueado",
+          motivoBloqueo: "reemplazado",
+          prevContactId: null,
+          prevAssignedTo: null
+        };
+      }
+
       const mismoVendedor = vendedor_status === "approved" ? assigned_to : null;
+
+      await client.query(
+        `
+        UPDATE datos_para_trabajar
+        SET estado = 'bloqueado',
+            motivo_bloqueo = 'reemplazado',
+            updated_at = now()
+        WHERE id = $1
+        `,
+        [prevId]
+      );
+
       return {
         estado: "nuevo",
         motivoBloqueo: null,
