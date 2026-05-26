@@ -19654,6 +19654,8 @@ async function getNewContactsDistribution(client, batchId) {
       const origenDatoRaw = getQueryParam(event, "origen_dato");
       const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
+      const telefonoFilterRaw = normalizeText(getQueryParam(event, "telefono") || "");
+      const telefonoFilter = telefonoFilterRaw ? `%${telefonoFilterRaw}%` : null;
       const page = Math.max(1, parseInt(getQueryParam(event, "page") || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(getQueryParam(event, "limit") || "50", 10)));
       const offset = (page - 1) * limit;
@@ -19674,6 +19676,9 @@ async function getNewContactsDistribution(client, batchId) {
           filterValues.push(origenDatoFilter);
           filterIdx += 1;
         }
+        filters.push(`($${filterIdx}::text IS NULL OR d.telefono ILIKE $${filterIdx} OR d.celular ILIKE $${filterIdx})`);
+        filterValues.push(telefonoFilter);
+        filterIdx += 1;
         if (organizationId) {
           filters.push(`d.organization_id = $${filterIdx}`);
           filterValues.push(organizationId);
