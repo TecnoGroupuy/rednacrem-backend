@@ -19702,6 +19702,7 @@ async function getNewContactsDistribution(client, batchId) {
             d.celular,
             d.email,
             d.fecha_nacimiento,
+            d.fecha_lead,
             d.estado,
             d.motivo_bloqueo,
             d.origen_dato,
