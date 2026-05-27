@@ -8719,6 +8719,7 @@ export const handler = async (event) => {
         return null;
       };
       const fechaNacimiento = parseDateFlexible(body?.date_of_birth || body?.fecha_nacimiento);
+      const direccion = normalizeText(body?.direccion) || null;
       const nota = normalizeText(body?.nota) || null;
       const localidad = normalizeText(body?.localidad) || null;
       const departamento = normalizeText(body?.departamento) || null;
@@ -8758,34 +8759,51 @@ export const handler = async (event) => {
         const motivoBloqueo = evalRes.motivoBloqueo;
         const motivoBloqueoDetalle = evalRes.motivoBloqueoDetalle || null;
         const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
+        const hasDireccion = await columnExists(client, "datos_para_trabajar", "direccion");
+
+        const insertColumns = [
+          "nombre",
+          "apellido",
+          "telefono",
+          "celular",
+          "email",
+          "fecha_nacimiento",
+          "origen_dato",
+          "estado",
+          "organization_id",
+          ...(hasDireccion ? ["direccion"] : []),
+          "nota",
+          "localidad",
+          "departamento",
+          "fecha_lead",
+          "motivo_bloqueo",
+          ...(hasMotivoBloqueoDetalle ? ["motivo_bloqueo_detalle"] : [])
+        ];
+        const insertValues = [
+          nombre,
+          apellido,
+          telefono,
+          celular,
+          email,
+          fechaNacimiento,
+          origenDato,
+          estado,
+          orgId,
+          ...(hasDireccion ? [direccion] : []),
+          nota,
+          localidad,
+          departamento,
+          fechaLead,
+          motivoBloqueo,
+          ...(hasMotivoBloqueoDetalle ? [motivoBloqueoDetalle] : [])
+        ];
+        const placeholders = insertColumns.map((_, idx) => `$${idx + 1}`).join(", ");
 
         const insertRes = await client.query(
-          `INSERT INTO datos_para_trabajar (
-            nombre, apellido, telefono, celular,
-            email, fecha_nacimiento,
-            origen_dato, estado, organization_id,
-            nota, localidad, departamento, fecha_lead, motivo_bloqueo${
-              hasMotivoBloqueoDetalle ? ", motivo_bloqueo_detalle" : ""
-            }
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14${hasMotivoBloqueoDetalle ? ", $15" : ""}
-          )
-          RETURNING id`,
-          hasMotivoBloqueoDetalle
-            ? [
-                nombre, apellido, telefono, celular,
-                email, fechaNacimiento,
-                origenDato, estado, orgId,
-                nota, localidad, departamento, fechaLead, motivoBloqueo,
-                motivoBloqueoDetalle
-              ]
-            : [
-                nombre, apellido, telefono, celular,
-                email, fechaNacimiento,
-                origenDato, estado, orgId,
-                nota, localidad, departamento, fechaLead, motivoBloqueo
-              ]
+          `INSERT INTO datos_para_trabajar (${insertColumns.join(", ")})
+           VALUES (${placeholders})
+           RETURNING id`,
+          insertValues
         );
         const leadId = insertRes.rows[0]?.id;
 
