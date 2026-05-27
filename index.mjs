@@ -3961,7 +3961,7 @@ function buildDatosTrabajarInsertBatch(
   };
 }
 
-async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId) {
+async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId, extra = {}) {
   if (!orgId) {
     return { estado: "nuevo", motivoBloqueo: null, prevContactId: null, prevAssignedTo: null };
   }
@@ -4017,6 +4017,70 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
 
     if (prev.rows.length) {
       const { id: prevId, estado_venta, assigned_to, vendedor_status } = prev.rows[0];
+
+      const fechaNacimientoExtra = extra?.fechaNacimiento || null;
+      const direccionExtra = extra?.direccion || null;
+      const emailExtra = extra?.email || null;
+      const localidadExtra = extra?.localidad || null;
+      const departamentoExtra = extra?.departamento || null;
+
+      if (
+        prevId &&
+        (fechaNacimientoExtra || direccionExtra || emailExtra || localidadExtra || departamentoExtra)
+      ) {
+        const hasFechaNacimiento = await columnExists(client, "datos_para_trabajar", "fecha_nacimiento");
+        const hasDireccion = await columnExists(client, "datos_para_trabajar", "direccion");
+        const hasEmail = await columnExists(client, "datos_para_trabajar", "email");
+        const hasCorreoElectronico = !hasEmail
+          ? await columnExists(client, "datos_para_trabajar", "correo_electronico")
+          : false;
+        const hasLocalidad = await columnExists(client, "datos_para_trabajar", "localidad");
+        const hasDepartamento = await columnExists(client, "datos_para_trabajar", "departamento");
+
+        const setParts = [];
+        const values = [];
+        let idx = 1;
+
+        if (hasFechaNacimiento) {
+          values.push(fechaNacimientoExtra);
+          setParts.push(`fecha_nacimiento = COALESCE(fecha_nacimiento, $${idx})`);
+          idx += 1;
+        }
+        if (hasDireccion) {
+          values.push(direccionExtra);
+          setParts.push(`direccion = COALESCE(direccion, $${idx})`);
+          idx += 1;
+        }
+        if (hasEmail || hasCorreoElectronico) {
+          values.push(emailExtra);
+          const emailCol = hasEmail ? "email" : "correo_electronico";
+          setParts.push(`${emailCol} = COALESCE(NULLIF(${emailCol}, ''), $${idx})`);
+          idx += 1;
+        }
+        if (hasLocalidad) {
+          values.push(localidadExtra);
+          setParts.push(`localidad = COALESCE(NULLIF(localidad, ''), $${idx})`);
+          idx += 1;
+        }
+        if (hasDepartamento) {
+          values.push(departamentoExtra);
+          setParts.push(`departamento = COALESCE(NULLIF(departamento, ''), $${idx})`);
+          idx += 1;
+        }
+
+        if (setParts.length) {
+          values.push(prevId);
+          await client.query(
+            `
+            UPDATE datos_para_trabajar
+            SET ${setParts.join(", ")},
+                updated_at = NOW()
+            WHERE id = $${idx}
+            `,
+            values
+          );
+        }
+      }
 
       if (["venta", "rechazo"].includes(estado_venta)) {
         return {
@@ -4570,7 +4634,14 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         cel,
         row.origen_dato || null,
         orgId,
-        importJobId
+        importJobId,
+        {
+          fechaNacimiento: row.fecha_nacimiento || null,
+          direccion: row.direccion || null,
+          email: row.correo_electronico || row.email || null,
+          localidad: row.localidad || null,
+          departamento: row.departamento || null
+        }
       );
 
       if (evalRes.estado === "nuevo" && evalRes.prevContactId) {
@@ -8752,7 +8823,8 @@ export const handler = async (event) => {
           celular || null,
           origenDato,
           orgId,
-          null
+          null,
+          { fechaNacimiento, direccion, email, localidad, departamento }
         );
 
         const estado = evalRes.estado;
@@ -8937,6 +9009,7 @@ export const handler = async (event) => {
         return null;
       };
       const fechaNacimiento = parseDateFlexible(body?.date_of_birth || body?.fecha_nacimiento);
+      const direccion = normalizeText(body?.direccion) || null;
       const nota = normalizeText(body?.nota) || null;
       const localidad = normalizeText(body?.localidad) || null;
       const departamento = normalizeText(body?.departamento) || null;
@@ -8966,7 +9039,8 @@ export const handler = async (event) => {
           celular || null,
           origenDato,
           orgId,
-          null
+          null,
+          { fechaNacimiento, direccion, email, localidad, departamento }
         );
 
         const estado = evalRes.estado;
