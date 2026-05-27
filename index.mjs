@@ -19741,7 +19741,7 @@ async function getNewContactsDistribution(client, batchId) {
       if (periodo === "ultimos_7_dias") periodo = "semana";
       if (periodo === "hoy") periodo = "dia";
       const origenDatoRaw = getQueryParam(event, "origen_dato");
-      const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
+      const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
       const telefonoFilterRaw = normalizeText(getQueryParam(event, "telefono") || "");
       const telefonoFilter = telefonoFilterRaw ? `%${telefonoFilterRaw}%` : null;
