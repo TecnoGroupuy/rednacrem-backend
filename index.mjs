@@ -638,6 +638,13 @@ function sanitizePhone(value) {
   return digits;
 }
 
+function cleanPhone(value) {
+  const normalized = normalizeUyNumber(value);
+  if (!normalized) return null;
+  const valid = sanitizePhone(normalized);
+  return valid ? normalized : null;
+}
+
 function unaccentSimple(value) {
   if (!value) return "";
   return String(value)
@@ -4625,8 +4632,13 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
     for (let i = index; i < rows.length; i += 1) {
       const row = rows[i];
-      const tel = normalizeUyNumber(row.telefono) || null;
-      const cel = normalizeUyNumber(row.celular) || null;
+      const tel = cleanPhone(row.telefono) || null;
+      const cel = cleanPhone(row.celular) || null;
+      if (!tel && !cel) {
+        skipped += 1;
+        index += 1;
+        continue;
+      }
 
       const evalRes = await evaluarEstadoLead(
         client,
@@ -8769,8 +8781,8 @@ export const handler = async (event) => {
         if (n.startsWith('9')) n = '0' + n;
         return n;
       };
-      const telefono = stripUY(normalizePhone(body?.phone_number || body?.telefono));
-      const celular = stripUY(normalizePhone(body?.celular));
+      const telefono = cleanPhone(stripUY(normalizePhone(body?.phone_number || body?.telefono)));
+      const celular = cleanPhone(stripUY(normalizePhone(body?.celular)));
       const email = normalizeEmail(body?.email || body?.correo);
       const parseDateFlexible = (val) => {
         if (!val) return null;
@@ -8799,8 +8811,8 @@ export const handler = async (event) => {
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
 
-      if (!nombre && !telefono && !email) {
-        return json(200, { ok: true, skipped: true, reason: "sin_datos" });
+      if (!telefono && !celular) {
+        return json(400, { ok: false, message: "Se requiere teléfono o celular" });
       }
 
       const client = createDbClient();
@@ -8988,8 +9000,8 @@ export const handler = async (event) => {
         if (n.startsWith("9")) n = "0" + n;
         return n;
       };
-      const telefono = stripUY(normalizePhone(body?.phone_number || body?.telefono));
-      const celular = stripUY(normalizePhone(body?.celular));
+      const telefono = cleanPhone(stripUY(normalizePhone(body?.phone_number || body?.telefono)));
+      const celular = cleanPhone(stripUY(normalizePhone(body?.celular)));
       const email = normalizeEmail(body?.email || body?.correo);
       const parseDateFlexible = (val) => {
         if (!val) return null;
@@ -9018,8 +9030,8 @@ export const handler = async (event) => {
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
 
-      if (!nombre && !telefono && !email) {
-        return json(200, { ok: true, skipped: true, reason: "sin_datos" });
+      if (!telefono && !celular) {
+        return json(400, { ok: false, message: "Se requiere teléfono o celular" });
       }
 
       const client = createDbClient();
@@ -9212,7 +9224,7 @@ export const handler = async (event) => {
     const nombre = normalizeText(parts[0] || "") || null;
     const apellido = normalizeText(parts.slice(1).join(" ") || "") || null;
 
-    const telefono = sanitizePhone(normalizeUyNumber(body?.telefono || ""));
+    const telefono = cleanPhone(body?.telefono || null);
     const direccion = normalizeText(body?.direccion || "") || null;
     const departamento = normalizeText(body?.departamento || "") || null;
     const origenDato = "Discado auto";
@@ -9250,8 +9262,8 @@ export const handler = async (event) => {
 
     const fechaLead = parseDiscadoFecha(body?.fecha_llamada) || null;
 
-    if (!telefono && !nombre) {
-      return json(422, { ok: false, message: "telefono o nombre requerido" });
+    if (!telefono) {
+      return json(400, { ok: false, message: "Se requiere teléfono o celular" });
     }
 
     const client = createDbClient();
@@ -9607,8 +9619,8 @@ export const handler = async (event) => {
         const apellido = normalizeText(payload?.apellido);
         const documento = normalizeText(payload?.documento) || null;
         const fechaNacimiento = parseDate(payload?.fecha_nacimiento || payload?.fechaNacimiento || null);
-        const telefono = normalizeText(payload?.telefono) || null;
-        const celular = normalizeText(payload?.celular) || null;
+        const telefono = cleanPhone(payload?.telefono) || null;
+        const celular = cleanPhone(payload?.celular) || null;
         const correo = normalizeEmail(payload?.correo_electronico || payload?.email);
         const email = correo ? correo : null;
         const direccion = normalizeText(payload?.direccion) || null;
@@ -9629,6 +9641,11 @@ export const handler = async (event) => {
           status
         };
       };
+
+      const phoneValidation = buildContactFields(contactPayload);
+      if (!phoneValidation.telefono && !phoneValidation.celular) {
+        return json(400, { ok: false, message: "Se requiere teléfono o celular" });
+      }
 
       const client = createDbClient();
       await client.connect();
@@ -13215,6 +13232,10 @@ export const handler = async (event) => {
           const contact = contactById.get(contactId);
           if (!contact) continue;
 
+          const cleanedTelefono = cleanPhone(contact.telefono) || null;
+          const cleanedCelular = cleanPhone(contact.celular) || null;
+          if (!cleanedTelefono && !cleanedCelular) continue;
+
           let existingId = null;
           if (hasContactIdCol) {
             const existingRes = await client.query(
@@ -13248,8 +13269,8 @@ export const handler = async (event) => {
             pushCol("apellido", contact.apellido);
             pushCol("documento", contact.documento);
             pushCol("fecha_nacimiento", contact.fecha_nacimiento);
-            pushCol("telefono", contact.telefono);
-            pushCol("celular", contact.celular);
+            pushCol("telefono", cleanedTelefono);
+            pushCol("celular", cleanedCelular);
             pushCol("direccion", contact.direccion);
             pushCol("departamento", contact.departamento);
             if (hasLocalidadCol) pushCol("localidad", null);
