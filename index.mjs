@@ -3923,7 +3923,7 @@ function buildDatosTrabajarInsertBatch(
   batchRows,
   organizationId = null,
   importJobId = null,
-  { emailColumn = "email" } = {}
+  { emailColumn = "email", includeMotivoBloqueoDetalle = false } = {}
 ) {
   const columns = [
     "nombre",
@@ -3939,6 +3939,7 @@ function buildDatosTrabajarInsertBatch(
     "origen_dato",
     "estado",
     "motivo_bloqueo",
+    ...(includeMotivoBloqueoDetalle ? ["motivo_bloqueo_detalle"] : []),
     "fecha_lead",
     "nota",
     "organization_id",
@@ -4030,6 +4031,7 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
         return {
           estado: "bloqueado",
           motivoBloqueo: "reemplazado",
+          motivoBloqueoDetalle: estado_venta,
           prevContactId: null,
           prevAssignedTo: null
         };
@@ -4555,6 +4557,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     const emailColumn = (await columnExists(client, "datos_para_trabajar", "email"))
       ? "email"
       : "correo_electronico";
+    const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
 
     for (let i = index; i < rows.length; i += 1) {
       const row = rows[i];
@@ -4597,6 +4600,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         row.origen_dato || null,
         evalRes.estado,
         evalRes.motivoBloqueo,
+        ...(hasMotivoBloqueoDetalle ? [evalRes.motivoBloqueoDetalle || null] : []),
         fechaLead,
         row.nota || null
       ]);
@@ -4607,7 +4611,8 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
       if (buffer.length >= batchSize) {
         const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId, {
-          emailColumn
+          emailColumn,
+          includeMotivoBloqueoDetalle: hasMotivoBloqueoDetalle
         });
         await client.query(sql, values);
         if (importJobId && orgId) {
@@ -4632,7 +4637,8 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
       if (maxMillis && Date.now() - startedAt > maxMillis) {
         if (buffer.length) {
           const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId, {
-            emailColumn
+            emailColumn,
+            includeMotivoBloqueoDetalle: hasMotivoBloqueoDetalle
           });
           await client.query(sql, values);
           if (importJobId && orgId) {
@@ -4675,7 +4681,8 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
 
     if (buffer.length) {
       const { sql, values } = buildDatosTrabajarInsertBatch(buffer, orgId, importJobId, {
-        emailColumn
+        emailColumn,
+        includeMotivoBloqueoDetalle: hasMotivoBloqueoDetalle
       });
       await client.query(sql, values);
       if (importJobId && orgId) {
@@ -8749,24 +8756,36 @@ export const handler = async (event) => {
 
         const estado = evalRes.estado;
         const motivoBloqueo = evalRes.motivoBloqueo;
+        const motivoBloqueoDetalle = evalRes.motivoBloqueoDetalle || null;
+        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
 
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
             origen_dato, estado, organization_id,
-            nota, localidad, departamento, fecha_lead, motivo_bloqueo
+            nota, localidad, departamento, fecha_lead, motivo_bloqueo${
+              hasMotivoBloqueoDetalle ? ", motivo_bloqueo_detalle" : ""
+            }
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14
+            $10, $11, $12, $13, $14${hasMotivoBloqueoDetalle ? ", $15" : ""}
           )
           RETURNING id`,
-          [
-            nombre, apellido, telefono, celular,
-            email, fechaNacimiento,
-            origenDato, estado, orgId,
-            nota, localidad, departamento, fechaLead, motivoBloqueo
-          ]
+          hasMotivoBloqueoDetalle
+            ? [
+                nombre, apellido, telefono, celular,
+                email, fechaNacimiento,
+                origenDato, estado, orgId,
+                nota, localidad, departamento, fechaLead, motivoBloqueo,
+                motivoBloqueoDetalle
+              ]
+            : [
+                nombre, apellido, telefono, celular,
+                email, fechaNacimiento,
+                origenDato, estado, orgId,
+                nota, localidad, departamento, fechaLead, motivoBloqueo
+              ]
         );
         const leadId = insertRes.rows[0]?.id;
 
@@ -8934,38 +8953,62 @@ export const handler = async (event) => {
 
         const estado = evalRes.estado;
         const motivoBloqueo = evalRes.motivoBloqueo;
+        const motivoBloqueoDetalle = evalRes.motivoBloqueoDetalle || null;
+        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
 
         const insertRes = await client.query(
           `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
             origen_dato, estado, organization_id,
-            nota, localidad, departamento, fecha_lead, motivo_bloqueo,
+            nota, localidad, departamento, fecha_lead, motivo_bloqueo${
+              hasMotivoBloqueoDetalle ? ", motivo_bloqueo_detalle" : ""
+            },
             campaign_name, form_name
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14,
-            $15, $16
+            $10, $11, $12, $13, $14${hasMotivoBloqueoDetalle ? ", $15" : ""},
+            $${hasMotivoBloqueoDetalle ? 16 : 15}, $${hasMotivoBloqueoDetalle ? 17 : 16}
           )
           RETURNING id`,
-          [
-            nombre,
-            apellido,
-            telefono,
-            celular,
-            email,
-            fechaNacimiento,
-            origenDato,
-            estado,
-            orgId,
-            nota,
-            localidad,
-            departamento,
-            fechaLead,
-            motivoBloqueo,
-            campana,
-            formulario,
-          ]
+          hasMotivoBloqueoDetalle
+            ? [
+                nombre,
+                apellido,
+                telefono,
+                celular,
+                email,
+                fechaNacimiento,
+                origenDato,
+                estado,
+                orgId,
+                nota,
+                localidad,
+                departamento,
+                fechaLead,
+                motivoBloqueo,
+                motivoBloqueoDetalle,
+                campana,
+                formulario,
+              ]
+            : [
+                nombre,
+                apellido,
+                telefono,
+                celular,
+                email,
+                fechaNacimiento,
+                origenDato,
+                estado,
+                orgId,
+                nota,
+                localidad,
+                departamento,
+                fechaLead,
+                motivoBloqueo,
+                campana,
+                formulario,
+              ]
         );
         const leadId = insertRes.rows[0]?.id;
 
@@ -19786,6 +19829,8 @@ async function getNewContactsDistribution(client, batchId) {
           filterValues
         );
 
+        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
+
         const result = await client.query(
           `
           SELECT
@@ -19799,6 +19844,7 @@ async function getNewContactsDistribution(client, batchId) {
             d.fecha_lead,
             d.estado,
             d.motivo_bloqueo,
+            ${hasMotivoBloqueoDetalle ? "d.motivo_bloqueo_detalle" : "NULL::text AS motivo_bloqueo_detalle"},
             d.origen_dato,
             d.created_at,
             lcs.estado_venta,
