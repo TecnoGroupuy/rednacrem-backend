@@ -19788,6 +19788,10 @@ async function getNewContactsDistribution(client, batchId) {
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
       const telefonoFilterRaw = normalizeText(getQueryParam(event, "telefono") || "");
       const telefonoFilter = telefonoFilterRaw ? `%${telefonoFilterRaw}%` : null;
+      const sortRaw = String(getQueryParam(event, "sort") || "").trim().toLowerCase();
+      const dirRaw = String(getQueryParam(event, "dir") || "").trim().toLowerCase();
+      const sortField = sortRaw === "created_at" ? "created_at" : "fecha_lead";
+      const sortDir = dirRaw === "asc" ? "ASC" : "DESC";
       const page = Math.max(1, parseInt(getQueryParam(event, "page") || "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(getQueryParam(event, "limit") || "50", 10)));
       const offset = (page - 1) * limit;
@@ -19830,6 +19834,10 @@ async function getNewContactsDistribution(client, batchId) {
         );
 
         const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
+
+        const orderByExpr = sortField === "created_at"
+          ? "d.created_at"
+          : "COALESCE(d.fecha_lead, d.created_at)";
 
         const result = await client.query(
           `
@@ -19876,7 +19884,7 @@ async function getNewContactsDistribution(client, batchId) {
           WHERE 1=1
           ${whereClause}
           ${dateFilter}
-          ORDER BY d.created_at DESC
+          ORDER BY ${orderByExpr} ${sortDir}
           LIMIT $${filterIdx} OFFSET $${filterIdx + 1}
           `,
           [...filterValues, limit, offset]
