@@ -645,6 +645,31 @@ function cleanPhone(value) {
   return valid ? normalized : null;
 }
 
+function validarTelefonoUY(numero) {
+  if (numero === null || numero === undefined) return true;
+  const text = String(numero).trim();
+  if (text === "" || text === "—") return true; // vacío es ok
+
+  const limpio = text.replace(/\D/g, "");
+  if (!limpio) return true;
+
+  // Block all same digits: 22222222, 11111111, 099999999
+  if (/^(\d)\1+$/.test(limpio)) return false;
+
+  // Block sequential: 12345678, 87654321
+  const sec = "01234567890";
+  const secRev = "09876543210";
+  if (sec.includes(limpio) || secRev.includes(limpio)) return false;
+
+  // Uruguay landline: 8 digits starting with 2, 3 or 4
+  const fijo = /^[2-4]\d{7}$/.test(limpio);
+
+  // Uruguay mobile: 9 digits starting with 091-099
+  const celular = /^09[1-9]\d{6}$/.test(limpio);
+
+  return fijo || celular;
+}
+
 function unaccentSimple(value) {
   if (!value) return "";
   return String(value)
@@ -9655,6 +9680,22 @@ export const handler = async (event) => {
       const familySales = Array.isArray(body?.familySales) ? body.familySales : [];
       const cobranzaDocumento = normalizeText(body?.cobranza_documento || body?.documento_cobranza) || null;
 
+      const telefonos = [
+        { campo: "telefono", valor: contactPayload?.telefono },
+        { campo: "celular", valor: contactPayload?.celular }
+      ].filter((t) => t.valor);
+
+      for (const t of telefonos) {
+        if (!validarTelefonoUY(t.valor)) {
+          return json(400, {
+            ok: false,
+            error:
+              `El ${t.campo} ingresado no es válido. Debe ser un número uruguayo real (fijo: 2xxxxxxx, celular: 09xxxxxxx).`,
+            campo: t.campo
+          });
+        }
+      }
+
       const buildContactFields = (payload) => {
         const nombre = normalizeText(payload?.nombre);
         const apellido = normalizeText(payload?.apellido);
@@ -10772,6 +10813,22 @@ export const handler = async (event) => {
       let fechaNacimiento = undefined;
       if (hasField("fecha_nacimiento") || hasField("fechaNacimiento")) {
         fechaNacimiento = parseDate(contactPayload?.fecha_nacimiento || contactPayload?.fechaNacimiento || null);
+      }
+
+      const telefonos = [
+        { campo: "telefono", valor: telefono },
+        { campo: "celular", valor: celular }
+      ].filter((t) => t.valor);
+
+      for (const t of telefonos) {
+        if (!validarTelefonoUY(t.valor)) {
+          return json(400, {
+            ok: false,
+            error:
+              `El ${t.campo} ingresado no es válido. Debe ser un número uruguayo real (fijo: 2xxxxxxx, celular: 09xxxxxxx).`,
+            campo: t.campo
+          });
+        }
       }
 
       const updates = [];
