@@ -21040,12 +21040,12 @@ async function getNewContactsDistribution(client, batchId) {
       let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
       if (roleError) return roleError;
 
-      const resultadoInput = normalizeLeadResultado(body?.resultado_corregido);
+      const resultadoCorregidoInput = normalizeLeadResultado(body?.resultado_corregido);
       const motivoRaw = normalizeText(body?.motivo || "");
       const motivo = motivoRaw ? motivoRaw : null;
 
-      if (!resultadoInput || resultadoInput === "nuevo") {
-        return json(400, { ok: false, message: "resultado_corregido requerido" });
+      if (resultadoCorregidoInput === "nuevo") {
+        return json(400, { ok: false, message: "resultado_corregido inválido" });
       }
 
       const client = createDbClient();
@@ -21071,6 +21071,14 @@ async function getNewContactsDistribution(client, batchId) {
           return json(404, { ok: false, message: "Gestiï¿½n no encontrada" });
         }
 
+        const resultadoInput = resultadoCorregidoInput || management.resultado || null;
+        const isResultadoChange = Boolean(resultadoCorregidoInput) && resultadoCorregidoInput !== management.resultado;
+
+        if (!resultadoInput && !motivo) {
+          await client.query("ROLLBACK");
+          return json(400, { ok: false, message: "Se requiere nueva codificación o comentario" });
+        }
+
         const orgCheck = await client.query(
           `SELECT 1 FROM lead_batches lb
            WHERE lb.id = $1 AND lb.organization_id = $2
@@ -21082,10 +21090,12 @@ async function getNewContactsDistribution(client, batchId) {
           return json(403, { ok: false, message: "Acceso no autorizado" });
         }
 
-        const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
-        if (!desiredCatalog) {
-          await client.query("ROLLBACK");
-          return json(400, { ok: false, message: "resultado_corregido no existe en catï¿½logo" });
+        if (resultadoCorregidoInput) {
+          const desiredCatalog = await getLeadStatusCatalogEntry(client, resultadoInput);
+          if (!desiredCatalog) {
+            await client.query("ROLLBACK");
+            return json(400, { ok: false, message: "resultado_corregido no existe en catï¿½logo" });
+          }
         }
 
         const insertRes = await client.query(
@@ -21117,123 +21127,125 @@ async function getNewContactsDistribution(client, batchId) {
 
         const audit = insertRes.rows[0];
 
-        await client.query(
-          `UPDATE lead_contact_status
-           SET estado_venta = $1,
-               updated_at = now()
-           WHERE contact_id = $2
-             AND batch_id = $3`,
-          [resultadoInput, management.contact_id, management.batch_id]
-        );
+        if (isResultadoChange) {
+          await client.query(
+            `UPDATE lead_contact_status
+             SET estado_venta = $1,
+                 updated_at = now()
+             WHERE contact_id = $2
+               AND batch_id = $3`,
+            [resultadoInput, management.contact_id, management.batch_id]
+          );
 
-        const assignedRes = await client.query(
-          `
-          SELECT assigned_to
-          FROM lead_contact_status
-          WHERE contact_id = $1
-            AND batch_id = $2
-          LIMIT 1
-          `,
-          [management.contact_id, management.batch_id]
-        );
-        const sellerId = assignedRes.rows[0]?.assigned_to || null;
+          const assignedRes = await client.query(
+            `
+            SELECT assigned_to
+            FROM lead_contact_status
+            WHERE contact_id = $1
+              AND batch_id = $2
+            LIMIT 1
+            `,
+            [management.contact_id, management.batch_id]
+          );
+          const sellerId = assignedRes.rows[0]?.assigned_to || null;
 
-        if (sellerId) {
-          const isAgendaResultado = ["rellamar", "seguimiento"].includes(resultadoInput);
-          const hasAgendaUniqueContactBatch = await hasUniqueIndex(client, "lead_agenda", [
-            "contact_id",
-            "batch_id"
-          ]);
+          if (sellerId) {
+            const isAgendaResultado = ["rellamar", "seguimiento"].includes(resultadoInput);
+            const hasAgendaUniqueContactBatch = await hasUniqueIndex(client, "lead_agenda", [
+              "contact_id",
+              "batch_id"
+            ]);
 
-          if (isAgendaResultado) {
-            if (hasAgendaUniqueContactBatch) {
-              await client.query(
-                `
-                INSERT INTO lead_agenda (contact_id, seller_id, batch_id, fecha_agenda, nota, cumplida)
-                VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', $4, false)
-                ON CONFLICT (contact_id, batch_id) DO UPDATE
-                  SET cumplida = false,
-                      fecha_agenda = NOW() + INTERVAL '24 hours',
-                      nota = $4,
-                      seller_id = $2
-                `,
-                [management.contact_id, sellerId, management.batch_id, "Corrección de codificación por supervisor"]
-              );
-            } else {
-              const existingAgendaRes = await client.query(
-                `
-                SELECT id
-                FROM lead_agenda
-                WHERE contact_id = $1
-                  AND batch_id = $2
-                ORDER BY created_at DESC
-                LIMIT 1
-                `,
-                [management.contact_id, management.batch_id]
-              );
-
-              if (existingAgendaRes.rows.length) {
-                await client.query(
-                  `
-                  UPDATE lead_agenda
-                  SET cumplida = false,
-                      fecha_agenda = NOW() + INTERVAL '24 hours',
-                      nota = $2,
-                      seller_id = $3
-                  WHERE id = $1
-                  `,
-                  [
-                    existingAgendaRes.rows[0].id,
-                    "Corrección de codificación por supervisor",
-                    sellerId
-                  ]
-                );
-              } else {
+            if (isAgendaResultado) {
+              if (hasAgendaUniqueContactBatch) {
                 await client.query(
                   `
                   INSERT INTO lead_agenda (contact_id, seller_id, batch_id, fecha_agenda, nota, cumplida)
                   VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', $4, false)
+                  ON CONFLICT (contact_id, batch_id) DO UPDATE
+                    SET cumplida = false,
+                        fecha_agenda = NOW() + INTERVAL '24 hours',
+                        nota = $4,
+                        seller_id = $2
                   `,
                   [management.contact_id, sellerId, management.batch_id, "Corrección de codificación por supervisor"]
                 );
+              } else {
+                const existingAgendaRes = await client.query(
+                  `
+                  SELECT id
+                  FROM lead_agenda
+                  WHERE contact_id = $1
+                    AND batch_id = $2
+                  ORDER BY created_at DESC
+                  LIMIT 1
+                  `,
+                  [management.contact_id, management.batch_id]
+                );
+
+                if (existingAgendaRes.rows.length) {
+                  await client.query(
+                    `
+                    UPDATE lead_agenda
+                    SET cumplida = false,
+                        fecha_agenda = NOW() + INTERVAL '24 hours',
+                        nota = $2,
+                        seller_id = $3
+                    WHERE id = $1
+                    `,
+                    [
+                      existingAgendaRes.rows[0].id,
+                      "Corrección de codificación por supervisor",
+                      sellerId
+                    ]
+                  );
+                } else {
+                  await client.query(
+                    `
+                    INSERT INTO lead_agenda (contact_id, seller_id, batch_id, fecha_agenda, nota, cumplida)
+                    VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', $4, false)
+                    `,
+                    [management.contact_id, sellerId, management.batch_id, "Corrección de codificación por supervisor"]
+                  );
+                }
               }
+            } else {
+              await client.query(
+                `
+                UPDATE lead_agenda
+                SET cumplida = true
+                WHERE contact_id = $1
+                  AND batch_id = $2
+                  AND cumplida = false
+                `,
+                [management.contact_id, management.batch_id]
+              );
             }
-          } else {
-            await client.query(
-              `
-              UPDATE lead_agenda
-              SET cumplida = true
-              WHERE contact_id = $1
-                AND batch_id = $2
-                AND cumplida = false
-              `,
-              [management.contact_id, management.batch_id]
-            );
           }
+
+          const hasSupervisorCorrectionColumn = await columnExists(
+            client,
+            "lead_management_history",
+            "es_correccion_supervisor"
+          );
+
+          await client.query(
+            `
+            INSERT INTO lead_management_history
+              (contact_id, batch_id, user_id, resultado, nota, fecha_gestion${
+                hasSupervisorCorrectionColumn ? ", es_correccion_supervisor" : ""
+              })
+            VALUES ($1, $2, $3, $4, $5, NOW()${hasSupervisorCorrectionColumn ? ", TRUE" : ""})
+            `,
+            [
+              management.contact_id,
+              management.batch_id,
+              dbUser.id,
+              resultadoInput,
+              "Corrección de codificación por supervisor"
+            ]
+          );
         }
-
-        const hasSupervisorCorrectionColumn = await columnExists(
-          client,
-          "lead_management_history",
-          "es_correccion_supervisor"
-        );
-
-        await client.query(
-          `
-          INSERT INTO lead_management_history
-            (contact_id, batch_id, user_id, resultado, nota, fecha_gestion${
-              hasSupervisorCorrectionColumn ? ", es_correccion_supervisor" : ""
-            })
-          VALUES ($1, $2, $3, $4, $5, NOW()${hasSupervisorCorrectionColumn ? ", TRUE" : ""})
-          `,
-          [
-            management.contact_id,
-            management.batch_id,
-            dbUser.id,
-            resultadoInput,
-            "Corrección de codificación por supervisor"
-          ]
-        );
 
         return json(201, {
           ok: true,
