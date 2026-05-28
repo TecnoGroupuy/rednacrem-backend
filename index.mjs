@@ -8663,15 +8663,30 @@ export const handler = async (event) => {
 
           const nombre = normalizeText(getField("first_name") || getField("nombre") || getField("name")) || null;
           const apellido = normalizeText(getField("last_name") || getField("apellido")) || null;
-          const telefono = normalizeText(getField("phone_number") || getField("telefono") || getField("phone")) || null;
-          const celular = normalizeText(getField("celular") || getField("mobile")) || null;
+          const telefono = cleanPhone(normalizeText(getField("phone_number") || getField("telefono") || getField("phone")));
+          const celular = cleanPhone(normalizeText(getField("celular") || getField("mobile")));
           const email = normalizeEmail(getField("email") || getField("correo")) || null;
 
-          if (!nombre && !telefono && !email) continue;
+          if (!telefono && !celular) continue;
 
           const client = createDbClient();
           await client.connect();
           try {
+            const evalRes = await evaluarEstadoLead(
+              client,
+              telefono || null,
+              celular || null,
+              "facebook",
+              defaultOrgId,
+              null,
+              { email }
+            );
+            const estado = evalRes.estado;
+            const motivoBloqueo = evalRes.motivoBloqueo;
+            const motivoBloqueoDetalle = evalRes.motivoBloqueoDetalle || null;
+            const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
+            const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
+
             // Buscar el lote "Meta" activo
             const batchRes = await client.query(
               `
@@ -8705,19 +8720,45 @@ export const handler = async (event) => {
             const sellers = sellersRes.rows.map((r) => r.seller_id);
 
             // Insertar en datos_para_trabajar
+            const insertCols = [
+              "nombre",
+              "apellido",
+              "telefono",
+              "celular",
+              "correo_electronico",
+              "origen_dato",
+              "estado",
+              ...(hasMotivoBloqueo ? ["motivo_bloqueo"] : []),
+              ...(hasMotivoBloqueoDetalle ? ["motivo_bloqueo_detalle"] : []),
+              "organization_id"
+            ];
+            const insertVals = [
+              nombre,
+              apellido,
+              telefono,
+              celular,
+              email,
+              "facebook",
+              estado,
+              ...(hasMotivoBloqueo ? [motivoBloqueo] : []),
+              ...(hasMotivoBloqueoDetalle ? [motivoBloqueoDetalle] : []),
+              defaultOrgId
+            ];
+            const insertPlaceholders = insertCols.map((_, idx) => `$${idx + 1}`).join(", ");
+
             const insertRes = await client.query(
               `
-              INSERT INTO datos_para_trabajar (
-                nombre, apellido, telefono, celular,
-                correo_electronico, origen_dato, estado, organization_id
-              ) VALUES ($1, $2, $3, $4, $5, 'facebook', 'nuevo', $6)
+              INSERT INTO datos_para_trabajar (${insertCols.join(", ")})
+              VALUES (${insertPlaceholders})
               RETURNING id
               `,
-              [nombre, apellido, telefono, celular, email, defaultOrgId]
+              insertVals
             );
 
             const leadId = insertRes.rows[0]?.id;
             if (!leadId) continue;
+
+            if (estado !== "nuevo") continue;
 
             // Insertar en lead_batch_contacts
             await client.query(
@@ -13252,6 +13293,28 @@ export const handler = async (event) => {
           }
 
           if (!existingId) {
+            const evalRes = await evaluarEstadoLead(
+              client,
+              cleanedTelefono,
+              cleanedCelular,
+              "recupero",
+              organizationId,
+              null,
+              {
+                fechaNacimiento: contact.fecha_nacimiento || null,
+                direccion: contact.direccion || null,
+                email: contact.email || null,
+                localidad: null,
+                departamento: contact.departamento || null
+              }
+            );
+            const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
+            const hasMotivoBloqueoDetalle = await columnExists(
+              client,
+              "datos_para_trabajar",
+              "motivo_bloqueo_detalle"
+            );
+
             const columns = [];
             const values = [];
             const params = [];
@@ -13276,7 +13339,9 @@ export const handler = async (event) => {
             if (hasLocalidadCol) pushCol("localidad", null);
             if (hasCorreoCol) pushCol("correo_electronico", contact.email);
             if (hasOrigenCol) pushCol("origen_dato", "recupero");
-            if (hasEstadoCol) pushCol("estado", "nuevo");
+            if (hasEstadoCol) pushCol("estado", evalRes.estado || "nuevo");
+            if (hasMotivoBloqueo) pushCol("motivo_bloqueo", evalRes.motivoBloqueo || null);
+            if (hasMotivoBloqueoDetalle) pushCol("motivo_bloqueo_detalle", evalRes.motivoBloqueoDetalle || null);
             if (hasContactIdCol) pushCol("contact_id", contactId);
 
             const insertRes = await client.query(
@@ -14522,8 +14587,8 @@ export const handler = async (event) => {
         const apellido = normalizeText(payload?.apellido);
         const documento = normalizeText(payload?.documento) || null;
         const fechaNacimiento = parseDate(payload?.fecha_nacimiento || payload?.fechaNacimiento || null);
-        const telefono = normalizeText(payload?.telefono) || null;
-        const celular = normalizeText(payload?.celular) || null;
+        const telefono = cleanPhone(payload?.telefono) || null;
+        const celular = cleanPhone(payload?.celular) || null;
         const correo = normalizeEmail(payload?.correo_electronico || payload?.email);
         const email = correo ? correo : null;
         const direccion = normalizeText(payload?.direccion) || null;
@@ -14550,6 +14615,9 @@ export const handler = async (event) => {
       const fields = buildContactFields(contactPayload || {});
       if (!fields.nombre || !fields.apellido) {
         return json(422, { ok: false, message: "nombre y apellido requeridos" });
+      }
+      if (!fields.telefono && !fields.celular) {
+        return json(400, { ok: false, message: "Se requiere teléfono o celular" });
       }
 
       const isValidUuid = (value) =>
@@ -14583,6 +14651,32 @@ export const handler = async (event) => {
           await client.query("ROLLBACK");
           return json(500, { ok: false, message: "No se puede resolver columna de lead" });
         }
+
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+        } catch {}
+
+        const evalRes = await evaluarEstadoLead(
+          client,
+          fields.telefono,
+          fields.celular,
+          fields.origenDato || null,
+          organizationId,
+          null,
+          {
+            fechaNacimiento: fields.fechaNacimiento,
+            direccion: fields.direccion,
+            email: fields.email,
+            localidad: fields.localidad,
+            departamento: fields.departamento
+          }
+        );
+        const evalEstado = evalRes.estado || "nuevo";
+        const evalMotivo = evalRes.motivoBloqueo || null;
+        const evalMotivoDetalle = evalRes.motivoBloqueoDetalle || null;
+        const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
+        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
 
         const resolveBatchId = async () => {
           if (principalContactId && hasContactIdCol) {
@@ -14691,7 +14785,9 @@ export const handler = async (event) => {
           if (dCols.has("email")) pushCol("email", fields.email);
           if (dCols.has("pais")) pushCol("pais", fields.pais);
           if (dCols.has("origen_dato")) pushCol("origen_dato", fields.origenDato || null);
-          if (dCols.has("estado")) pushCol("estado", "nuevo");
+          if (dCols.has("estado")) pushCol("estado", evalEstado);
+          if (hasMotivoBloqueo) pushCol("motivo_bloqueo", evalMotivo);
+          if (hasMotivoBloqueoDetalle) pushCol("motivo_bloqueo_detalle", evalMotivoDetalle);
           if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
 
           if (!columns.length) {
@@ -14777,7 +14873,7 @@ export const handler = async (event) => {
           success: true,
           lead_id: leadId,
           batch_id: batchId,
-          status: "nuevo"
+          status: evalEstado
         });
       } catch (error) {
         await client.query("ROLLBACK");
@@ -17791,11 +17887,11 @@ async function getNewContactsDistribution(client, batchId) {
       if (n.startsWith("9")) n = "0" + n;
       return n;
     };
-    const celular = stripUY(celularRaw);
-    const telefono = telefonoRaw ? stripUY(telefonoRaw) : null;
+    const celular = cleanPhone(stripUY(celularRaw));
+    const telefono = cleanPhone(telefonoRaw ? stripUY(telefonoRaw) : null);
 
-    if (!nombre || !apellido || !celular) {
-      return json(400, { ok: false, message: "Nombre, apellido y celular son requeridos" });
+    if (!nombre || !apellido || (!celular && !telefono)) {
+      return json(400, { ok: false, message: "Nombre, apellido y teléfono/celular son requeridos" });
     }
 
     try {
