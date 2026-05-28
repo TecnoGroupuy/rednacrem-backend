@@ -10835,6 +10835,69 @@ export const handler = async (event) => {
       const nombreIdx = idxOf("nombre");
       const apellidoIdx = idxOf("apellido");
 
+      const normalizedRows = rows.map((row) => {
+        const documento = documentoIdx >= 0 ? normalizeText(row[documentoIdx]) : null;
+        const nombre = nombreIdx >= 0 ? normalizeText(row[nombreIdx]) : null;
+        const apellido = apellidoIdx >= 0 ? normalizeText(row[apellidoIdx]) : null;
+        const telefonoRaw = telefonoIdx >= 0 ? normalizeText(row[telefonoIdx]) : null;
+        const celularRaw = celularIdx >= 0 ? normalizeText(row[celularIdx]) : null;
+
+        let telefono = normalizarTelefonoUY(telefonoRaw);
+        let celular = normalizarTelefonoUY(celularRaw);
+
+        if (/^09[1-9]\d{6}$/.test(telefono) && !celular) {
+          celular = telefono;
+          telefono = "";
+        }
+
+        return { documento, nombre, apellido, telefono, celular };
+      });
+
+      const seenDocumento = new Map();
+      const seenTelefono = new Map();
+      const seenCelular = new Map();
+      const duplicateRows = [];
+
+      for (let i = 0; i < normalizedRows.length; i++) {
+        const row = normalizedRows[i];
+        const dupes = [];
+
+        if (row.documento && seenDocumento.has(row.documento)) {
+          dupes.push({ campo: "documento", valor: row.documento, primera_fila: seenDocumento.get(row.documento) + 1 });
+        } else if (row.documento) {
+          seenDocumento.set(row.documento, i);
+        }
+
+        if (row.telefono && seenTelefono.has(row.telefono)) {
+          dupes.push({ campo: "telefono", valor: row.telefono, primera_fila: seenTelefono.get(row.telefono) + 1 });
+        } else if (row.telefono) {
+          seenTelefono.set(row.telefono, i);
+        }
+
+        if (row.celular && seenCelular.has(row.celular)) {
+          dupes.push({ campo: "celular", valor: row.celular, primera_fila: seenCelular.get(row.celular) + 1 });
+        } else if (row.celular) {
+          seenCelular.set(row.celular, i);
+        }
+
+        if (dupes.length) {
+          duplicateRows.push({
+            fila: i + 2,
+            nombre: row.nombre,
+            apellido: row.apellido,
+            duplicados: dupes
+          });
+        }
+      }
+
+      if (duplicateRows.length > 0) {
+        return json(400, {
+          ok: false,
+          error: `El CSV contiene ${duplicateRows.length} filas duplicadas. Corregí el archivo antes de subir.`,
+          duplicados: duplicateRows.slice(0, 50)
+        });
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -10844,24 +10907,14 @@ export const handler = async (event) => {
         let errors = 0;
         const notFoundList = [];
 
-        for (const row of rows) {
-          const documento = documentoIdx >= 0 ? normalizeText(row[documentoIdx]) : null;
-          const nombre = nombreIdx >= 0 ? normalizeText(row[nombreIdx]) : null;
-          const apellido = apellidoIdx >= 0 ? normalizeText(row[apellidoIdx]) : null;
-          const telefonoRaw = telefonoIdx >= 0 ? normalizeText(row[telefonoIdx]) : null;
-          const celularRaw = celularIdx >= 0 ? normalizeText(row[celularIdx]) : null;
-
-          let normalizedTelefono = normalizarTelefonoUY(telefonoRaw);
-          let normalizedCelular = normalizarTelefonoUY(celularRaw);
-
-          if (/^09[1-9]\d{6}$/.test(normalizedTelefono) && !normalizedCelular) {
-            normalizedCelular = normalizedTelefono;
-            normalizedTelefono = "";
-          }
+        for (const row of normalizedRows) {
+          const documento = row.documento;
+          const nombre = row.nombre;
+          const apellido = row.apellido;
 
           const camposTelefono = [
-            { campo: "telefono", valor: normalizedTelefono },
-            { campo: "celular", valor: normalizedCelular }
+            { campo: "telefono", valor: row.telefono },
+            { campo: "celular", valor: row.celular }
           ].filter((t) => t.valor);
 
           let invalidPhone = false;
@@ -10875,8 +10928,8 @@ export const handler = async (event) => {
           }
           if (invalidPhone) continue;
 
-          const telefono = telefonoIdx >= 0 ? cleanPhone(normalizedTelefono) : null;
-          const celular = celularIdx >= 0 ? cleanPhone(normalizedCelular) : null;
+          const telefono = cleanPhone(row.telefono) || null;
+          const celular = cleanPhone(row.celular) || null;
 
           const hasPhone = Boolean(telefono || celular);
           if (!hasPhone) {
