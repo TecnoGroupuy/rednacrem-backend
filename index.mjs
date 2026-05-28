@@ -670,6 +670,10 @@ function validarTelefonoUY(numero) {
   return fijo || celular;
 }
 
+function isNullOrEmpty(value) {
+  return value === null || value === undefined || String(value).trim() === "";
+}
+
 function unaccentSimple(value) {
   if (!value) return "";
   return String(value)
@@ -10762,6 +10766,167 @@ export const handler = async (event) => {
         message: "Failed to create contact",
         error: error.message
       });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/contacts/update-batch")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      if (!["admin", "supervisor"].includes(dbUser?.role_key)) {
+        return json(403, { ok: false, message: "Forbidden" });
+      }
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const multipart = parseMultipartFormData(event, { encoding: "latin1" });
+      if (!multipart) {
+        return json(400, { ok: false, message: "Se requiere multipart/form-data con archivo CSV" });
+      }
+      const fileEntry =
+        multipart?.files?.file ||
+        multipart?.files?.archivo ||
+        Object.values(multipart?.files || {})[0];
+      const csvText = fileEntry?.content || "";
+      if (!csvText.trim()) {
+        return json(400, { ok: false, message: "CSV vacío" });
+      }
+
+      const { headers, rows } = parseCsvWithHeaders(csvText);
+      if (!headers.length) {
+        return json(400, { ok: false, message: "CSV sin headers" });
+      }
+
+      const headerKeys = headers.map((h) => normalizeCsvHeader(h));
+      const idxOf = (name) => headerKeys.indexOf(normalizeCsvHeader(name));
+      const documentoIdx = idxOf("documento");
+      const telefonoIdx = idxOf("telefono");
+      const celularIdx = idxOf("celular");
+      const nombreIdx = idxOf("nombre");
+      const apellidoIdx = idxOf("apellido");
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        let updated = 0;
+        let skipped = 0;
+        let notFound = 0;
+        let errors = 0;
+        const notFoundList = [];
+
+        for (const row of rows) {
+          const documento = documentoIdx >= 0 ? normalizeText(row[documentoIdx]) : null;
+          const nombre = nombreIdx >= 0 ? normalizeText(row[nombreIdx]) : null;
+          const apellido = apellidoIdx >= 0 ? normalizeText(row[apellidoIdx]) : null;
+          const telefono = telefonoIdx >= 0 ? cleanPhone(row[telefonoIdx]) : null;
+          const celular = celularIdx >= 0 ? cleanPhone(row[celularIdx]) : null;
+
+          const hasPhone = Boolean(telefono || celular);
+          if (!hasPhone) {
+            errors += 1;
+            continue;
+          }
+
+          try {
+            let contact = null;
+
+            if (documento) {
+              const res = await client.query(
+                `
+                SELECT id, telefono, celular
+                FROM contacts
+                WHERE organization_id = $1
+                  AND documento = $2
+                LIMIT 1
+                `,
+                [organizationId, documento]
+              );
+              contact = res.rows[0] || null;
+            }
+
+            if (!contact && nombre && apellido) {
+              const res = await client.query(
+                `
+                SELECT id, telefono, celular
+                FROM contacts
+                WHERE organization_id = $1
+                  AND LOWER(TRIM(nombre)) = LOWER(TRIM($2))
+                  AND LOWER(TRIM(apellido)) = LOWER(TRIM($3))
+                LIMIT 1
+                `,
+                [organizationId, nombre, apellido]
+              );
+              contact = res.rows[0] || null;
+            }
+
+            if (!contact) {
+              notFound += 1;
+              if (notFoundList.length < 50) {
+                notFoundList.push({ nombre, apellido, documento });
+              }
+              continue;
+            }
+
+            const contactHasPhones = !isNullOrEmpty(contact.telefono) || !isNullOrEmpty(contact.celular);
+            if (contactHasPhones) {
+              skipped += 1;
+              continue;
+            }
+
+            const updateRes = await client.query(
+              `
+              UPDATE contacts
+              SET
+                telefono = COALESCE(NULLIF($1, ''), telefono),
+                celular = COALESCE(NULLIF($2, ''), celular),
+                documento = COALESCE(NULLIF($3, ''), documento),
+                updated_at = now()
+              WHERE id = $4
+                AND (telefono IS NULL OR BTRIM(telefono) = '')
+                AND (celular IS NULL OR BTRIM(celular) = '')
+              `,
+              [telefono || "", celular || "", documento || "", contact.id]
+            );
+
+            if (updateRes.rowCount > 0) updated += 1;
+            else skipped += 1;
+          } catch {
+            errors += 1;
+          }
+        }
+
+        return json(200, {
+          ok: true,
+          total: rows.length,
+          updated,
+          skipped,
+          not_found: notFound,
+          errors,
+          not_found_list: notFoundList
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update contacts batch", error: error.message });
     }
   }
 
