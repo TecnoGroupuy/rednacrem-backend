@@ -19858,12 +19858,12 @@ async function getNewContactsDistribution(client, batchId) {
       }
 
       const periodoRaw = getQueryParam(event, "periodo");
-      let periodo = String(periodoRaw || "mes").trim().toLowerCase();
+      let periodo = periodoRaw ? String(periodoRaw).trim().toLowerCase() : null;
       if (periodo === "este_mes") periodo = "mes";
       if (periodo === "ultimos_7_dias") periodo = "semana";
       if (periodo === "hoy") periodo = "dia";
       const origenDatoRaw = getQueryParam(event, "origen_dato");
-      const origenDato = String(origenDatoRaw || "facebook").trim().toLowerCase();
+      const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
 
       const client = createDbClient();
