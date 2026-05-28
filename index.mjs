@@ -646,28 +646,28 @@ function cleanPhone(value) {
 }
 
 function validarTelefonoUY(numero) {
-  if (numero === null || numero === undefined) return true;
-  const text = String(numero).trim();
-  if (text === "" || text === "—") return true; // vacío es ok
-
-  const limpio = text.replace(/\D/g, "");
-  if (!limpio) return true;
+  if (!numero || String(numero).trim() === "") return { ok: true };
+  const limpio = String(numero).replace(/\D/g, "");
 
   // Block all same digits: 22222222, 11111111, 099999999
-  if (/^(\d)\1+$/.test(limpio)) return false;
+  if (/^(\d)\1+$/.test(limpio)) return { ok: false, campo: null, msg: "Número inválido (dígitos repetidos)" };
 
-  // Block sequential: 12345678, 87654321
+  // Block sequential ascending or descending
   const sec = "01234567890";
-  const secRev = "09876543210";
-  if (sec.includes(limpio) || secRev.includes(limpio)) return false;
+  const secR = "09876543210";
+  if (sec.includes(limpio) || secR.includes(limpio)) return { ok: false, msg: "Número inválido (secuencia numérica)" };
 
   // Uruguay landline: 8 digits starting with 2, 3 or 4
   const fijo = /^[2-4]\d{7}$/.test(limpio);
 
-  // Uruguay mobile: 9 digits starting with 091-099
+  // Uruguay mobile: 9 digits starting with 091–099
   const celular = /^09[1-9]\d{6}$/.test(limpio);
 
-  return fijo || celular;
+  if (!fijo && !celular) {
+    return { ok: false, msg: "Debe ser un número uruguayo válido (fijo: 2xxxxxxx · celular: 09xxxxxxx)" };
+  }
+
+  return { ok: true };
 }
 
 function isNullOrEmpty(value) {
@@ -9690,11 +9690,11 @@ export const handler = async (event) => {
       ].filter((t) => t.valor);
 
       for (const t of telefonos) {
-        if (!validarTelefonoUY(t.valor)) {
+        const v = validarTelefonoUY(t.valor);
+        if (!v.ok) {
           return json(400, {
             ok: false,
-            error:
-              `El ${t.campo} ingresado no es válido. Debe ser un número uruguayo real (fijo: 2xxxxxxx, celular: 09xxxxxxx).`,
+            error: `El campo ${t.campo} no es válido: ${v.msg}`,
             campo: t.campo
           });
         }
@@ -10836,8 +10836,27 @@ export const handler = async (event) => {
           const documento = documentoIdx >= 0 ? normalizeText(row[documentoIdx]) : null;
           const nombre = nombreIdx >= 0 ? normalizeText(row[nombreIdx]) : null;
           const apellido = apellidoIdx >= 0 ? normalizeText(row[apellidoIdx]) : null;
-          const telefono = telefonoIdx >= 0 ? cleanPhone(row[telefonoIdx]) : null;
-          const celular = celularIdx >= 0 ? cleanPhone(row[celularIdx]) : null;
+          const telefonoRaw = telefonoIdx >= 0 ? normalizeText(row[telefonoIdx]) : null;
+          const celularRaw = celularIdx >= 0 ? normalizeText(row[celularIdx]) : null;
+
+          const camposTelefono = [
+            { campo: "telefono", valor: telefonoRaw },
+            { campo: "celular", valor: celularRaw }
+          ].filter((t) => t.valor);
+
+          let invalidPhone = false;
+          for (const t of camposTelefono) {
+            const v = validarTelefonoUY(t.valor);
+            if (!v.ok) {
+              errors += 1;
+              invalidPhone = true;
+              break;
+            }
+          }
+          if (invalidPhone) continue;
+
+          const telefono = telefonoIdx >= 0 ? cleanPhone(telefonoRaw) : null;
+          const celular = celularIdx >= 0 ? cleanPhone(celularRaw) : null;
 
           const hasPhone = Boolean(telefono || celular);
           if (!hasPhone) {
@@ -10986,11 +11005,11 @@ export const handler = async (event) => {
       ].filter((t) => t.valor);
 
       for (const t of telefonos) {
-        if (!validarTelefonoUY(t.valor)) {
+        const v = validarTelefonoUY(t.valor);
+        if (!v.ok) {
           return json(400, {
             ok: false,
-            error:
-              `El ${t.campo} ingresado no es válido. Debe ser un número uruguayo real (fijo: 2xxxxxxx, celular: 09xxxxxxx).`,
+            error: `El campo ${t.campo} no es válido: ${v.msg}`,
             campo: t.campo
           });
         }
