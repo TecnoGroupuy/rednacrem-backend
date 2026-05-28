@@ -14178,6 +14178,7 @@ export const handler = async (event) => {
             AND lcs.assigned_to = $2
             AND lcs.estado_venta = ANY($3)
             AND lcs.intentos < $4
+            AND d.estado <> 'bloqueado'
             AND (
               lcs.ultimo_intento_at IS NULL
               OR EXTRACT(EPOCH FROM (NOW() - lcs.ultimo_intento_at)) > $5
