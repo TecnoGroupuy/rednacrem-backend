@@ -10827,7 +10827,10 @@ export const handler = async (event) => {
         return json(400, { ok: false, message: "CSV sin headers" });
       }
 
+      console.log("update-batch headers:", headers, "rows count:", rows.length);
+
       const headerKeys = headers.map((h) => normalizeCsvHeader(h));
+      console.log("update-batch header keys:", headerKeys);
       const idxOf = (name) => headerKeys.indexOf(normalizeCsvHeader(name));
       const documentoIdx = idxOf("documento");
       const telefonoIdx = idxOf("telefono");
@@ -10852,6 +10855,9 @@ export const handler = async (event) => {
 
         return { documento, nombre, apellido, telefono, celular };
       });
+
+      console.log("update-batch total rows received:", normalizedRows.length);
+      console.log("update-batch first 3 rows parsed:", normalizedRows.slice(0, 3));
 
       const seenDocumento = new Map();
       const seenTelefono = new Map();
