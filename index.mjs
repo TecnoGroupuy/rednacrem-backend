@@ -670,6 +670,18 @@ function validarTelefonoUY(numero) {
   return { ok: true };
 }
 
+function normalizarTelefonoUY(numero) {
+  if (!numero || String(numero).trim() === "") return "";
+  const limpio = String(numero).replace(/\D/g, "");
+
+  // Add leading 0 to 8-digit mobile numbers starting with 9
+  // e.g. 99163123 → 099163123
+  if (/^9[1-9]\d{6}$/.test(limpio)) return `0${limpio}`;
+
+  // Move 9-digit mobile from telefono to celular handled at row level
+  return limpio;
+}
+
 function isNullOrEmpty(value) {
   return value === null || value === undefined || String(value).trim() === "";
 }
@@ -10839,9 +10851,17 @@ export const handler = async (event) => {
           const telefonoRaw = telefonoIdx >= 0 ? normalizeText(row[telefonoIdx]) : null;
           const celularRaw = celularIdx >= 0 ? normalizeText(row[celularIdx]) : null;
 
+          let normalizedTelefono = normalizarTelefonoUY(telefonoRaw);
+          let normalizedCelular = normalizarTelefonoUY(celularRaw);
+
+          if (/^09[1-9]\d{6}$/.test(normalizedTelefono) && !normalizedCelular) {
+            normalizedCelular = normalizedTelefono;
+            normalizedTelefono = "";
+          }
+
           const camposTelefono = [
-            { campo: "telefono", valor: telefonoRaw },
-            { campo: "celular", valor: celularRaw }
+            { campo: "telefono", valor: normalizedTelefono },
+            { campo: "celular", valor: normalizedCelular }
           ].filter((t) => t.valor);
 
           let invalidPhone = false;
@@ -10855,8 +10875,8 @@ export const handler = async (event) => {
           }
           if (invalidPhone) continue;
 
-          const telefono = telefonoIdx >= 0 ? cleanPhone(telefonoRaw) : null;
-          const celular = celularIdx >= 0 ? cleanPhone(celularRaw) : null;
+          const telefono = telefonoIdx >= 0 ? cleanPhone(normalizedTelefono) : null;
+          const celular = celularIdx >= 0 ? cleanPhone(normalizedCelular) : null;
 
           const hasPhone = Boolean(telefono || celular);
           if (!hasPhone) {
