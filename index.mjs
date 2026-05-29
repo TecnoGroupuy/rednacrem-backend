@@ -3942,17 +3942,6 @@ function validateImportRow(item) {
   return errors;
 }
 
-function validateActualizarContactosImportRow(item) {
-  const errors = [];
-  const documento = normalizeText(item?.documento || null);
-  const nombre = normalizeText(item?.nombre || null);
-  const apellido = normalizeText(item?.apellido || null);
-  if (!documento && !(nombre && apellido)) {
-    errors.push("documento o nombre+apellido requerido");
-  }
-  return errors;
-}
-
 async function ensureDatosTrabajarJobTable(client) {
   await client.query(
     `
@@ -4887,312 +4876,6 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
   }
 }
 
-async function processActualizarContactosBatch(batchId, organizationId, client) {
-  let updated = 0;
-  let skipped = 0;
-  let notFound = 0;
-  let ambiguous = 0;
-  let failed = 0;
-
-  const batchValues = [batchId];
-  const batchOrgClause = organizationId ? "AND organization_id = $2" : "";
-  if (organizationId) batchValues.push(organizationId);
-
-  await client.query(
-    `
-    UPDATE contact_import_batches
-    SET status = 'processing',
-        updated_at = now()
-    WHERE id = $1
-    ${batchOrgClause}
-    `,
-    batchValues
-  );
-
-  const rowsValues = [batchId];
-  const rowsOrgClause = organizationId ? "AND organization_id = $2" : "";
-  if (organizationId) rowsValues.push(organizationId);
-
-  const rowsRes = await client.query(
-    `
-    SELECT
-      id,
-      row_number,
-      nombre,
-      apellido,
-      documento,
-      telefono,
-      telefono_celular
-    FROM contact_import_rows
-    WHERE batch_id = $1
-      ${rowsOrgClause}
-      AND import_status = 'validated'
-    ORDER BY row_number ASC
-    `,
-    rowsValues
-  );
-
-  for (const row of rowsRes.rows) {
-    try {
-      await client.query("BEGIN");
-
-      let normalizedTelefono = normalizarTelefonoUY(row.telefono || "");
-      let normalizedCelular = normalizarTelefonoUY(row.telefono_celular || "");
-
-      if (/^09[1-9]\d{6}$/.test(normalizedTelefono) && !normalizedCelular) {
-        normalizedCelular = normalizedTelefono;
-        normalizedTelefono = "";
-      }
-
-      const camposTelefono = [
-        { campo: "telefono", valor: normalizedTelefono },
-        { campo: "celular", valor: normalizedCelular }
-      ].filter((t) => t.valor);
-
-      for (const t of camposTelefono) {
-        const v = validarTelefonoUY(t.valor);
-        if (!v.ok) {
-          await client.query(
-            `
-            UPDATE contact_import_rows
-            SET import_status = 'error',
-                error_detail = $1,
-                updated_at = now()
-            WHERE id = $2
-            ${organizationId ? "AND organization_id = $3" : ""}
-            `,
-            organizationId
-              ? [`${t.campo}: ${v.msg}`, row.id, organizationId]
-              : [`${t.campo}: ${v.msg}`, row.id]
-          );
-          failed += 1;
-          await client.query("COMMIT");
-          continue;
-        }
-      }
-
-      const tel = cleanPhone(normalizedTelefono) || null;
-      const cel = cleanPhone(normalizedCelular) || null;
-      const documento = normalizeText(row.documento) || null;
-
-      let contact = null;
-
-      if (documento) {
-        const res = await client.query(
-          `
-          SELECT id, telefono, celular
-          FROM contacts
-          WHERE organization_id = $1
-            AND documento = $2
-          LIMIT 1
-          `,
-          [organizationId, documento]
-        );
-        contact = res.rows[0] || null;
-      }
-
-      if (!contact) {
-        const nombre = normalizeText(row.nombre) || null;
-        const apellido = normalizeText(row.apellido) || null;
-        if (nombre && apellido) {
-          const res = await client.query(
-            `
-            SELECT id, telefono, celular
-            FROM contacts
-            WHERE organization_id = $1
-              AND LOWER(TRIM(nombre)) = LOWER(TRIM($2))
-              AND LOWER(TRIM(apellido)) = LOWER(TRIM($3))
-            `,
-            [organizationId, nombre, apellido]
-          );
-          if (res.rowCount > 1) {
-            ambiguous += 1;
-            await client.query(
-              `
-              UPDATE contact_import_rows
-              SET import_status = 'error',
-                  error_detail = $1,
-                  updated_at = now()
-              WHERE id = $2
-              ${organizationId ? "AND organization_id = $3" : ""}
-              `,
-              organizationId
-                ? ["ambiguous: múltiples contactos para nombre+apellido", row.id, organizationId]
-                : ["ambiguous: múltiples contactos para nombre+apellido", row.id]
-            );
-            await client.query("COMMIT");
-            continue;
-          }
-          contact = res.rows[0] || null;
-        }
-      }
-
-      if (!contact) {
-        notFound += 1;
-        await client.query(
-          `
-          UPDATE contact_import_rows
-          SET import_status = 'error',
-              error_detail = $1,
-              updated_at = now()
-          WHERE id = $2
-          ${organizationId ? "AND organization_id = $3" : ""}
-          `,
-          organizationId ? ["not_found", row.id, organizationId] : ["not_found", row.id]
-        );
-        await client.query("COMMIT");
-        continue;
-      }
-
-      const contactHasPhones =
-        !isNullOrEmpty(contact.telefono) || !isNullOrEmpty(contact.celular);
-      if (contactHasPhones) {
-        skipped += 1;
-        await client.query(
-          `
-          UPDATE contact_import_rows
-          SET import_status = 'skipped',
-              error_detail = 'skipped: ya tiene teléfono',
-              resolved_contact_id = $1,
-              updated_at = now()
-          WHERE id = $2
-          ${organizationId ? "AND organization_id = $3" : ""}
-          `,
-          organizationId ? [contact.id, row.id, organizationId] : [contact.id, row.id]
-        );
-        await client.query("COMMIT");
-        continue;
-      }
-
-      const updateRes = await client.query(
-        `
-        UPDATE contacts
-        SET
-          telefono = COALESCE(NULLIF($1, ''), telefono),
-          celular = COALESCE(NULLIF($2, ''), celular),
-          documento = COALESCE(NULLIF($3, ''), documento),
-          updated_at = now()
-        WHERE id = $4
-          AND (telefono IS NULL OR BTRIM(telefono) = '')
-          AND (celular IS NULL OR BTRIM(celular) = '')
-        `,
-        [tel || "", cel || "", documento || "", contact.id]
-      );
-
-      if (updateRes.rowCount > 0) {
-        updated += 1;
-        await client.query(
-          `
-          UPDATE contact_import_rows
-          SET import_status = 'imported',
-              error_detail = NULL,
-              resolved_contact_id = $1,
-              updated_at = now()
-          WHERE id = $2
-          ${organizationId ? "AND organization_id = $3" : ""}
-          `,
-          organizationId ? [contact.id, row.id, organizationId] : [contact.id, row.id]
-        );
-      } else {
-        skipped += 1;
-        await client.query(
-          `
-          UPDATE contact_import_rows
-          SET import_status = 'skipped',
-              error_detail = 'skipped: ya tiene teléfono',
-              resolved_contact_id = $1,
-              updated_at = now()
-          WHERE id = $2
-          ${organizationId ? "AND organization_id = $3" : ""}
-          `,
-          organizationId ? [contact.id, row.id, organizationId] : [contact.id, row.id]
-        );
-      }
-
-      await client.query("COMMIT");
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {}
-      failed += 1;
-      await client.query(
-        `
-        UPDATE contact_import_rows
-        SET import_status = 'error',
-            error_detail = $1,
-            updated_at = now()
-        WHERE id = $2
-        ${organizationId ? "AND organization_id = $3" : ""}
-        `,
-        organizationId ? [error.message, row.id, organizationId] : [error.message, row.id]
-      );
-    }
-  }
-
-  const summaryValues = [batchId];
-  const summaryOrgClause = organizationId ? "AND organization_id = $2" : "";
-  if (organizationId) summaryValues.push(organizationId);
-  const summaryRes = await client.query(
-    `
-    SELECT
-      COUNT(*)::int AS total_rows,
-      COUNT(*) FILTER (WHERE import_status = 'imported')::int AS imported_rows,
-      COUNT(*) FILTER (WHERE import_status = 'error')::int AS error_rows
-    FROM contact_import_rows
-    WHERE batch_id = $1
-    ${summaryOrgClause}
-    `,
-    summaryValues
-  );
-  const summary = summaryRes.rows[0] || {};
-
-  const rejectedMissingDocumento = notFound + ambiguous;
-  const updateBatchValues = organizationId
-    ? [
-      summary.total_rows || 0,
-      summary.imported_rows || 0,
-      summary.error_rows || 0,
-      updated,
-      rejectedMissingDocumento,
-      batchId,
-      organizationId
-    ]
-    : [
-      summary.total_rows || 0,
-      summary.imported_rows || 0,
-      summary.error_rows || 0,
-      updated,
-      rejectedMissingDocumento,
-      batchId
-    ];
-
-  await client.query(
-    `
-    UPDATE contact_import_batches
-    SET total_rows = $1,
-        valid_rows = $2,
-        error_rows = $3,
-        report_new_contacts = $4,
-        rejected_missing_documento = $5,
-        status = 'processed',
-        updated_at = now()
-    WHERE id = $6
-    ${organizationId ? "AND organization_id = $7" : ""}
-    `,
-    updateBatchValues
-  );
-
-  return {
-    ok: true,
-    batchId,
-    updated,
-    skipped,
-    notFound,
-    ambiguous,
-    failed
-  };
-}
-
 async function processClientImportBatch(
   batchId,
   {
@@ -5216,7 +4899,7 @@ async function processClientImportBatch(
   try {
     const batchRes = await client.query(
       `
-      SELECT id, organization_id, import_type
+      SELECT id, organization_id
       FROM contact_import_batches
       WHERE id = $1
       LIMIT 1
@@ -5225,10 +4908,6 @@ async function processClientImportBatch(
     );
     const batch = batchRes.rows[0] || null;
     let organizationId = initialOrganizationId || batch?.organization_id || null;
-
-    if (batch?.import_type === "actualizar_contactos") {
-      return await processActualizarContactosBatch(batchId, organizationId, client);
-    }
 
     const hasResolvedSellerUserId = await columnExists(
       client,
@@ -11105,7 +10784,7 @@ export const handler = async (event) => {
     }
   }
 
-  if (method === "POST" && path.endsWith("/contacts/update-batch")) {
+  if (method === "POST" && path.endsWith("/contacts/bulk-update-phones")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -11118,7 +10797,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      if (!["admin", "supervisor"].includes(dbUser?.role_key)) {
+      if (!["superadministrador", "admin"].includes(dbUser?.role_key)) {
         return json(403, { ok: false, message: "Forbidden" });
       }
 
@@ -11151,10 +10830,7 @@ export const handler = async (event) => {
         return json(400, { ok: false, message: "CSV sin headers" });
       }
 
-      console.log("update-batch headers:", headers, "rows count:", rows.length);
-
       const headerKeys = headers.map((h) => normalizeCsvHeader(h));
-      console.log("update-batch header keys:", headerKeys);
       const idxOf = (name) => headerKeys.indexOf(normalizeCsvHeader(name));
       const documentoIdx = idxOf("documento");
       const telefonoIdx = idxOf("telefono");
@@ -11162,7 +10838,7 @@ export const handler = async (event) => {
       const nombreIdx = idxOf("nombre");
       const apellidoIdx = idxOf("apellido");
 
-      const normalizedRows = rows.map((row) => {
+      const normalizedRows = rows.map((row, index) => {
         const documento = documentoIdx >= 0 ? normalizeText(row[documentoIdx]) : null;
         const nombre = nombreIdx >= 0 ? normalizeText(row[nombreIdx]) : null;
         const apellido = apellidoIdx >= 0 ? normalizeText(row[apellidoIdx]) : null;
@@ -11177,178 +10853,213 @@ export const handler = async (event) => {
           telefono = "";
         }
 
-        return { documento, nombre, apellido, telefono, celular };
+        return { rowIndex: index, documento, nombre, apellido, telefono, celular };
       });
 
-      console.log("update-batch total rows received:", normalizedRows.length);
-      console.log("update-batch first 3 rows parsed:", normalizedRows.slice(0, 3));
+      const normalizeNameKey = (value) => (normalizeText(value) || "").trim().toLowerCase();
+      const buildNameKey = (nombre, apellido) => `${normalizeNameKey(nombre)}|${normalizeNameKey(apellido)}`;
 
-      const seenDocumento = new Map();
-      const seenTelefono = new Map();
-      const seenCelular = new Map();
-      const duplicateRows = [];
+      const docsSet = new Set();
+      const nameKeysSet = new Set();
+      const namePairs = [];
 
-      for (let i = 0; i < normalizedRows.length; i++) {
-        const row = normalizedRows[i];
-        const dupes = [];
-
-        if (row.documento && seenDocumento.has(row.documento)) {
-          dupes.push({ campo: "documento", valor: row.documento, primera_fila: seenDocumento.get(row.documento) + 1 });
-        } else if (row.documento) {
-          seenDocumento.set(row.documento, i);
-        }
-
-        if (row.telefono && seenTelefono.has(row.telefono)) {
-          dupes.push({ campo: "telefono", valor: row.telefono, primera_fila: seenTelefono.get(row.telefono) + 1 });
-        } else if (row.telefono) {
-          seenTelefono.set(row.telefono, i);
-        }
-
-        if (row.celular && seenCelular.has(row.celular)) {
-          dupes.push({ campo: "celular", valor: row.celular, primera_fila: seenCelular.get(row.celular) + 1 });
-        } else if (row.celular) {
-          seenCelular.set(row.celular, i);
-        }
-
-        if (dupes.length) {
-          duplicateRows.push({
-            fila: i + 2,
-            nombre: row.nombre,
-            apellido: row.apellido,
-            duplicados: dupes
-          });
+      for (const row of normalizedRows) {
+        if (row.documento) docsSet.add(row.documento);
+        if (row.nombre && row.apellido) {
+          const key = buildNameKey(row.nombre, row.apellido);
+          if (key !== "|") {
+            if (!nameKeysSet.has(key)) {
+              nameKeysSet.add(key);
+              namePairs.push({ nombre: normalizeNameKey(row.nombre), apellido: normalizeNameKey(row.apellido) });
+            }
+          }
         }
       }
 
-      if (duplicateRows.length > 0) {
-        return json(400, {
-          ok: false,
-          error: `El CSV contiene ${duplicateRows.length} filas duplicadas. Corregí el archivo antes de subir.`,
-          duplicados: duplicateRows.slice(0, 50)
-        });
-      }
+      const documentos = Array.from(docsSet);
 
       const client = createDbClient();
       await client.connect();
       try {
-        let updated = 0;
-        let skipped = 0;
-        let notFound = 0;
-        let errors = 0;
-        const notFoundList = [];
+        await client.query("BEGIN");
 
-        for (const row of normalizedRows) {
-          const documento = row.documento;
-          const nombre = row.nombre;
-          const apellido = row.apellido;
+        const values = [organizationId];
+        const whereParts = [];
 
-          const camposTelefono = [
-            { campo: "telefono", valor: row.telefono },
-            { campo: "celular", valor: row.celular }
-          ].filter((t) => t.valor);
+        if (documentos.length > 0) {
+          values.push(documentos);
+          whereParts.push(`documento = ANY($${values.length}::text[])`);
+        }
 
-          let invalidPhone = false;
-          for (const t of camposTelefono) {
-            const v = validarTelefonoUY(t.valor);
-            if (!v.ok) {
-              errors += 1;
-              invalidPhone = true;
-              break;
-            }
+        if (namePairs.length > 0) {
+          const tupleParts = [];
+          for (const pair of namePairs) {
+            values.push(pair.nombre, pair.apellido);
+            const nombreParam = `$${values.length - 1}`;
+            const apellidoParam = `$${values.length}`;
+            tupleParts.push(`(LOWER(TRIM(${nombreParam})), LOWER(TRIM(${apellidoParam})))`);
           }
-          if (invalidPhone) continue;
+          whereParts.push(`(LOWER(TRIM(nombre)), LOWER(TRIM(apellido))) IN (${tupleParts.join(", ")})` + ")");
+        }
 
-          const telefono = cleanPhone(row.telefono) || null;
-          const celular = cleanPhone(row.celular) || null;
+        const whereClause = whereParts.length ? `AND (${whereParts.join(" OR ")})` : "";
 
-          const hasPhone = Boolean(telefono || celular);
-          if (!hasPhone) {
-            errors += 1;
-            continue;
+        const contactsRes = await client.query(
+          `
+          SELECT id, documento, nombre, apellido, telefono, celular
+          FROM contacts
+          WHERE organization_id = $1
+          ${whereClause}
+          `,
+          values
+        );
+
+        const contactsByDocumento = new Map();
+        const contactsByNameKey = new Map();
+
+        for (const c of contactsRes.rows) {
+          const doc = normalizeText(c.documento) || null;
+          if (doc) {
+            const list = contactsByDocumento.get(doc) || [];
+            list.push(c);
+            contactsByDocumento.set(doc, list);
           }
-
-          try {
-            let contact = null;
-
-            if (documento) {
-              const res = await client.query(
-                `
-                SELECT id, telefono, celular
-                FROM contacts
-                WHERE organization_id = $1
-                  AND documento = $2
-                LIMIT 1
-                `,
-                [organizationId, documento]
-              );
-              contact = res.rows[0] || null;
-            }
-
-            if (!contact && nombre && apellido) {
-              const res = await client.query(
-                `
-                SELECT id, telefono, celular
-                FROM contacts
-                WHERE organization_id = $1
-                  AND LOWER(TRIM(nombre)) = LOWER(TRIM($2))
-                  AND LOWER(TRIM(apellido)) = LOWER(TRIM($3))
-                LIMIT 1
-                `,
-                [organizationId, nombre, apellido]
-              );
-              contact = res.rows[0] || null;
-            }
-
-            if (!contact) {
-              notFound += 1;
-              if (notFoundList.length < 50) {
-                notFoundList.push({ nombre, apellido, documento });
-              }
-              continue;
-            }
-
-            const contactHasPhones = !isNullOrEmpty(contact.telefono) || !isNullOrEmpty(contact.celular);
-            if (contactHasPhones) {
-              skipped += 1;
-              continue;
-            }
-
-            const updateRes = await client.query(
-              `
-              UPDATE contacts
-              SET
-                telefono = COALESCE(NULLIF($1, ''), telefono),
-                celular = COALESCE(NULLIF($2, ''), celular),
-                documento = COALESCE(NULLIF($3, ''), documento),
-                updated_at = now()
-              WHERE id = $4
-                AND (telefono IS NULL OR BTRIM(telefono) = '')
-                AND (celular IS NULL OR BTRIM(celular) = '')
-              `,
-              [telefono || "", celular || "", documento || "", contact.id]
-            );
-
-            if (updateRes.rowCount > 0) updated += 1;
-            else skipped += 1;
-          } catch {
-            errors += 1;
+          const key = buildNameKey(c.nombre, c.apellido);
+          if (key !== "|") {
+            const list = contactsByNameKey.get(key) || [];
+            list.push(c);
+            contactsByNameKey.set(key, list);
           }
         }
 
+        let updated = 0;
+        let skipped = 0;
+        let notFound = 0;
+        let ambiguous = 0;
+        const notFoundList = [];
+        const ambiguousList = [];
+        const updatedList = [];
+
+        const pendingUpdates = [];
+
+        for (const row of normalizedRows) {
+          const tel = cleanPhone(row.telefono) || null;
+          const cel = cleanPhone(row.celular) || null;
+
+          if (!tel && !cel) {
+            skipped += 1;
+            continue;
+          }
+
+          let matches = null;
+          if (row.documento) {
+            matches = contactsByDocumento.get(row.documento) || null;
+          }
+          if ((!matches || matches.length === 0) && row.nombre && row.apellido) {
+            matches = contactsByNameKey.get(buildNameKey(row.nombre, row.apellido)) || null;
+          }
+
+          if (!matches || matches.length === 0) {
+            notFound += 1;
+            if (notFoundList.length < 100) {
+              notFoundList.push({ nombre: row.nombre, apellido: row.apellido, documento: row.documento });
+            }
+            continue;
+          }
+
+          if (matches.length > 1) {
+            ambiguous += 1;
+            if (ambiguousList.length < 100) {
+              ambiguousList.push({
+                nombre: row.nombre,
+                apellido: row.apellido,
+                coincidencias: matches.slice(0, 20).map((c) => ({ id: c.id, documento: c.documento }))
+              });
+            }
+            continue;
+          }
+
+          const contact = matches[0];
+          const hasPhones = !isNullOrEmpty(contact.telefono) || !isNullOrEmpty(contact.celular);
+          if (hasPhones) {
+            skipped += 1;
+            continue;
+          }
+
+          pendingUpdates.push({
+            contactId: contact.id,
+            telefono: tel || "",
+            celular: cel || "",
+            documento: row.documento || ""
+          });
+
+          if (updatedList.length < 100) {
+            updatedList.push({
+              nombre: row.nombre,
+              apellido: row.apellido,
+              documento: row.documento,
+              telefono: tel,
+              celular: cel
+            });
+          }
+        }
+
+        if (pendingUpdates.length > 0) {
+          const updateValues = [];
+          const tuples = pendingUpdates.map((u, index) => {
+            const base = index * 4;
+            updateValues.push(u.contactId, u.telefono, u.celular, u.documento);
+            return `($${base + 1}::uuid, $${base + 2}::text, $${base + 3}::text, $${base + 4}::text)`;
+          });
+
+          const updateRes = await client.query(
+            `
+            UPDATE contacts c
+            SET
+              telefono = COALESCE(NULLIF(v.telefono, ''), c.telefono),
+              celular = COALESCE(NULLIF(v.celular, ''), c.celular),
+              documento = COALESCE(NULLIF(v.documento, ''), c.documento),
+              updated_at = now()
+            FROM (
+              VALUES ${tuples.join(", ")}
+            ) AS v(id, telefono, celular, documento)
+            WHERE c.id = v.id
+              AND c.organization_id = $${updateValues.length + 1}
+              AND (c.telefono IS NULL OR BTRIM(c.telefono) = '')
+              AND (c.celular IS NULL OR BTRIM(c.celular) = '')
+            `,
+            [...updateValues, organizationId]
+          );
+
+          updated = Number(updateRes.rowCount || 0);
+          if (updated < pendingUpdates.length) {
+            skipped += pendingUpdates.length - updated;
+          }
+        }
+
+        await client.query("COMMIT");
+
         return json(200, {
           ok: true,
-          total: rows.length,
+          total: normalizedRows.length,
           updated,
           skipped,
           not_found: notFound,
-          errors,
-          not_found_list: notFoundList
+          ambiguous,
+          not_found_list: notFoundList,
+          ambiguous_list: ambiguousList,
+          updated_list: updatedList
         });
+      } catch (error) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {}
+        throw error;
       } finally {
         await client.end();
       }
     } catch (error) {
-      return json(500, { ok: false, message: "Failed to update contacts batch", error: error.message });
+      return json(500, { ok: false, message: "Failed to bulk update phones", error: error.message });
     }
   }
 
@@ -23448,7 +23159,7 @@ async function getNewContactsDistribution(client, batchId) {
               `
               ALTER TABLE public.contact_import_batches
               ADD CONSTRAINT contact_import_batches_import_type_check
-              CHECK (import_type IN ('clientes', 'no_llamar', 'resultados', 'datos_para_trabajar', 'actualizar_contactos'));
+              CHECK (import_type IN ('clientes', 'no_llamar', 'resultados', 'datos_para_trabajar'));
               `
             );
             batchRes = await client.query(
@@ -24033,32 +23744,11 @@ async function getNewContactsDistribution(client, batchId) {
         .toLowerCase();
       const createProducts = !["false", "0", "no"].includes(createProductsParam);
 
-      const importTypeRaw =
-        getQueryParam(event, "import_type") ||
-        getQueryParam(event, "type") ||
-        null;
-      const importType = importTypeRaw ? String(importTypeRaw).trim().toLowerCase() : "clientes";
-      if (!["clientes", "actualizar_contactos"].includes(importType)) {
-        return json(400, { ok: false, message: "import_type inválido" });
-      }
-
       const parseContext = getClientsCsvParseContext(csvText);
       if (parseContext.error) {
         return json(400, { ok: false, message: "CSV vacio" });
       }
       const { lineIterator, separator, headerKeys } = parseContext;
-
-      if (importType === "actualizar_contactos") {
-        const hasDocumento = headerKeys.includes("documento");
-        const hasTelefono = headerKeys.includes("telefono");
-        const hasCelular = headerKeys.includes("telefono_celular");
-        if (!hasDocumento && !hasTelefono && !hasCelular) {
-          return json(400, {
-            ok: false,
-            message: "CSV inválido: debe incluir al menos una columna documento, telefono o celular"
-          });
-        }
-      }
       let ignoredEmptyRows = 0;
       const client = createDbClient();
       await client.connect();
@@ -24078,10 +23768,10 @@ async function getNewContactsDistribution(client, batchId) {
             created_by,
             organization_id
           )
-          VALUES ($1, 'uploaded', $4, 0, 0, 0, 0, $2, $3)
+          VALUES ($1, 'uploaded', 'clientes', 0, 0, 0, 0, $2, $3)
           RETURNING *
           `,
-          [fileName, dbUser?.id || null, organizationId, importType]
+          [fileName, dbUser?.id || null, organizationId]
         );
 
         const batch = batchResult.rows[0];
@@ -24128,9 +23818,7 @@ async function getNewContactsDistribution(client, batchId) {
           }
 
           totalRows += 1;
-          const errors = importType === "actualizar_contactos"
-            ? validateActualizarContactosImportRow(item)
-            : validateImportRow(item);
+          const errors = validateImportRow(item);
           const importStatus = errors.length ? "error" : "validated";
           if (importStatus === "validated") validRows += 1;
           else {
