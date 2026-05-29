@@ -5051,8 +5051,8 @@ async function processActualizarContactosBatch(batchId, organizationId, client) 
         await client.query(
           `
           UPDATE contact_import_rows
-          SET import_status = 'skipped',
-              error_detail = 'already_has_phone',
+          SET import_status = 'updated',
+              error_detail = 'skipped: ya tiene teléfono',
               resolved_contact_id = $1,
               updated_at = now()
           WHERE id = $2
@@ -5098,8 +5098,8 @@ async function processActualizarContactosBatch(batchId, organizationId, client) 
         await client.query(
           `
           UPDATE contact_import_rows
-          SET import_status = 'skipped',
-              error_detail = 'already_has_phone',
+          SET import_status = 'updated',
+              error_detail = 'skipped: ya tiene teléfono',
               resolved_contact_id = $1,
               updated_at = now()
           WHERE id = $2
