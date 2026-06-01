@@ -4140,20 +4140,82 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
       }
 
       if (["no_contesta", "rellamar", "seguimiento", "dato_erroneo"].includes(estado_venta)) {
+        const newNombre = normalizeText(extra?.nombre) || null;
+        const newApellido = normalizeText(extra?.apellido) || null;
+        const newEmail = normalizeText(extra?.email) || null;
+        const newOrigen = normalizeText(origenDato) || null;
+
+        await client.query(
+          `
+          UPDATE datos_para_trabajar
+          SET nombre = COALESCE(NULLIF($1, ''), nombre),
+              apellido = COALESCE(NULLIF($2, ''), apellido),
+              email = COALESCE(NULLIF($3, ''), email),
+              origen_dato = COALESCE(NULLIF($4, ''), origen_dato),
+              updated_at = NOW()
+          WHERE id = $5
+          `,
+          [newNombre || "", newApellido || "", newEmail || "", newOrigen || "", prevId]
+        );
+
+        await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = 'nuevo',
+              ultimo_intento_at = NULL,
+              intentos = 0,
+              updated_at = NOW()
+          WHERE contact_id = $1
+          `,
+          [prevId]
+        );
+
         return {
           estado: "bloqueado",
           motivoBloqueo: "reemplazado",
           motivoBloqueoDetalle: estado_venta,
-          prevContactId: null,
+          refreshed: true,
+          prevContactId: prevId,
           prevAssignedTo: null
         };
       }
 
       if (estado_venta && estado_venta !== "nuevo") {
+        const newNombre = normalizeText(extra?.nombre) || null;
+        const newApellido = normalizeText(extra?.apellido) || null;
+        const newEmail = normalizeText(extra?.email) || null;
+        const newOrigen = normalizeText(origenDato) || null;
+
+        await client.query(
+          `
+          UPDATE datos_para_trabajar
+          SET nombre = COALESCE(NULLIF($1, ''), nombre),
+              apellido = COALESCE(NULLIF($2, ''), apellido),
+              email = COALESCE(NULLIF($3, ''), email),
+              origen_dato = COALESCE(NULLIF($4, ''), origen_dato),
+              updated_at = NOW()
+          WHERE id = $5
+          `,
+          [newNombre || "", newApellido || "", newEmail || "", newOrigen || "", prevId]
+        );
+
+        await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = 'nuevo',
+              ultimo_intento_at = NULL,
+              intentos = 0,
+              updated_at = NOW()
+          WHERE contact_id = $1
+          `,
+          [prevId]
+        );
+
         return {
           estado: "bloqueado",
           motivoBloqueo: "reemplazado",
-          prevContactId: null,
+          refreshed: true,
+          prevContactId: prevId,
           prevAssignedTo: null
         };
       }
@@ -4689,6 +4751,8 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         orgId,
         importJobId,
         {
+          nombre: row.nombre || null,
+          apellido: row.apellido || null,
           fechaNacimiento: row.fecha_nacimiento || null,
           direccion: row.direccion || null,
           email: row.correo_electronico || row.email || null,
@@ -8929,7 +8993,7 @@ export const handler = async (event) => {
           origenDato,
           orgId,
           null,
-          { fechaNacimiento, direccion, email, localidad, departamento }
+          { nombre, apellido, fechaNacimiento, direccion, email, localidad, departamento }
         );
 
         const estado = evalRes.estado;
@@ -8991,6 +9055,15 @@ export const handler = async (event) => {
                  motivo_bloqueo = 'reemplazado',
                  updated_at = now()
              WHERE id = $1`,
+            [evalRes.prevContactId]
+          );
+          await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'bloqueado',
+                updated_at = now()
+            WHERE contact_id = $1
+            `,
             [evalRes.prevContactId]
           );
         }
@@ -9145,7 +9218,7 @@ export const handler = async (event) => {
           origenDato,
           orgId,
           null,
-          { fechaNacimiento, direccion, email, localidad, departamento }
+          { nombre, apellido, fechaNacimiento, direccion, email, localidad, departamento }
         );
 
         const estado = evalRes.estado;
@@ -9229,6 +9302,15 @@ export const handler = async (event) => {
                  motivo_bloqueo = 'reemplazado',
                  updated_at = now()
              WHERE id = $1`,
+            [evalRes.prevContactId]
+          );
+          await client.query(
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = 'bloqueado',
+                updated_at = now()
+            WHERE contact_id = $1
+            `,
             [evalRes.prevContactId]
           );
         }
