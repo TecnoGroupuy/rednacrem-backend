@@ -10913,7 +10913,7 @@ export const handler = async (event) => {
             const apellidoParam = `$${values.length}`;
             tupleParts.push(`(LOWER(TRIM(${nombreParam})), LOWER(TRIM(${apellidoParam})))`);
           }
-          whereParts.push(`(LOWER(TRIM(nombre)), LOWER(TRIM(apellido))) IN (${tupleParts.join(", ")})` + ")");
+          whereParts.push(`(LOWER(TRIM(nombre)), LOWER(TRIM(apellido))) IN (${tupleParts.join(", ")})`);
         }
 
         const whereClause = whereParts.length ? `AND (${whereParts.join(" OR ")})` : "";
