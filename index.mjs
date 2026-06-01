@@ -682,6 +682,19 @@ function normalizarTelefonoUY(numero) {
   return limpio;
 }
 
+function normalizarOrigenDato(origen) {
+  if (!origen) return origen;
+  const map = {
+    whatsapp: "WhatsApp",
+    facebook: "Facebook",
+    instagram: "Instagram",
+    "sitio web": "Sitio web",
+    meta: "Meta"
+  };
+  const key = String(origen).toLowerCase().trim();
+  return map[key] || origen;
+}
+
 function isNullOrEmpty(value) {
   return value === null || value === undefined || String(value).trim() === "";
 }
@@ -4793,7 +4806,7 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
         row.direccion || null,
         row.departamento || null,
         row.localidad || null,
-        row.origen_dato || null,
+        normalizarOrigenDato(row.origen_dato || null),
         evalRes.estado,
         evalRes.motivoBloqueo,
         ...(hasMotivoBloqueoDetalle ? [evalRes.motivoBloqueoDetalle || null] : []),
@@ -8854,7 +8867,7 @@ export const handler = async (event) => {
               telefono,
               celular,
               email,
-              "facebook",
+              normalizarOrigenDato("facebook"),
               estado,
               ...(hasMotivoBloqueo ? [motivoBloqueo] : []),
               ...(hasMotivoBloqueoDetalle ? [motivoBloqueoDetalle] : []),
@@ -8964,7 +8977,7 @@ export const handler = async (event) => {
       const localidad = normalizeText(body?.localidad) || null;
       const departamento = normalizeText(body?.departamento) || null;
       const fechaLead = parseDateFlexible(body?.fecha_lead) || null;
-      const origenDato = normalizeText(body?.origen_dato) || "facebook";
+      const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato) || "facebook");
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
 
@@ -9192,7 +9205,7 @@ export const handler = async (event) => {
       const localidad = normalizeText(body?.localidad) || null;
       const departamento = normalizeText(body?.departamento) || null;
       const fechaLead = parseDateFlexible(body?.fecha_lead) || null;
-      const origenDato = normalizeText(body?.origen_dato) || "facebook";
+      const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato) || "facebook");
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
 
@@ -9402,7 +9415,7 @@ export const handler = async (event) => {
     const telefono = cleanPhone(body?.telefono || null);
     const direccion = normalizeText(body?.direccion || "") || null;
     const departamento = normalizeText(body?.departamento || "") || null;
-    const origenDato = "Discado auto";
+    const origenDato = normalizarOrigenDato("Discado auto");
 
     const parseDiscadoFecha = (val) => {
       if (!val) return null;
@@ -9464,7 +9477,7 @@ export const handler = async (event) => {
       pushCol("telefono", telefono);
       pushCol("direccion", direccion);
       pushCol("departamento", departamento);
-      pushCol("origen_dato", origenDato);
+      pushCol("origen_dato", normalizarOrigenDato(origenDato));
       pushCol("estado", "nuevo");
       pushCol("organization_id", organizationId);
       pushCol("fecha_lead", fechaLead);
@@ -10348,7 +10361,7 @@ export const handler = async (event) => {
           pushCol("departamento", fields?.departamento || null);
           if (dCols.has("localidad")) pushCol("localidad", null);
           if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields?.email || null);
-          if (dCols.has("origen_dato")) pushCol("origen_dato", fields?.origenDato || batchTipo || null);
+          if (dCols.has("origen_dato")) pushCol("origen_dato", normalizarOrigenDato(fields?.origenDato || batchTipo || null));
           if (dCols.has("estado")) pushCol("estado", "nuevo");
           if (hasContactIdCol) pushCol("contact_id", contactId);
 
@@ -13797,7 +13810,7 @@ export const handler = async (event) => {
             pushCol("departamento", contact.departamento);
             if (hasLocalidadCol) pushCol("localidad", null);
             if (hasCorreoCol) pushCol("correo_electronico", contact.email);
-            if (hasOrigenCol) pushCol("origen_dato", "recupero");
+            if (hasOrigenCol) pushCol("origen_dato", normalizarOrigenDato("recupero"));
             if (hasEstadoCol) pushCol("estado", evalRes.estado || "nuevo");
             if (hasMotivoBloqueo) pushCol("motivo_bloqueo", evalRes.motivoBloqueo || null);
             if (hasMotivoBloqueoDetalle) pushCol("motivo_bloqueo_detalle", evalRes.motivoBloqueoDetalle || null);
@@ -15055,7 +15068,7 @@ export const handler = async (event) => {
         const departamento = normalizeText(payload?.departamento) || null;
         const localidad = normalizeText(payload?.localidad) || null;
         const pais = normalizeText(payload?.pais) || "Uruguay";
-        const origenDato = normalizeText(payload?.origen_dato || payload?.origen) || null;
+        const origenDato = normalizarOrigenDato(normalizeText(payload?.origen_dato || payload?.origen) || null);
         return {
           nombre,
           apellido,
@@ -15244,7 +15257,7 @@ export const handler = async (event) => {
           if (dCols.has("correo_electronico")) pushCol("correo_electronico", fields.email);
           if (dCols.has("email")) pushCol("email", fields.email);
           if (dCols.has("pais")) pushCol("pais", fields.pais);
-          if (dCols.has("origen_dato")) pushCol("origen_dato", fields.origenDato || null);
+          if (dCols.has("origen_dato")) pushCol("origen_dato", normalizarOrigenDato(fields.origenDato || null));
           if (dCols.has("estado")) pushCol("estado", evalEstado);
           if (hasMotivoBloqueo) pushCol("motivo_bloqueo", evalMotivo);
           if (hasMotivoBloqueoDetalle) pushCol("motivo_bloqueo_detalle", evalMotivoDetalle);
@@ -18349,7 +18362,7 @@ async function getNewContactsDistribution(client, batchId) {
     const documento = normalizeText(body?.documento || "") || null;
     const correoElectronico = normalizeEmail(body?.correo_electronico || body?.correoElectronico) || null;
     const departamento = normalizeText(body?.departamento || "") || null;
-    const origenDato = normalizeText(body?.origen_dato || body?.origenDato) || "manual";
+    const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato || body?.origenDato) || "manual");
     const mensaje = normalizeText(body?.mensaje || "") || null;
     const sellerId = body?.seller_id && isValidUuid(body.seller_id) ? body.seller_id : null;
 
@@ -18494,7 +18507,7 @@ async function getNewContactsDistribution(client, batchId) {
             addCol("documento", documento);
             addCol("correo_electronico", correoElectronico);
             addCol("departamento", departamento);
-            addCol("origen_dato", origenDato || "manual");
+            addCol("origen_dato", normalizarOrigenDato(origenDato || "manual"));
             addCol("organization_id", organizationId);
 
             const insertRes = await client.query(
