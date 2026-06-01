@@ -4706,6 +4706,14 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
            WHERE id = $1`,
           [evalRes.prevContactId]
         );
+        await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = 'bloqueado'
+          WHERE contact_id = $1
+          `,
+          [evalRes.prevContactId]
+        );
       }
 
       const fechaLead = row.fecha_lead ? (parseDate(row.fecha_lead) || row.fecha_lead) : null;
