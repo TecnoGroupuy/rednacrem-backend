@@ -24584,6 +24584,11 @@ async function getNewContactsDistribution(client, batchId) {
         desde = fechaDesdeParsed || primera || today;
         hasta = fechaHastaParsed || today;
 
+        const hasDptContactId = await columnExists(client, "datos_para_trabajar", "contact_id");
+        const contactsJoin = hasDptContactId
+          ? "LEFT JOIN contacts c ON c.id = d.contact_id"
+          : "LEFT JOIN contacts c ON c.id = lmh.contact_id";
+
         const resultadoRes = await client.query(
           `
           WITH ultimo_resultado AS (
@@ -24598,10 +24603,16 @@ async function getNewContactsDistribution(client, batchId) {
                 ' ',
                 COALESCE(d.apellido, c.apellido, '')
               )) AS contacto_nombre,
+              COALESCE(
+                NULLIF(d.celular, ''),
+                NULLIF(d.telefono, ''),
+                NULLIF(c.celular, ''),
+                NULLIF(c.telefono, '')
+              ) AS telefono,
               COUNT(*) OVER (PARTITION BY lmh.contact_id) AS total_intentos
             FROM lead_management_history lmh
             LEFT JOIN datos_para_trabajar d ON d.id = lmh.contact_id
-            LEFT JOIN contacts c ON c.id = lmh.contact_id
+            ${contactsJoin}
             WHERE lmh.user_id = $1
               AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date BETWEEN $2::date AND $3::date
               AND (lmh.organization_id = $4 OR lmh.organization_id IS NULL)
@@ -24611,6 +24622,7 @@ async function getNewContactsDistribution(client, batchId) {
             contact_id,
             resultado,
             contacto_nombre,
+            telefono,
             fecha_gestion,
             proxima_accion,
             total_intentos,
