@@ -22629,8 +22629,9 @@ async function getNewContactsDistribution(client, batchId) {
           const rechazos = Number(daily.rechazos || 0);
           const datosErroneos = Number(daily.datos_erroneos || 0);
           const gestiones = Number(daily.gestiones || 0);
-          const contacto = asignados > 0 && gestiones > 0
-            ? Math.round((gestiones / asignados) * 100)
+          const datosUtiles = ventas + rechazos + seguimientos;
+          const contacto = datosUtiles > 0 && gestiones > 0
+            ? Math.round((datosUtiles / gestiones) * 100)
             : 0;
           const efectividad = gestiones > 0 && ventas > 0
             ? Math.round((ventas / gestiones) * 100)
@@ -22682,8 +22683,9 @@ async function getNewContactsDistribution(client, batchId) {
             gestiones: 0,
             asignados: 0
           });
-          totals.contacto = totals.asignados > 0 && totals.gestiones > 0
-            ? Math.round((totals.gestiones / totals.asignados) * 100)
+          const totalDatosUtiles = totals.ventas + totals.rechazos + totals.seguimientos;
+          totals.contacto = totalDatosUtiles > 0 && totals.gestiones > 0
+            ? Math.round((totalDatosUtiles / totals.gestiones) * 100)
             : 0;
           totals.efectividad = totals.gestiones > 0 && totals.ventas > 0
             ? Math.round((totals.ventas / totals.gestiones) * 100)
