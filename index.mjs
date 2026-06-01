@@ -10913,20 +10913,20 @@ export const handler = async (event) => {
             const apellidoParam = `$${values.length}`;
             tupleParts.push(`(LOWER(TRIM(${nombreParam})), LOWER(TRIM(${apellidoParam})))`);
           }
-          whereParts.push(`(LOWER(TRIM(nombre)), LOWER(TRIM(apellido))) IN (${tupleParts.join(", ")})` + ")");
+          whereParts.push(`(LOWER(TRIM(nombre)), LOWER(TRIM(apellido))) IN (${tupleParts.join(", ")})`);
         }
 
         const whereClause = whereParts.length ? `AND (${whereParts.join(" OR ")})` : "";
 
-        const contactsRes = await client.query(
-          `
+        const contactsQuery = `
           SELECT id, documento, nombre, apellido, telefono, celular
           FROM contacts
           WHERE organization_id = $1
           ${whereClause}
-          `,
-          values
-        );
+        `;
+        console.log("[bulk-update-phones] contactsQuery:", contactsQuery, "valuesCount:", values.length);
+
+        const contactsRes = await client.query(contactsQuery, values);
 
         const contactsByDocumento = new Map();
         const contactsByNameKey = new Map();
