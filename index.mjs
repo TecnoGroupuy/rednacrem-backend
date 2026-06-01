@@ -22490,7 +22490,224 @@ async function getNewContactsDistribution(client, batchId) {
       });
     }
   }
-  const agentDetailMatch = path.match(/\/api\/supervisor\/agent-detail\/([^/]+)$/);
+
+  if (method === "GET" && path.endsWith("/api/supervisor/sellers-summary-by-origin")) {
+    const requestId = getRequestId(event);
+    const startedAt = Date.now();
+    let dbUser = null;
+    let fecha = null;
+    try {
+      const authContext = await getCurrentDbUserFromEvent(event);
+      const authUser = authContext.authUser;
+      dbUser = authContext.dbUser;
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      fecha = parseFechaParam(getQueryParam(event, "fecha"));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const sellersRes = await client.query(
+          `
+          SELECT u.id, u.nombre, u.apellido
+          FROM users u
+          JOIN organization_users ou ON ou.user_id = u.id
+          WHERE u.role_key = 'vendedor'
+            AND u.status = 'approved'
+            AND (u.is_test IS NULL OR u.is_test = false)
+            AND ou.organization_id = $1
+            AND ou.activo = true
+          ORDER BY u.nombre
+          `,
+          [organizationId]
+        );
+        const sellers = sellersRes.rows || [];
+        const sellerIds = sellers.map((row) => row.id);
+        if (!sellerIds.length) {
+          return json(200, { ok: true, fecha, sellers: [] });
+        }
+
+        const assignedByOriginRes = await client.query(
+          `
+          SELECT
+            lcs.assigned_to AS user_id,
+            d.origen_dato,
+            COUNT(DISTINCT lcs.contact_id)::int AS asignados
+          FROM lead_contact_status lcs
+          JOIN lead_batches lb ON lb.id = lcs.batch_id
+          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          WHERE lb.organization_id = $1
+            AND lb.estado IN ('activo', 'asignado')
+            AND lcs.assigned_to = ANY($2::uuid[])
+          GROUP BY lcs.assigned_to, d.origen_dato
+          ORDER BY lcs.assigned_to, d.origen_dato
+          `,
+          [organizationId, sellerIds]
+        );
+        const assignedByOriginMap = new Map(
+          (assignedByOriginRes.rows || []).map((row) => [
+            `${row.user_id}:${row.origen_dato ?? ''}`,
+            Number(row.asignados || 0)
+          ])
+        );
+
+        const dailyByOriginRes = await client.query(
+          `
+          WITH day_events AS (
+            SELECT
+              lmh.user_id,
+              lmh.contact_id,
+              d.origen_dato,
+              lmh.resultado,
+              lmh.fecha_gestion
+            FROM lead_management_history lmh
+            JOIN lead_batches lb ON lb.id = lmh.batch_id
+            JOIN datos_para_trabajar d ON d.id = lmh.contact_id
+            WHERE lmh.user_id = ANY($1::uuid[])
+              AND (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $2::date
+              AND lb.organization_id = $3
+              AND d.organization_id = $3
+          ), last_result AS (
+            SELECT DISTINCT ON (user_id, contact_id)
+              user_id,
+              contact_id,
+              origen_dato,
+              resultado
+            FROM day_events
+            ORDER BY user_id, contact_id, fecha_gestion DESC
+          )
+          SELECT
+            user_id,
+            origen_dato,
+            COUNT(*) FILTER (WHERE resultado = 'venta')::int AS ventas,
+            COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS seguimientos,
+            COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS rellamadas,
+            COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS rechazos,
+            COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS datos_erroneos,
+            COUNT(*)::int AS gestiones
+          FROM last_result
+          GROUP BY user_id, origen_dato
+          ORDER BY user_id, origen_dato
+          `,
+          [sellerIds, fecha, organizationId]
+        );
+        const dailyByOriginRows = dailyByOriginRes.rows || [];
+        const dailyByOriginMap = new Map(
+          dailyByOriginRows.map((row) => [`${row.user_id}:${row.origen_dato ?? ''}`, row])
+        );
+
+        const buildOriginRow = (userId, origenDato) => {
+          const key = `${userId}:${origenDato ?? ''}`;
+          const daily = dailyByOriginMap.get(key) || {};
+          const asignados = assignedByOriginMap.get(key) || 0;
+          const ventas = Number(daily.ventas || 0);
+          const seguimientos = Number(daily.seguimientos || 0);
+          const rellamadas = Number(daily.rellamadas || 0);
+          const noContesta = Number(daily.no_contesta || 0);
+          const rechazos = Number(daily.rechazos || 0);
+          const datosErroneos = Number(daily.datos_erroneos || 0);
+          const gestiones = Number(daily.gestiones || 0);
+          const contacto = asignados > 0 && gestiones > 0
+            ? Math.round((gestiones / asignados) * 100)
+            : 0;
+          const efectividad = gestiones > 0 && ventas > 0
+            ? Math.round((ventas / gestiones) * 100)
+            : 0;
+          return {
+            origen_dato: origenDato ?? null,
+            ventas,
+            seguimientos,
+            rellamadas,
+            no_contesta: noContesta,
+            rechazos,
+            datos_erroneos: datosErroneos,
+            gestiones,
+            asignados,
+            contacto,
+            efectividad
+          };
+        };
+
+        const originsBySeller = new Map();
+        for (const row of [...(assignedByOriginRes.rows || []), ...(dailyByOriginRes.rows || [])]) {
+          const userId = row?.user_id;
+          if (!userId) continue;
+          const originKey = row?.origen_dato ?? null;
+          if (!originsBySeller.has(userId)) originsBySeller.set(userId, new Set());
+          originsBySeller.get(userId).add(originKey);
+        }
+
+        const resultSellers = sellers.map((seller) => {
+          const originSet = originsBySeller.get(seller.id) || new Set();
+          const origins = Array.from(originSet).map((origin) => buildOriginRow(seller.id, origin));
+          const totals = origins.reduce((acc, r) => {
+            acc.ventas += r.ventas;
+            acc.seguimientos += r.seguimientos;
+            acc.rellamadas += r.rellamadas;
+            acc.no_contesta += r.no_contesta;
+            acc.rechazos += r.rechazos;
+            acc.datos_erroneos += r.datos_erroneos;
+            acc.gestiones += r.gestiones;
+            acc.asignados += r.asignados;
+            return acc;
+          }, {
+            ventas: 0,
+            seguimientos: 0,
+            rellamadas: 0,
+            no_contesta: 0,
+            rechazos: 0,
+            datos_erroneos: 0,
+            gestiones: 0,
+            asignados: 0
+          });
+          totals.contacto = totals.asignados > 0 && totals.gestiones > 0
+            ? Math.round((totals.gestiones / totals.asignados) * 100)
+            : 0;
+          totals.efectividad = totals.gestiones > 0 && totals.ventas > 0
+            ? Math.round((totals.ventas / totals.gestiones) * 100)
+            : 0;
+          return {
+            id: seller.id,
+            nombre: seller.nombre,
+            apellido: seller.apellido,
+            totals,
+            origins
+          };
+        });
+
+        return json(200, {
+          ok: true,
+          fecha,
+          sellers: resultSellers
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load sellers summary by origin",
+        error: error.message,
+        meta: { request_id: requestId }
+      });
+    } finally {
+      console.log("[sellers-summary-by-origin]", {
+        request_id: requestId,
+        user_id: dbUser?.id || null,
+        fecha,
+        duration_ms: Date.now() - startedAt
+      });
+    }
+  }  const agentDetailMatch = path.match(/\/api\/supervisor\/agent-detail\/([^/]+)$/);
   if (method === "GET" && agentDetailMatch) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
