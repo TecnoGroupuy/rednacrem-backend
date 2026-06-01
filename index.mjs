@@ -10856,6 +10856,20 @@ export const handler = async (event) => {
         return { rowIndex: index, documento, nombre, apellido, telefono, celular };
       });
 
+      if (!normalizedRows.length) {
+        return json(200, {
+          ok: true,
+          total: 0,
+          updated: 0,
+          skipped: 0,
+          not_found: 0,
+          ambiguous: 0,
+          not_found_list: [],
+          ambiguous_list: [],
+          updated_list: []
+        });
+      }
+
       const normalizeNameKey = (value) => (normalizeText(value) || "").trim().toLowerCase();
       const buildNameKey = (nombre, apellido) => `${normalizeNameKey(nombre)}|${normalizeNameKey(apellido)}`;
 
