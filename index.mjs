@@ -15281,19 +15281,31 @@ export const handler = async (event) => {
           [leadId, batchId]
         );
         if (statusRes.rows.length) {
-          await client.query(
-            `
-            UPDATE lead_contact_status
-            SET estado_venta = 'nuevo',
-                intentos = COALESCE(intentos, 0),
-                assigned_to = $3,
-                ola_actual = COALESCE(ola_actual, 1),
-                ultimo_intento_at = now(),
-                updated_at = now()
-            WHERE contact_id = $1 AND batch_id = $2
-            `,
-            [leadId, batchId, dbUser?.id || null]
-          );
+          if (evalEstado === "bloqueado") {
+            await client.query(
+              `
+              UPDATE lead_contact_status
+              SET estado_venta = 'bloqueado',
+                  updated_at = NOW()
+              WHERE contact_id = $1
+              `,
+              [leadId]
+            );
+          } else {
+            await client.query(
+              `
+              UPDATE lead_contact_status
+              SET estado_venta = 'nuevo',
+                  intentos = COALESCE(intentos, 0),
+                  assigned_to = $3,
+                  ola_actual = COALESCE(ola_actual, 1),
+                  ultimo_intento_at = now(),
+                  updated_at = now()
+              WHERE contact_id = $1 AND batch_id = $2
+              `,
+              [leadId, batchId, dbUser?.id || null]
+            );
+          }
         } else {
           const isBlocked = await isLeadBlockedInDpt(client, leadId);
           if (!isBlocked) {
