@@ -8678,6 +8678,29 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
         return json(404, { ok: false, message: "Lote no encontrado" });
       }
 
+      const telefonoCheck = body.telefono || body.celular;
+      if (telefonoCheck) {
+        const clienteActivoResult = await client.query(
+          `
+          SELECT c.id, c.nombre, c.apellido
+          FROM contacts c
+          JOIN contact_products cp ON cp.contact_id = c.id
+          WHERE (c.celular = $1 OR c.telefono = $1)
+            AND cp.estado = 'alta'
+          LIMIT 1
+          `,
+          [telefonoCheck]
+        );
+
+        if (clienteActivoResult.rows.length > 0) {
+          const cliente = clienteActivoResult.rows[0];
+          return json(422, {
+            ok: false,
+            message: `Este número pertenece a ${cliente.nombre} ${cliente.apellido || ''}, que ya es cliente activo.`.trim()
+          });
+        }
+      }
+
       const leadCols = await getTableColumns(client, "datos_para_trabajar");
       const searchByDocumento = Boolean(documento);
       const lookupValues = searchByDocumento ? [organizationId, documento] : [organizationId, celular];
