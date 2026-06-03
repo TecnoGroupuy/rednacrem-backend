@@ -8633,7 +8633,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
   }
 }
 
-async function handleLeadManualContact(client, batchId, dbUser, organizationId, body) {
+async function handleLeadManualContact(client, batchId, dbUser, body) {
   const nombre = normalizeText(body?.nombre || "");
   const apellido = normalizeText(body?.apellido || "");
   const celularRaw = normalizeText(body?.celular || "");
@@ -8665,17 +8665,38 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
     try {
       const loteRes = await client.query(
         `
-        SELECT id, estado
+        SELECT id, organization_id
         FROM lead_batches
         WHERE id = $1
-          AND organization_id = $2
+          AND is_active = true
         LIMIT 1
         `,
-        [batchId, organizationId]
+        [batchId]
       );
-      if (!loteRes.rows.length) {
+      const batch = loteRes.rows[0] || null;
+      if (!batch) {
         await client.query("ROLLBACK");
         return json(404, { ok: false, message: "Lote no encontrado" });
+      }
+      const organizationId = batch.organization_id || null;
+      if (!organizationId) {
+        await client.query("ROLLBACK");
+        return json(400, { ok: false, message: "organization_id requerido en lote" });
+      }
+
+      const sellerRes = await client.query(
+        `
+        SELECT 1
+        FROM lead_batch_sellers
+        WHERE batch_id = $1
+          AND seller_id = $2
+        LIMIT 1
+        `,
+        [batchId, dbUser?.id || null]
+      );
+      if (!sellerRes.rows.length) {
+        await client.query("ROLLBACK");
+        return json(403, { ok: false, message: "Vendedor no autorizado para este lote" });
       }
 
       const telefonoCheck = body.telefono || body.celular;
@@ -10215,7 +10236,7 @@ export const handler = async (event) => {
             seller_id: dbUser.id
           };
 
-          return await handleLeadManualContact(client, batchId, dbUser, organizationId, manualPayload);
+          return await handleLeadManualContact(client, batchId, dbUser, manualPayload);
         }
 
         await client.query("BEGIN");
@@ -16327,6 +16348,16 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let requestOrganizationId = null;
+      try {
+        requestOrganizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const resultadoInput = normalizeLeadResultado(body?.status || body?.resultado);
       const nota = normalizeText(body?.note || body?.nota || "");
       const proximaAccion = normalizeNextAction(body?.nextAction || body?.proxima_accion);
@@ -16390,7 +16421,7 @@ export const handler = async (event) => {
             [leadId]
           );
           const lead = leadRes.rows[0] || null;
-          const leadOrgId = lead?.organization_id || organizationId || null;
+          const leadOrgId = lead?.organization_id || requestOrganizationId || null;
           const leadNombre = lead?.nombre || null;
           const leadTelefono = lead?.telefono || null;
           const leadCelular = lead?.celular || null;
@@ -16560,13 +16591,13 @@ export const handler = async (event) => {
           }
         }
 
-        let organizationId = null;
+        let batchOrganizationId = null;
         try {
           const orgRes = await client.query(
             `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
             [batchId]
           );
-          organizationId = orgRes.rows[0]?.organization_id || null;
+          batchOrganizationId = orgRes.rows[0]?.organization_id || null;
         } catch {}
 
         const hasMgmtOrganizationId = await columnExists(
@@ -16591,7 +16622,7 @@ export const handler = async (event) => {
           RETURNING id
           `,
           hasMgmtOrganizationId
-            ? [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, organizationId]
+            ? [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, batchOrganizationId]
             : [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
         );
         const gestionId = mgmtResult.rows[0]?.id ?? null;
@@ -18724,24 +18755,10 @@ async function getNewContactsDistribution(client, batchId) {
       let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
       if (roleError) return roleError;
 
-      let organizationId = null;
-      try {
-        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
-      } catch (error) {
-        if (error?.status) {
-          return json(error.status, { ok: false, message: error.message });
-        }
-        throw error;
-      }
-
-      if (!organizationId) {
-        return json(400, { ok: false, message: "organization_id requerido" });
-      }
-
       const client = createDbClient();
       await client.connect();
       try {
-        return await handleLeadManualContact(client, batchId, dbUser, organizationId, body);
+        return await handleLeadManualContact(client, batchId, dbUser, body);
       } finally {
         await client.end();
       }
