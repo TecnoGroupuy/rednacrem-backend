@@ -8724,10 +8724,21 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
 
       const leadCols = await getTableColumns(client, "datos_para_trabajar");
       const searchByDocumento = Boolean(documento);
-      const lookupValues = searchByDocumento ? [organizationId, documento] : [organizationId, celular];
-      const lookupSql = searchByDocumento
-        ? "organization_id = $1 AND documento = $2"
-        : "organization_id = $1 AND celular = $2";
+      let lookupSql, lookupValues;
+
+      if (searchByDocumento) {
+        lookupSql = "organization_id = $1 AND documento = $2";
+        lookupValues = [organizationId, documento];
+      } else if (celular) {
+        lookupSql = "organization_id = $1 AND (celular = $2 OR telefono = $2)";
+        lookupValues = [organizationId, celular];
+      } else if (telefono) {
+        lookupSql = "organization_id = $1 AND (telefono = $2 OR celular = $2)";
+        lookupValues = [organizationId, telefono];
+      } else {
+        await client.query("ROLLBACK");
+        return json(400, { ok: false, message: "Se requiere documento o teléfono" });
+      }
 
       const existingRes = await client.query(
         `
