@@ -8807,7 +8807,10 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
         addCol("correo_electronico", correoElectronico);
         addCol("departamento", departamento);
         addCol("origen_dato", normalizarOrigenDato(origenDato || "manual"));
-        addCol("organization_id", organizationId);
+        columns.push("organization_id");
+        placeholders.push(`$${idx}`);
+        values.push(organizationId ?? null);
+        idx += 1;
 
         const insertRes = await client.query(
           `
