@@ -15817,7 +15817,12 @@ export const handler = async (event) => {
           LEFT JOIN lead_batches lb ON lb.id = lcs.batch_id
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE d.id = $1
-            AND ($2::uuid IS NULL OR d.organization_id = $2)
+            AND (
+              $2::uuid IS NULL
+              OR d.organization_id = $2
+              OR lcs.organization_id = $2
+              OR lb.organization_id = $2
+            )
           LIMIT 1
           `,
           [leadId, organizationId]
