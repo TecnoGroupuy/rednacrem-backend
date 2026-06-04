@@ -16508,7 +16508,7 @@ export const handler = async (event) => {
 
         if (currentEstadoVenta) {
           // Venta y dato_erroneo son siempre finales
-          const estadosFinalesPermanentes = ["venta", "dato_erroneo"];
+          const estadosFinalesPermanentes = ["venta", "venta_pendiente", "dato_erroneo"];
           if (estadosFinalesPermanentes.includes(currentEstadoVenta)) {
             const latestGestion = await client.query(
               `
@@ -16644,7 +16644,7 @@ export const handler = async (event) => {
         const updateLeadStatus = await client.query(
           `
           UPDATE lead_contact_status
-          SET estado_venta = $2,
+          SET estado_venta = CASE WHEN $2 = 'venta' THEN 'venta_pendiente' ELSE $2 END,
               intentos = $3,
               proxima_accion = $4,
               assigned_to = $6,
