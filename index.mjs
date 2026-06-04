@@ -14678,7 +14678,7 @@ export const handler = async (event) => {
 
       let tabWhere = "";
       if (tabNormalized === "nuevo") {
-        tabWhere = "AND (lcs.intentos = 0 OR lcs.ultimo_intento_at IS NULL)";
+        tabWhere = "AND COALESCE(lcs.estado_venta, 'nuevo') = 'nuevo' AND (lcs.intentos = 0 OR lcs.ultimo_intento_at IS NULL)";
       } else if (tabNormalized === "rellamar") {
         tabWhere = "AND lcs.estado_venta IN ('rellamar')";
       } else if (tabNormalized === "seguimiento") {
