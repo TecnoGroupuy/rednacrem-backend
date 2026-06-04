@@ -8756,34 +8756,17 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
 
       if (existingRes.rows.length) {
         const row = existingRes.rows[0];
-        leadId = row.id;
-        wasCreated = false;
-
-        const updateParts = [];
-        const updateValues = [];
-        let idx = 1;
-
-        const setIfEmpty = (col, value) => {
-          if (!leadCols.has(col)) return;
-          if (value === null || value === undefined || value === "") return;
-          const current = row[col];
-          if (current !== null && current !== undefined && String(current).trim() !== "") return;
-          updateParts.push(`${col} = $${idx}`);
-          updateValues.push(value);
-          idx += 1;
-        };
-
-        setIfEmpty("correo_electronico", correoElectronico);
-        setIfEmpty("departamento", departamento);
-        setIfEmpty("telefono", telefono);
-
-        if (updateParts.length) {
-          updateValues.push(leadId);
-          await client.query(
-            `UPDATE datos_para_trabajar SET ${updateParts.join(", ")}, updated_at = now() WHERE id = $${idx}`,
-            updateValues
-          );
-        }
+        await client.query("ROLLBACK");
+        return json(409, {
+          ok: false,
+          message: "Este contacto ya existe en el sistema.",
+          data: {
+            contact_id: row.id,
+            nombre: row.nombre,
+            apellido: row.apellido,
+            estado_venta: row.estado_venta ?? null
+          }
+        });
       } else {
         wasCreated = true;
 
