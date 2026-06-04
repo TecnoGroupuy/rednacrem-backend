@@ -14692,7 +14692,7 @@ export const handler = async (event) => {
       } else if (tabNormalized === "recuperado") {
         tabWhere = "AND lcs.estado_venta IN ('venta')";
       } else {
-        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')";
+        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable', 'venta', 'venta_pendiente', 'rechazo', 'no_contesta', 'seguimiento', 'rellamar')";
       }
       const tabWhereCount = tabWhere.replace(/^AND\s+/, "");
       const countExtra =
