@@ -8663,6 +8663,8 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
   try {
     await client.query("BEGIN");
     try {
+      console.log('[manual-contact] batchId:', batchId);
+
       const loteRes = await client.query(
         `
         SELECT id, organization_id
@@ -8673,12 +8675,16 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
         `,
         [batchId]
       );
+      console.log('[manual-contact] batch:', JSON.stringify(loteRes.rows[0] || null));
+
       const batch = loteRes.rows[0] || null;
       if (!batch) {
         await client.query("ROLLBACK");
         return json(404, { ok: false, message: "Lote no encontrado" });
       }
       const organizationId = batch.organization_id || null;
+      console.log('[manual-contact] organizationId:', organizationId);
+
       if (!organizationId) {
         await client.query("ROLLBACK");
         return json(400, { ok: false, message: "organization_id requerido en lote" });
@@ -8794,6 +8800,8 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
         placeholders.push(`$${idx}`);
         values.push(organizationId ?? null);
         idx += 1;
+
+        console.log('[manual-contact] inserting with organizationId:', organizationId);
 
         const insertRes = await client.query(
           `
