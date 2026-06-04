@@ -10190,6 +10190,9 @@ export const handler = async (event) => {
         ? body.contact
         : body;
       const familySales = Array.isArray(body?.familySales) ? body.familySales : [];
+      const isSaleConfirmation = Boolean(gestId)
+        || (Array.isArray(body?.products) && body.products.length > 0)
+        || familySales.length > 0;
       const cobranzaDocumento = normalizeText(body?.cobranza_documento || body?.documento_cobranza) || null;
 
       const telefonos = [
@@ -10255,7 +10258,7 @@ export const handler = async (event) => {
         }
 
         const isVendedor = dbUser?.role_key === "vendedor";
-        if (isVendedor) {
+        if (isVendedor && !isSaleConfirmation) {
           const batchResult = await client.query(
             `
             SELECT lb.id
@@ -10626,6 +10629,13 @@ export const handler = async (event) => {
 
           let principalLeadId = null;
           if (!leadIdColumn) return null;
+          if (principalContactId) {
+            const directLeadRes = await client.query(
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE ${leadIdColumn} = $1 LIMIT 1`,
+              [principalContactId]
+            );
+            principalLeadId = directLeadRes.rows[0]?.lead_id || null;
+          }
           if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
@@ -10807,7 +10817,7 @@ export const handler = async (event) => {
           return insertRes.rows[0]?.lead_id || null;
         };
 
-        const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId }) => {
+        const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId, usePrincipalLead = false }) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
           if (!safeContactId || !safeSellerId) {
@@ -10818,7 +10828,7 @@ export const handler = async (event) => {
             return { ok: false, reason: "missing_batch", contactId: safeContactId };
           }
 
-          let leadId = null;
+          let leadId = usePrincipalLead ? principal.principalLeadId || null : null;
           if (!leadIdColumn) {
             return { ok: false, reason: "missing_lead_column", contactId: safeContactId };
           }
@@ -11282,7 +11292,8 @@ export const handler = async (event) => {
         const linkedToPrincipal = await linkLeadSaleFromPrincipal({
           contactId: main.id,
           fields: main.fields,
-          sellerId
+          sellerId,
+          usePrincipalLead: true
         });
         if (linkedToPrincipal) managementLog.push({ scope: "main", ...linkedToPrincipal });
         if (!linkedToPrincipal?.ok) {
