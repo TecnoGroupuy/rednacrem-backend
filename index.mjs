@@ -8668,7 +8668,7 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
         SELECT id, organization_id
         FROM lead_batches
         WHERE id = $1
-          AND is_active = true
+          AND estado IN ('activo', 'asignado')
         LIMIT 1
         `,
         [batchId]
