@@ -10636,7 +10636,7 @@ export const handler = async (event) => {
             );
             principalLeadId = directLeadRes.rows[0]?.lead_id || null;
           }
-          if (principalContactId && hasContactIdCol) {
+          if (!principalLeadId && principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
               [principalContactId]
