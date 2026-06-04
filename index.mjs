@@ -91,6 +91,54 @@ function loadEnvFile(filePath) {
 loadEnvFile(".env");
 loadEnvFile(".env.local");
 
+async function cleanupVentaPendiente() {
+  const client = createDbClient();
+  await client.connect();
+  try {
+    const resetRes = await client.query(
+      `
+      UPDATE lead_contact_status
+      SET estado_venta = 'nuevo',
+          intentos = 0,
+          ultimo_intento_at = NULL,
+          updated_at = now()
+      WHERE estado_venta = 'venta_pendiente'
+        AND ultimo_intento_at < now() - interval '15 minutes'
+      RETURNING contact_id
+      `
+    );
+
+    for (const row of resetRes.rows) {
+      await client.query(
+        `
+        DELETE FROM lead_management_history
+        WHERE id = (
+          SELECT id
+          FROM lead_management_history
+          WHERE resultado = 'venta'
+            AND contact_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        )
+        `,
+        [row.contact_id]
+      );
+    }
+
+    console.log('[cleanupVentaPendiente] leads reset:', resetRes.rowCount || 0);
+  } catch (error) {
+    console.error('[cleanupVentaPendiente] error:', error);
+  } finally {
+    await client.end();
+  }
+}
+
+setInterval(() => {
+  cleanupVentaPendiente().catch((error) => {
+    console.error('[cleanupVentaPendiente] unhandled error:', error);
+  });
+}, 5 * 60 * 1000);
+
 async function enqueueNoCallJob(jobId, startAt) {
   const queueUrl = process.env.NO_CALL_IMPORT_QUEUE_URL;
   if (!queueUrl) {
@@ -15933,6 +15981,65 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to load lead",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "PATCH" && path.match(/\/leads\/([^/]+)\/reset$/)) {
+    const match = path.match(/\/leads\/([^/]+)\/reset$/);
+    const leadId = match?.[1];
+    if (!leadId) {
+      return json(400, { ok: false, message: "Lead id requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const result = await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = 'nuevo',
+              intentos = 0,
+              ultimo_intento_at = NULL,
+              updated_at = now()
+          WHERE contact_id = $1
+          RETURNING contact_id, batch_id, assigned_to, estado_venta, intentos
+          `,
+          [leadId]
+        );
+
+        if (!result.rows.length) {
+          return json(404, { ok: false, message: "Lead not found" });
+        }
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: result.rows[0]
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to reset lead",
         error: error.message
       });
     }
