@@ -15510,27 +15510,6 @@ export const handler = async (event) => {
           organizationId = await resolveOrganizationIdForRequest(dbUser, event);
         } catch {}
 
-        const evalRes = await evaluarEstadoLead(
-          client,
-          fields.telefono,
-          fields.celular,
-          fields.origenDato || null,
-          organizationId,
-          null,
-          {
-            fechaNacimiento: fields.fechaNacimiento,
-            direccion: fields.direccion,
-            email: fields.email,
-            localidad: fields.localidad,
-            departamento: fields.departamento
-          }
-        );
-        const evalEstado = evalRes.estado || "nuevo";
-        const evalMotivo = evalRes.motivoBloqueo || null;
-        const evalMotivoDetalle = evalRes.motivoBloqueoDetalle || null;
-        const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
-        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
-
         const resolveBatchId = async () => {
           if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
@@ -15581,6 +15560,38 @@ export const handler = async (event) => {
           await client.query("ROLLBACK");
           return json(409, { ok: false, message: "No hay lote activo para asignar" });
         }
+
+        const batchOrgRes = await client.query(
+          `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
+          [batchId]
+        );
+        organizationId = batchOrgRes.rows[0]?.organization_id || organizationId || null;
+        if (!organizationId) {
+          await client.query("ROLLBACK");
+          return json(400, { ok: false, message: "organization_id requerido en lote" });
+        }
+
+        const evalRes = await evaluarEstadoLead(
+          client,
+          fields.telefono,
+          fields.celular,
+          fields.origenDato || null,
+          organizationId,
+          null,
+          {
+            fechaNacimiento: fields.fechaNacimiento,
+            direccion: fields.direccion,
+            email: fields.email,
+            localidad: fields.localidad,
+            departamento: fields.departamento
+          }
+        );
+        const evalEstado = evalRes.estado || "nuevo";
+        const evalMotivo = evalRes.motivoBloqueo || null;
+        const evalMotivoDetalle = evalRes.motivoBloqueoDetalle || null;
+        const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
+        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
+        const hasLeadStatusOrganizationId = await columnExists(client, "lead_contact_status", "organization_id");
 
         const docValue = normalizeText(fields.documento || "") || null;
         const telValue = normalizePhoneDigits(fields.telefono || "");
@@ -15642,6 +15653,10 @@ export const handler = async (event) => {
           if (hasMotivoBloqueo) pushCol("motivo_bloqueo", evalMotivo);
           if (hasMotivoBloqueoDetalle) pushCol("motivo_bloqueo_detalle", evalMotivoDetalle);
           if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
+          columns.push("organization_id");
+          values.push(organizationId ?? null);
+          params.push(`$${p}`);
+          p += 1;
 
           if (!columns.length) {
             await client.query("ROLLBACK");
@@ -15664,6 +15679,17 @@ export const handler = async (event) => {
           return json(500, { ok: false, message: "No se pudo crear lead" });
         }
 
+        await client.query(
+          `
+          UPDATE datos_para_trabajar
+          SET organization_id = $2,
+              updated_at = now()
+          WHERE ${leadIdColumn} = $1
+            AND organization_id IS NULL
+          `,
+          [leadId, organizationId]
+        );
+
         const statusRes = await client.query(
           `
           SELECT 1
@@ -15679,10 +15705,11 @@ export const handler = async (event) => {
               `
               UPDATE lead_contact_status
               SET estado_venta = 'bloqueado',
+                  ${hasLeadStatusOrganizationId ? "organization_id = $2," : ""}
                   updated_at = NOW()
               WHERE contact_id = $1
               `,
-              [leadId]
+              hasLeadStatusOrganizationId ? [leadId, organizationId] : [leadId]
             );
           } else {
             await client.query(
@@ -15691,12 +15718,15 @@ export const handler = async (event) => {
               SET estado_venta = 'nuevo',
                   intentos = COALESCE(intentos, 0),
                   assigned_to = $3,
+                  ${hasLeadStatusOrganizationId ? "organization_id = $4," : ""}
                   ola_actual = COALESCE(ola_actual, 1),
                   ultimo_intento_at = now(),
                   updated_at = now()
               WHERE contact_id = $1 AND batch_id = $2
               `,
-              [leadId, batchId, dbUser?.id || null]
+              hasLeadStatusOrganizationId
+                ? [leadId, batchId, dbUser?.id || null, organizationId]
+                : [leadId, batchId, dbUser?.id || null]
             );
           }
         } else {
@@ -15713,8 +15743,9 @@ export const handler = async (event) => {
                 assigned_to,
                 ola_actual,
                 ultimo_intento_at
+                ${hasLeadStatusOrganizationId ? ", organization_id" : ""}
               )
-              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
+              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now()${hasLeadStatusOrganizationId ? ", $4" : ""})
               ON CONFLICT (contact_id) DO UPDATE
               SET
                 estado_venta = 'nuevo',
@@ -15722,11 +15753,14 @@ export const handler = async (event) => {
                 proxima_accion = NULL,
                 batch_id = EXCLUDED.batch_id,
                 assigned_to = EXCLUDED.assigned_to,
+                ${hasLeadStatusOrganizationId ? "organization_id = EXCLUDED.organization_id," : ""}
                 ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
                 ultimo_intento_at = now(),
                 updated_at = now()
               `,
-              [leadId, batchId, dbUser?.id || null]
+              hasLeadStatusOrganizationId
+                ? [leadId, batchId, dbUser?.id || null, organizationId]
+                : [leadId, batchId, dbUser?.id || null]
             );
           }
         }
