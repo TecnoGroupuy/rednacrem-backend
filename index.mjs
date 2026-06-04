@@ -8690,6 +8690,7 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
         return json(400, { ok: false, message: "organization_id requerido en lote" });
       }
 
+      const authorizedSellerId = sellerId || dbUser?.id || null;
       const sellerRes = await client.query(
         `
         SELECT 1
@@ -8698,7 +8699,7 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
           AND seller_id = $2
         LIMIT 1
         `,
-        [batchId, dbUser?.id || null]
+        [batchId, authorizedSellerId]
       );
       if (!sellerRes.rows.length) {
         await client.query("ROLLBACK");
