@@ -12993,6 +12993,23 @@ export const handler = async (event) => {
       await client.connect();
       try {
         await client.query("BEGIN");
+        await client.query(`
+          ALTER TABLE contact_products
+          ADD COLUMN IF NOT EXISTS baja_gestionada_por uuid REFERENCES users(id)
+        `);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS recupero_alerts (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            contact_id uuid REFERENCES contacts(id),
+            product_id uuid REFERENCES contact_products(id),
+            seller_user_id uuid REFERENCES users(id),
+            motivo_baja text,
+            fecha_baja timestamptz DEFAULT now(),
+            gestionado_por uuid REFERENCES users(id),
+            atendido boolean DEFAULT false,
+            created_at timestamptz DEFAULT now()
+          )
+        `);
 
         const contactRes = await client.query(
           `SELECT id FROM contacts WHERE id = $1 AND organization_id = $2 LIMIT 1`,
@@ -13029,7 +13046,7 @@ export const handler = async (event) => {
           return json(409, { ok: false, message: "Este producto ya está dado de baja" });
         }
 
-        const updateValues = [motivoBaja, observacion || null, productId, contactId];
+        const updateValues = [motivoBaja, observacion || null, userId, productId, contactId];
         let updateOrgClause = "";
         if (cpCols.has("organization_id")) {
           updateValues.push(organizationId);
@@ -13042,13 +13059,47 @@ export const handler = async (event) => {
             estado = 'baja',
             motivo_baja = $1,
             motivo_baja_detalle = $2,
+            baja_gestionada_por = $3,
             fecha_baja = now(),
             updated_at = now()
-          WHERE id = $3
-            AND contact_id = $4
+          WHERE id = $4
+            AND contact_id = $5
             ${updateOrgClause}
           `,
           updateValues
+        );
+
+        const alertValues = [contactId, productId, motivoBaja, userId];
+        let alertOrgClause = "";
+        if (cpCols.has("organization_id")) {
+          alertValues.push(organizationId);
+          alertOrgClause = `AND organization_id = $${alertValues.length}`;
+        }
+        await client.query(
+          `
+          INSERT INTO recupero_alerts (
+            contact_id,
+            product_id,
+            seller_user_id,
+            motivo_baja,
+            fecha_baja,
+            gestionado_por
+          )
+          SELECT
+            contact_id,
+            id,
+            seller_user_id,
+            $3,
+            now(),
+            $4
+          FROM contact_products
+          WHERE contact_id = $1
+            AND id = $2
+            AND fecha_alta >= (now()::date - interval '90 days')
+            AND seller_user_id IS NOT NULL
+            ${alertOrgClause}
+          `,
+          alertValues
         );
 
         // Auditoría (tabla dedicada): registrar quién dio de baja y cuándo
