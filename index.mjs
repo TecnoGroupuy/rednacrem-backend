@@ -13024,9 +13024,21 @@ export const handler = async (event) => {
         const cpValues = cpCols.has("organization_id")
           ? [productId, contactId, organizationId]
           : [productId, contactId];
+        const cpSelectColumns = [
+          "id",
+          "estado",
+          "contact_id",
+          "nombre_producto",
+          "precio",
+          "fecha_alta",
+          cpCols.has("medio_pago") ? "medio_pago" : "NULL::text AS medio_pago",
+          cpCols.has("seller_user_id") ? "seller_user_id" : "NULL::uuid AS seller_user_id",
+          cpCols.has("seller_name_snapshot") ? "seller_name_snapshot" : "NULL::text AS seller_name_snapshot",
+          "fecha_alta >= (now()::date - interval '90 days') AS genero_recupero_alert"
+        ];
         const cpRes = await client.query(
           `
-          SELECT id, estado
+          SELECT ${cpSelectColumns.join(", ")}
           FROM contact_products
           WHERE id = $1
             AND contact_id = $2
@@ -13068,128 +13080,77 @@ export const handler = async (event) => {
           updateValues
         );
 
-        const alertValues = [contactId, productId, motivoBaja, userId];
-        let alertOrgClause = "";
-        if (cpCols.has("organization_id")) {
-          alertValues.push(organizationId);
-          alertOrgClause = `AND organization_id = $${alertValues.length}`;
+        if (cpRow.genero_recupero_alert && cpRow.seller_user_id) {
+          await client.query(
+            `
+            INSERT INTO recupero_alerts (
+              contact_id,
+              product_id,
+              seller_user_id,
+              motivo_baja,
+              fecha_baja,
+              gestionado_por
+            )
+            VALUES ($1, $2, $3, $4, now(), $5)
+            `,
+            [contactId, productId, cpRow.seller_user_id, motivoBaja, userId]
+          );
         }
-        await client.query(
-          `
-          INSERT INTO recupero_alerts (
-            contact_id,
-            product_id,
-            seller_user_id,
-            motivo_baja,
-            fecha_baja,
-            gestionado_por
-          )
-          SELECT
-            contact_id,
-            id,
-            seller_user_id,
-            $3,
-            now(),
-            $4
-          FROM contact_products
-          WHERE contact_id = $1
-            AND id = $2
-            AND fecha_alta >= (now()::date - interval '90 days')
-            AND seller_user_id IS NOT NULL
-            ${alertOrgClause}
-          `,
-          alertValues
-        );
 
-        // Auditoría (tabla dedicada): registrar quién dio de baja y cuándo
         await client.query("SAVEPOINT baja_audit_insert");
         try {
+          const gestionadoPorNombre =
+            [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() ||
+            dbUser?.email ||
+            authUser?.email ||
+            null;
+          const gestionadoPorEmail = dbUser?.email || authUser?.email || null;
           await client.query(
             `
             INSERT INTO contact_product_baja_audit (
               contact_id,
               product_id,
+              organization_id,
+              nombre_producto,
+              precio_producto,
+              fecha_alta_producto,
+              medio_pago,
               motivo_baja,
-              observacion,
+              motivo_baja_detalle,
               fecha_baja,
-              user_id,
-              organization_id
+              gestionado_por,
+              gestionado_por_nombre,
+              gestionado_por_email,
+              seller_user_id,
+              seller_nombre,
+              genero_recupero_alert
             )
-            VALUES ($1, $2, $3, $4, now(), $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13, $14, $15)
             `,
-            [contactId, productId, motivoBaja, observacion || null, dbUser?.id || null, organizationId]
+            [
+              contactId,
+              productId,
+              organizationId,
+              cpRow.nombre_producto || null,
+              cpRow.precio ?? null,
+              cpRow.fecha_alta || null,
+              cpRow.medio_pago || null,
+              motivoBaja,
+              observacion || null,
+              userId,
+              gestionadoPorNombre,
+              gestionadoPorEmail,
+              cpRow.seller_user_id || null,
+              cpRow.seller_name_snapshot || null,
+              Boolean(cpRow.genero_recupero_alert)
+            ]
           );
           await client.query("RELEASE SAVEPOINT baja_audit_insert");
         } catch (auditError) {
           await client.query("ROLLBACK TO SAVEPOINT baja_audit_insert");
           await client.query("RELEASE SAVEPOINT baja_audit_insert");
-          // No romper el flujo por falta de tabla/permisos en auditoría
+          // No romper el flujo por falta de tabla/permisos en auditoria
           console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
-        }
-
-        // Auditoría: crear ticket manual finalizado + closure (sin pasar por el flujo UI)
-        const actorName = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.id;
-        const ticketCols = await getTableColumns(client, "manual_tickets");
-        const ticketColumns = [];
-        const ticketParams = [];
-        const ticketValues = [];
-        let p = 1;
-        const pushTicketCol = (col, val) => {
-          if (!ticketCols.has(col)) return;
-          ticketColumns.push(col);
-          ticketParams.push(`$${p}`);
-          ticketValues.push(val ?? null);
-          p += 1;
-        };
-        pushTicketCol("cliente_id", contactId);
-        pushTicketCol("tipo_solicitud", "solicitud_baja");
-        pushTicketCol("tipo_solicitud_manual", "baja_manual");
-        pushTicketCol("resumen", `Baja manual producto ${productId}`);
-        pushTicketCol("prioridad", "media");
-        pushTicketCol("estado", "finalizada");
-        pushTicketCol("producto_contrato_id", productId);
-        pushTicketCol("organization_id", organizationId);
-        const ticketIns = await client.query(
-          `
-          INSERT INTO manual_tickets (${ticketColumns.join(", ")})
-          VALUES (${ticketParams.join(", ")})
-          RETURNING id
-          `,
-          ticketValues
-        );
-        const ticketId = ticketIns.rows[0]?.id || null;
-
-        const closureCols = await getTableColumns(client, "manual_ticket_closures");
-        if (ticketId && closureCols.size) {
-          const closureColumns = [];
-          const closureParams = [];
-          const closureValues = [];
-          let c = 1;
-          const pushClosureCol = (col, val) => {
-            if (!closureCols.has(col)) return;
-            closureColumns.push(col);
-            closureParams.push(`$${c}`);
-            closureValues.push(val ?? null);
-            c += 1;
-          };
-          pushClosureCol("ticket_id", ticketId);
-          pushClosureCol("resultado", "baja_confirmada");
-          pushClosureCol("usuario", actorName);
-          pushClosureCol("note", [
-            `motivo_baja=${motivoBaja}`,
-            observacion ? `obs=${observacion}` : null
-          ]
-            .filter(Boolean)
-            .join(" | "));
-          if (closureColumns.length) {
-            await client.query(
-              `
-              INSERT INTO manual_ticket_closures (${closureColumns.join(", ")})
-              VALUES (${closureParams.join(", ")})
-              `,
-              closureValues
-            );
-          }
         }
 
         await client.query("COMMIT");
