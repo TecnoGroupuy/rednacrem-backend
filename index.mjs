@@ -13102,6 +13102,7 @@ export const handler = async (event) => {
         );
 
         // Auditoría (tabla dedicada): registrar quién dio de baja y cuándo
+        await client.query("SAVEPOINT baja_audit_insert");
         try {
           await client.query(
             `
@@ -13118,7 +13119,10 @@ export const handler = async (event) => {
             `,
             [contactId, productId, motivoBaja, observacion || null, dbUser?.id || null, organizationId]
           );
+          await client.query("RELEASE SAVEPOINT baja_audit_insert");
         } catch (auditError) {
+          await client.query("ROLLBACK TO SAVEPOINT baja_audit_insert");
+          await client.query("RELEASE SAVEPOINT baja_audit_insert");
           // No romper el flujo por falta de tabla/permisos en auditoría
           console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
         }
