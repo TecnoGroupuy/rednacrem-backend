@@ -12983,6 +12983,7 @@ export const handler = async (event) => {
       const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
       const motivoBaja = normalizeText(body?.motivo_baja) || null;
       const observacion = normalizeText(body?.observacion) || null;
+      const fechaBaja = body.fecha_baja ? body.fecha_baja : null;
 
       if (!motivoBaja || !BAJA_MOTIVOS.includes(motivoBaja)) {
         return json(400, { ok: false, message: "motivo_baja inválido" });
@@ -13057,7 +13058,7 @@ export const handler = async (event) => {
           return json(409, { ok: false, message: "Este producto ya está dado de baja" });
         }
 
-        const updateValues = [motivoBaja, observacion || null, userId, productId, contactId];
+        const updateValues = [motivoBaja, observacion || null, userId, fechaBaja, productId, contactId];
         let updateOrgClause = "";
         if (cpCols.has("organization_id")) {
           updateValues.push(organizationId);
@@ -13071,10 +13072,10 @@ export const handler = async (event) => {
             motivo_baja = $1,
             motivo_baja_detalle = $2,
             baja_gestionada_por = $3,
-            fecha_baja = now(),
+            fecha_baja = COALESCE($4::date, now()::date),
             updated_at = now()
-          WHERE id = $4
-            AND contact_id = $5
+          WHERE id = $5
+            AND contact_id = $6
             ${updateOrgClause}
           `,
           updateValues
@@ -13091,9 +13092,9 @@ export const handler = async (event) => {
               fecha_baja,
               gestionado_por
             )
-            VALUES ($1, $2, $3, $4, now(), $5)
+            VALUES ($1, $2, $3, $4, COALESCE($5::date, now()::date), $6)
             `,
-            [contactId, productId, cpRow.seller_user_id, motivoBaja, userId]
+            [contactId, productId, cpRow.seller_user_id, motivoBaja, fechaBaja, userId]
           );
         }
 
@@ -13125,7 +13126,7 @@ export const handler = async (event) => {
               seller_nombre,
               genero_recupero_alert
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::date, now()::date), $11, $12, $13, $14, $15, $16)
             `,
             [
               contactId,
@@ -13137,6 +13138,7 @@ export const handler = async (event) => {
               cpRow.medio_pago || null,
               motivoBaja,
               observacion || null,
+              fechaBaja,
               userId,
               gestionadoPorNombre,
               gestionadoPorEmail,
