@@ -238,6 +238,8 @@ const VALID_ROLES = [
   "vendedor"
 ];
 
+const BAJA_MOTIVOS = ["Auditoría", "Medio de pago", "Voluntaria", "Antel", "BPS", "Fallecido", "Administrativa", "Deuda"];
+
 const INTERNAL_CONTACT_ACCESS_ROLES = [
   "superadministrador",
   "director",
@@ -9094,6 +9096,10 @@ export const handler = async (event) => {
     authorizerKeys: Object.keys(event?.requestContext?.authorizer || {})
   });
 
+  if (method === "GET" && path.endsWith("/clients/baja-motivos")) {
+    return json(200, { ok: true, motivos: BAJA_MOTIVOS });
+  }
+
   if (method === "GET" && path.endsWith("/health")) {
     return json(200, {
       ok: true,
@@ -12978,14 +12984,7 @@ export const handler = async (event) => {
       const motivoBaja = normalizeText(body?.motivo_baja) || null;
       const observacion = normalizeText(body?.observacion) || null;
 
-      const ALLOWED_MOTIVOS = [
-        "Sin liquidez",
-        "Error en el pago",
-        "Baja por auditoria",
-        "Cuenta con otro servicio",
-        "Baja"
-      ];
-      if (!motivoBaja || !ALLOWED_MOTIVOS.includes(motivoBaja)) {
+      if (!motivoBaja || !BAJA_MOTIVOS.includes(motivoBaja)) {
         return json(400, { ok: false, message: "motivo_baja inválido" });
       }
 
