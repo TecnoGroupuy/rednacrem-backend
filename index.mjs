@@ -16545,16 +16545,75 @@ export const handler = async (event) => {
       try {
         await client.query("BEGIN");
 
-        const currentStatusRes = await client.query(
+        const requireAssignedLead = dbUser?.role_key === "vendedor";
+        const currentStatusValues = requireAssignedLead
+          ? [leadId, dbUser.id]
+          : [leadId];
+        const currentAssignedClause = requireAssignedLead ? "AND assigned_to = $2" : "";
+        let currentStatusRes = await client.query(
           `
           SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
           FROM lead_contact_status
           WHERE contact_id = $1
-            AND assigned_to = $2
+            ${currentAssignedClause}
           LIMIT 1
           `,
-          [leadId, dbUser.id]
+          currentStatusValues
         );
+
+        if (!currentStatusRes.rows.length) {
+          const agendaValues = requireAssignedLead ? [leadId, dbUser.id] : [leadId];
+          const agendaSellerClause = requireAssignedLead ? "AND seller_id = $2" : "";
+          const agendaRes = await client.query(
+            `
+            SELECT contact_id, batch_id, seller_id
+            FROM lead_agenda
+            WHERE contact_id = $1
+              ${agendaSellerClause}
+              AND cumplida = false
+            ORDER BY fecha_agenda DESC
+            LIMIT 1
+            `,
+            agendaValues
+          );
+
+          const agendaRow = agendaRes.rows[0] || null;
+          if (agendaRow?.batch_id && agendaRow?.seller_id) {
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id,
+                estado_venta,
+                intentos,
+                proxima_accion,
+                batch_id,
+                assigned_to,
+                ola_actual,
+                ultimo_intento_at
+              )
+              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, NULL)
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = EXCLUDED.assigned_to,
+                ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
+                updated_at = now()
+              `,
+              [leadId, agendaRow.batch_id, agendaRow.seller_id]
+            );
+
+            currentStatusRes = await client.query(
+              `
+              SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
+              FROM lead_contact_status
+              WHERE contact_id = $1
+                ${currentAssignedClause}
+              LIMIT 1
+              `,
+              currentStatusValues
+            );
+          }
+        }
 
         if (!currentStatusRes.rows.length) {
           await client.query("ROLLBACK");
@@ -16563,7 +16622,9 @@ export const handler = async (event) => {
             success: false,
             data: null,
             error: {
-              message: "Contacto no encontrado en tu lote"
+              message: requireAssignedLead
+                ? "Contacto no encontrado en tu lote"
+                : "Contacto no encontrado"
             }
           });
         }
