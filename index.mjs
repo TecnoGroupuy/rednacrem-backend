@@ -90,55 +90,6 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(".env");
 loadEnvFile(".env.local");
-
-async function cleanupVentaPendiente() {
-  const client = createDbClient();
-  await client.connect();
-  try {
-    const resetRes = await client.query(
-      `
-      UPDATE lead_contact_status
-      SET estado_venta = 'nuevo',
-          intentos = 0,
-          ultimo_intento_at = NULL,
-          updated_at = now()
-      WHERE estado_venta = 'venta_pendiente'
-        AND ultimo_intento_at < now() - interval '15 minutes'
-      RETURNING contact_id
-      `
-    );
-
-    for (const row of resetRes.rows) {
-      await client.query(
-        `
-        DELETE FROM lead_management_history
-        WHERE id = (
-          SELECT id
-          FROM lead_management_history
-          WHERE resultado = 'venta'
-            AND contact_id = $1
-          ORDER BY created_at DESC
-          LIMIT 1
-        )
-        `,
-        [row.contact_id]
-      );
-    }
-
-    console.log('[cleanupVentaPendiente] leads reset:', resetRes.rowCount || 0);
-  } catch (error) {
-    console.error('[cleanupVentaPendiente] error:', error);
-  } finally {
-    await client.end();
-  }
-}
-
-setInterval(() => {
-  cleanupVentaPendiente().catch((error) => {
-    console.error('[cleanupVentaPendiente] unhandled error:', error);
-  });
-}, 5 * 60 * 1000);
-
 async function enqueueNoCallJob(jobId, startAt) {
   const queueUrl = process.env.NO_CALL_IMPORT_QUEUE_URL;
   if (!queueUrl) {
@@ -6187,6 +6138,216 @@ async function columnExists(client, tableName, columnName) {
   return cols.has(columnName);
 }
 
+let externalConnectionsTablesReady = false;
+async function ensureExternalConnectionsTables(client) {
+  if (externalConnectionsTablesReady) return;
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS external_connections (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id uuid REFERENCES organizations(id),
+      nombre text NOT NULL,
+      url text NOT NULL,
+      api_key text NOT NULL,
+      activa boolean DEFAULT true,
+      product_ids uuid[] DEFAULT '{}',
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
+    )
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS external_connection_logs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      connection_id uuid REFERENCES external_connections(id),
+      contact_id uuid REFERENCES contacts(id),
+      payload jsonb,
+      response_status int,
+      response_body jsonb,
+      error text,
+      created_at timestamptz DEFAULT now()
+    )
+  `);
+  externalConnectionsTablesReady = true;
+}
+
+function normalizeProductIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((id) => String(id || "").trim()).filter((id) => isValidUuid(id)))];
+}
+
+async function sendToExternalConnections(contactId, productId, organizationId) {
+  if (!isValidUuid(contactId) || !isValidUuid(productId) || !isValidUuid(organizationId)) return;
+
+  const client = createDbClient();
+  try {
+    await client.connect();
+    await ensureExternalConnectionsTables(client);
+
+    const result = await client.query(
+      `
+      SELECT
+        ec.id,
+        ec.url,
+        ec.api_key,
+        c.documento,
+        c.nombre,
+        c.apellido,
+        c.email,
+        c.telefono,
+        c.celular,
+        c.fecha_nacimiento,
+        c.direccion,
+        c.departamento,
+        o.nombre AS organization_nombre
+      FROM external_connections ec
+      JOIN contacts c ON c.id = $1
+      JOIN organizations o ON o.id = $3
+      WHERE ec.organization_id = $3
+        AND ec.activa = true
+        AND (COALESCE(cardinality(ec.product_ids), 0) = 0 OR $2::uuid = ANY(ec.product_ids))
+      `,
+      [contactId, productId, organizationId]
+    );
+
+    for (const connection of result.rows) {
+      const payload = {
+        ci: connection.documento,
+        fullname: `${connection.nombre || ""} ${connection.apellido || ""}`.trim(),
+        asociacion: connection.organization_nombre,
+        email: connection.email,
+        phone: connection.telefono,
+        cellPhone: connection.celular,
+        birthDate: connection.fecha_nacimiento,
+        address: connection.direccion,
+        department: connection.departamento,
+        state: "Activo",
+        situation: "Normal"
+      };
+      let responseStatus = null;
+      let responseBody = null;
+      let errorText = null;
+
+      try {
+        const response = await fetch(connection.url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": connection.api_key
+          },
+          body: JSON.stringify(payload)
+        });
+        responseStatus = response.status;
+        const text = await response.text();
+        if (text) {
+          try {
+            responseBody = JSON.parse(text);
+          } catch {
+            responseBody = { raw: text };
+          }
+        }
+        if (!response.ok) {
+          errorText = `HTTP ${response.status}`;
+        }
+      } catch (error) {
+        errorText = error?.message || String(error);
+      }
+
+      try {
+        await client.query(
+          `
+          INSERT INTO external_connection_logs (
+            connection_id,
+            contact_id,
+            payload,
+            response_status,
+            response_body,
+            error
+          )
+          VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6)
+          `,
+          [
+            connection.id,
+            contactId,
+            JSON.stringify(payload),
+            responseStatus,
+            responseBody ? JSON.stringify(responseBody) : null,
+            errorText
+          ]
+        );
+      } catch (logError) {
+        console.warn("[external-connections] failed to write log", logError?.message || logError);
+      }
+    }
+  } catch (error) {
+    console.warn("[external-connections] failed", error?.message || error);
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+async function resolveExternalConnectionTargetForLead(client, leadId, organizationId) {
+  if (!isValidUuid(leadId) || !isValidUuid(organizationId)) return null;
+
+  const leadRes = await client.query(
+    `
+    SELECT documento, telefono, celular, nombre
+    FROM datos_para_trabajar
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [leadId]
+  );
+  const lead = leadRes.rows[0] || null;
+  if (!lead) return null;
+
+  const contactRes = await client.query(
+    `
+    SELECT c.id
+    FROM contacts c
+    WHERE c.organization_id = $1
+      AND (
+        ($2::text IS NOT NULL AND c.documento = $2)
+        OR ($3::text IS NOT NULL AND (
+          regexp_replace(coalesce(c.telefono,''), '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g')
+          OR regexp_replace(coalesce(c.celular,''), '\\D', '', 'g') = regexp_replace($3, '\\D', '', 'g')
+        ))
+        OR ($4::text IS NOT NULL AND (
+          regexp_replace(coalesce(c.telefono,''), '\\D', '', 'g') = regexp_replace($4, '\\D', '', 'g')
+          OR regexp_replace(coalesce(c.celular,''), '\\D', '', 'g') = regexp_replace($4, '\\D', '', 'g')
+        ))
+      )
+    ORDER BY c.created_at DESC NULLS LAST
+    LIMIT 1
+    `,
+    [organizationId, lead.documento || null, lead.telefono || null, lead.celular || null]
+  );
+  const contactId = contactRes.rows[0]?.id || null;
+  if (!contactId) return null;
+
+  const contactProductsColumns = await getTableColumns(client, "contact_products");
+  const contactProductsOrgClause = contactProductsColumns.has("organization_id")
+    ? "AND organization_id = $2"
+    : "";
+  const contactProductsValues = contactProductsColumns.has("organization_id")
+    ? [contactId, organizationId]
+    : [contactId];
+  const productIdColumn = contactProductsColumns.has("product_id") ? "product_id" : "id";
+  const productRes = await client.query(
+    `
+    SELECT ${productIdColumn} AS product_id
+    FROM contact_products
+    WHERE contact_id = $1
+      ${contactProductsOrgClause}
+    ORDER BY created_at DESC NULLS LAST
+    LIMIT 1
+    `,
+    contactProductsValues
+  );
+  const productId = productRes.rows[0]?.product_id || null;
+  if (!productId) return null;
+
+  return { contactId, productId };
+}
+
 async function isLeadBlockedInDpt(client, contactId) {
   if (!client) throw new Error("isLeadBlockedInDpt requires a db client");
   if (!contactId) return false;
@@ -8683,7 +8844,7 @@ async function rejectVendorRequest({ requestId, reviewerUserId, reviewNotes }) {
   }
 }
 
-async function handleLeadManualContact(client, batchId, dbUser, body) {
+async function handleLeadManualContact(client, batchId, dbUser, organizationId, body) {
   const nombre = normalizeText(body?.nombre || "");
   const apellido = normalizeText(body?.apellido || "");
   const celularRaw = normalizeText(body?.celular || "");
@@ -8713,47 +8874,19 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
   try {
     await client.query("BEGIN");
     try {
-      console.log('[manual-contact] batchId:', batchId);
-
       const loteRes = await client.query(
         `
-        SELECT id, organization_id
+        SELECT id, estado
         FROM lead_batches
         WHERE id = $1
-          AND estado IN ('activo', 'asignado')
+          AND organization_id = $2
         LIMIT 1
         `,
-        [batchId]
+        [batchId, organizationId]
       );
-      console.log('[manual-contact] batch:', JSON.stringify(loteRes.rows[0] || null));
-
-      const batch = loteRes.rows[0] || null;
-      if (!batch) {
+      if (!loteRes.rows.length) {
         await client.query("ROLLBACK");
         return json(404, { ok: false, message: "Lote no encontrado" });
-      }
-      const organizationId = batch.organization_id || null;
-      console.log('[manual-contact] organizationId:', organizationId);
-
-      if (!organizationId) {
-        await client.query("ROLLBACK");
-        return json(400, { ok: false, message: "organization_id requerido en lote" });
-      }
-
-      const authorizedSellerId = sellerId || dbUser?.id || null;
-      const sellerRes = await client.query(
-        `
-        SELECT 1
-        FROM lead_batch_sellers
-        WHERE batch_id = $1
-          AND seller_id = $2
-        LIMIT 1
-        `,
-        [batchId, authorizedSellerId]
-      );
-      if (!sellerRes.rows.length) {
-        await client.query("ROLLBACK");
-        return json(403, { ok: false, message: "Vendedor no autorizado para este lote" });
       }
 
       const telefonoCheck = body.telefono || body.celular;
@@ -8781,21 +8914,10 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
 
       const leadCols = await getTableColumns(client, "datos_para_trabajar");
       const searchByDocumento = Boolean(documento);
-      let lookupSql, lookupValues;
-
-      if (searchByDocumento) {
-        lookupSql = "organization_id = $1 AND documento = $2";
-        lookupValues = [organizationId, documento];
-      } else if (celular) {
-        lookupSql = "organization_id = $1 AND (celular = $2 OR telefono = $2)";
-        lookupValues = [organizationId, celular];
-      } else if (telefono) {
-        lookupSql = "organization_id = $1 AND (telefono = $2 OR celular = $2)";
-        lookupValues = [organizationId, telefono];
-      } else {
-        await client.query("ROLLBACK");
-        return json(400, { ok: false, message: "Se requiere documento o teléfono" });
-      }
+      const lookupValues = searchByDocumento ? [organizationId, documento] : [organizationId, celular];
+      const lookupSql = searchByDocumento
+        ? "organization_id = $1 AND documento = $2"
+        : "organization_id = $1 AND celular = $2";
 
       const existingRes = await client.query(
         `
@@ -8813,17 +8935,34 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
 
       if (existingRes.rows.length) {
         const row = existingRes.rows[0];
-        await client.query("ROLLBACK");
-        return json(409, {
-          ok: false,
-          message: "Este contacto ya existe en el sistema.",
-          data: {
-            contact_id: row.id,
-            nombre: row.nombre,
-            apellido: row.apellido,
-            estado_venta: row.estado_venta ?? null
-          }
-        });
+        leadId = row.id;
+        wasCreated = false;
+
+        const updateParts = [];
+        const updateValues = [];
+        let idx = 1;
+
+        const setIfEmpty = (col, value) => {
+          if (!leadCols.has(col)) return;
+          if (value === null || value === undefined || value === "") return;
+          const current = row[col];
+          if (current !== null && current !== undefined && String(current).trim() !== "") return;
+          updateParts.push(`${col} = $${idx}`);
+          updateValues.push(value);
+          idx += 1;
+        };
+
+        setIfEmpty("correo_electronico", correoElectronico);
+        setIfEmpty("departamento", departamento);
+        setIfEmpty("telefono", telefono);
+
+        if (updateParts.length) {
+          updateValues.push(leadId);
+          await client.query(
+            `UPDATE datos_para_trabajar SET ${updateParts.join(", ")}, updated_at = now() WHERE id = $${idx}`,
+            updateValues
+          );
+        }
       } else {
         wasCreated = true;
 
@@ -8847,12 +8986,7 @@ async function handleLeadManualContact(client, batchId, dbUser, body) {
         addCol("correo_electronico", correoElectronico);
         addCol("departamento", departamento);
         addCol("origen_dato", normalizarOrigenDato(origenDato || "manual"));
-        columns.push("organization_id");
-        placeholders.push(`$${idx}`);
-        values.push(organizationId ?? null);
-        idx += 1;
-
-        console.log('[manual-contact] inserting with organizationId:', organizationId);
+        addCol("organization_id", organizationId);
 
         const insertRes = await client.query(
           `
@@ -9081,6 +9215,9 @@ export const handler = async (event) => {
   const contactProductBajaMatch =
     path.match(/\/api\/contacts\/([^/]+)\/products\/([^/]+)\/baja$/) ||
     path.match(/\/contacts\/([^/]+)\/products\/([^/]+)\/baja$/);
+  const connectionMatch =
+    path.match(/\/api\/connections\/([^/]+)$/) ||
+    path.match(/\/connections\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
@@ -9098,6 +9235,205 @@ export const handler = async (event) => {
 
   if (method === "GET" && path.endsWith("/clients/baja-motivos")) {
     return json(200, { ok: true, motivos: BAJA_MOTIVOS });
+  }
+
+  if (method === "GET" && path.endsWith("/connections")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await ensureExternalConnectionsTables(client);
+        const result = await client.query(
+          `
+          SELECT id, nombre, url, api_key, activa, product_ids, created_at, updated_at
+          FROM external_connections
+          WHERE organization_id = $1
+          ORDER BY created_at DESC
+          `,
+          [organizationId]
+        );
+        return json(200, { ok: true, connections: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load connections", error: error.message });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/connections")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      const nombre = normalizeText(body?.nombre);
+      const url = normalizeText(body?.url);
+      const apiKey = normalizeText(body?.api_key);
+      const activa = typeof body?.activa === "boolean" ? body.activa : true;
+      const productIds = normalizeProductIds(body?.product_ids);
+      if (!nombre || !url || !apiKey) {
+        return json(422, { ok: false, message: "nombre, url y api_key son requeridos" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await ensureExternalConnectionsTables(client);
+        const result = await client.query(
+          `
+          INSERT INTO external_connections (
+            organization_id,
+            nombre,
+            url,
+            api_key,
+            activa,
+            product_ids
+          )
+          VALUES ($1, $2, $3, $4, $5, $6::uuid[])
+          RETURNING id, nombre, url, api_key, activa, product_ids, created_at, updated_at
+          `,
+          [organizationId, nombre, url, apiKey, activa, productIds]
+        );
+        return json(201, { ok: true, connection: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to create connection", error: error.message });
+    }
+  }
+
+  if (method === "PUT" && connectionMatch) {
+    const connectionId = connectionMatch[1];
+    const body = safeParseBody(event);
+    if (!isValidUuid(connectionId)) return json(400, { ok: false, message: "connection id inválido" });
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await ensureExternalConnectionsTables(client);
+        const result = await client.query(
+          `
+          UPDATE external_connections
+          SET
+            nombre = COALESCE($3, nombre),
+            url = COALESCE($4, url),
+            api_key = COALESCE($5, api_key),
+            activa = COALESCE($6, activa),
+            product_ids = COALESCE($7::uuid[], product_ids),
+            updated_at = now()
+          WHERE id = $1
+            AND organization_id = $2
+          RETURNING id, nombre, url, api_key, activa, product_ids, created_at, updated_at
+          `,
+          [
+            connectionId,
+            organizationId,
+            Object.prototype.hasOwnProperty.call(body, "nombre") ? normalizeText(body.nombre) : null,
+            Object.prototype.hasOwnProperty.call(body, "url") ? normalizeText(body.url) : null,
+            Object.prototype.hasOwnProperty.call(body, "api_key") ? normalizeText(body.api_key) : null,
+            typeof body?.activa === "boolean" ? body.activa : null,
+            Object.prototype.hasOwnProperty.call(body, "product_ids") ? normalizeProductIds(body.product_ids) : null
+          ]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Connection not found" });
+        return json(200, { ok: true, connection: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update connection", error: error.message });
+    }
+  }
+
+  if (method === "DELETE" && connectionMatch) {
+    const connectionId = connectionMatch[1];
+    if (!isValidUuid(connectionId)) return json(400, { ok: false, message: "connection id inválido" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await ensureExternalConnectionsTables(client);
+        await client.query("BEGIN");
+        await client.query(
+          `
+          UPDATE external_connection_logs
+          SET connection_id = NULL
+          WHERE connection_id = $1
+            AND EXISTS (
+              SELECT 1
+              FROM external_connections
+              WHERE id = $1
+                AND organization_id = $2
+            )
+          `,
+          [connectionId, organizationId]
+        );
+        const result = await client.query(
+          `
+          DELETE FROM external_connections
+          WHERE id = $1
+            AND organization_id = $2
+          RETURNING id
+          `,
+          [connectionId, organizationId]
+        );
+        await client.query("COMMIT");
+        if (!result.rows.length) return json(404, { ok: false, message: "Connection not found" });
+        return json(200, { ok: true });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to delete connection", error: error.message });
+    }
   }
 
   if (method === "GET" && path.endsWith("/health")) {
@@ -10196,9 +10532,6 @@ export const handler = async (event) => {
         ? body.contact
         : body;
       const familySales = Array.isArray(body?.familySales) ? body.familySales : [];
-      const isSaleConfirmation = Boolean(gestId)
-        || (Array.isArray(body?.products) && body.products.length > 0)
-        || familySales.length > 0;
       const cobranzaDocumento = normalizeText(body?.cobranza_documento || body?.documento_cobranza) || null;
 
       const telefonos = [
@@ -10264,7 +10597,7 @@ export const handler = async (event) => {
         }
 
         const isVendedor = dbUser?.role_key === "vendedor";
-        if (isVendedor && !isSaleConfirmation) {
+        if (isVendedor) {
           const batchResult = await client.query(
             `
             SELECT lb.id
@@ -10299,7 +10632,7 @@ export const handler = async (event) => {
             seller_id: dbUser.id
           };
 
-          return await handleLeadManualContact(client, batchId, dbUser, manualPayload);
+          return await handleLeadManualContact(client, batchId, dbUser, organizationId, manualPayload);
         }
 
         await client.query("BEGIN");
@@ -10635,14 +10968,7 @@ export const handler = async (event) => {
 
           let principalLeadId = null;
           if (!leadIdColumn) return null;
-          if (principalContactId) {
-            const directLeadRes = await client.query(
-              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE ${leadIdColumn} = $1 LIMIT 1`,
-              [principalContactId]
-            );
-            principalLeadId = directLeadRes.rows[0]?.lead_id || null;
-          }
-          if (!principalLeadId && principalContactId && hasContactIdCol) {
+          if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
               `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
               [principalContactId]
@@ -10823,7 +11149,7 @@ export const handler = async (event) => {
           return insertRes.rows[0]?.lead_id || null;
         };
 
-        const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId, usePrincipalLead = false }) => {
+        const linkLeadSaleFromPrincipal = async ({ contactId, fields, sellerId }) => {
           const safeContactId = isValidUuid(contactId) ? contactId : null;
           const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
           if (!safeContactId || !safeSellerId) {
@@ -10834,7 +11160,7 @@ export const handler = async (event) => {
             return { ok: false, reason: "missing_batch", contactId: safeContactId };
           }
 
-          let leadId = usePrincipalLead ? principal.principalLeadId || null : null;
+          let leadId = null;
           if (!leadIdColumn) {
             return { ok: false, reason: "missing_lead_column", contactId: safeContactId };
           }
@@ -11298,8 +11624,7 @@ export const handler = async (event) => {
         const linkedToPrincipal = await linkLeadSaleFromPrincipal({
           contactId: main.id,
           fields: main.fields,
-          sellerId,
-          usePrincipalLead: true
+          sellerId
         });
         if (linkedToPrincipal) managementLog.push({ scope: "main", ...linkedToPrincipal });
         if (!linkedToPrincipal?.ok) {
@@ -13098,6 +13423,7 @@ export const handler = async (event) => {
           );
         }
 
+        // Auditoría (tabla dedicada): registrar quién dio de baja y cuándo
         await client.query("SAVEPOINT baja_audit_insert");
         try {
           const gestionadoPorNombre =
@@ -13151,7 +13477,7 @@ export const handler = async (event) => {
         } catch (auditError) {
           await client.query("ROLLBACK TO SAVEPOINT baja_audit_insert");
           await client.query("RELEASE SAVEPOINT baja_audit_insert");
-          // No romper el flujo por falta de tabla/permisos en auditoria
+          // No romper el flujo por falta de tabla/permisos en auditoría
           console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
         }
 
@@ -14695,7 +15021,7 @@ export const handler = async (event) => {
 
       let tabWhere = "";
       if (tabNormalized === "nuevo") {
-        tabWhere = "AND COALESCE(lcs.estado_venta, 'nuevo') = 'nuevo' AND (lcs.intentos = 0 OR lcs.ultimo_intento_at IS NULL)";
+        tabWhere = "AND (lcs.intentos = 0 OR lcs.ultimo_intento_at IS NULL)";
       } else if (tabNormalized === "rellamar") {
         tabWhere = "AND lcs.estado_venta IN ('rellamar')";
       } else if (tabNormalized === "seguimiento") {
@@ -14709,7 +15035,7 @@ export const handler = async (event) => {
       } else if (tabNormalized === "recuperado") {
         tabWhere = "AND lcs.estado_venta IN ('venta')";
       } else {
-        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable', 'venta', 'venta_pendiente', 'rechazo', 'no_contesta', 'seguimiento', 'rellamar')";
+        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')";
       }
       const tabWhereCount = tabWhere.replace(/^AND\s+/, "");
       const countExtra =
@@ -15584,6 +15910,27 @@ export const handler = async (event) => {
           organizationId = await resolveOrganizationIdForRequest(dbUser, event);
         } catch {}
 
+        const evalRes = await evaluarEstadoLead(
+          client,
+          fields.telefono,
+          fields.celular,
+          fields.origenDato || null,
+          organizationId,
+          null,
+          {
+            fechaNacimiento: fields.fechaNacimiento,
+            direccion: fields.direccion,
+            email: fields.email,
+            localidad: fields.localidad,
+            departamento: fields.departamento
+          }
+        );
+        const evalEstado = evalRes.estado || "nuevo";
+        const evalMotivo = evalRes.motivoBloqueo || null;
+        const evalMotivoDetalle = evalRes.motivoBloqueoDetalle || null;
+        const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
+        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
+
         const resolveBatchId = async () => {
           if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
@@ -15634,38 +15981,6 @@ export const handler = async (event) => {
           await client.query("ROLLBACK");
           return json(409, { ok: false, message: "No hay lote activo para asignar" });
         }
-
-        const batchOrgRes = await client.query(
-          `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
-          [batchId]
-        );
-        organizationId = batchOrgRes.rows[0]?.organization_id || organizationId || null;
-        if (!organizationId) {
-          await client.query("ROLLBACK");
-          return json(400, { ok: false, message: "organization_id requerido en lote" });
-        }
-
-        const evalRes = await evaluarEstadoLead(
-          client,
-          fields.telefono,
-          fields.celular,
-          fields.origenDato || null,
-          organizationId,
-          null,
-          {
-            fechaNacimiento: fields.fechaNacimiento,
-            direccion: fields.direccion,
-            email: fields.email,
-            localidad: fields.localidad,
-            departamento: fields.departamento
-          }
-        );
-        const evalEstado = evalRes.estado || "nuevo";
-        const evalMotivo = evalRes.motivoBloqueo || null;
-        const evalMotivoDetalle = evalRes.motivoBloqueoDetalle || null;
-        const hasMotivoBloqueo = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo");
-        const hasMotivoBloqueoDetalle = await columnExists(client, "datos_para_trabajar", "motivo_bloqueo_detalle");
-        const hasLeadStatusOrganizationId = await columnExists(client, "lead_contact_status", "organization_id");
 
         const docValue = normalizeText(fields.documento || "") || null;
         const telValue = normalizePhoneDigits(fields.telefono || "");
@@ -15727,10 +16042,6 @@ export const handler = async (event) => {
           if (hasMotivoBloqueo) pushCol("motivo_bloqueo", evalMotivo);
           if (hasMotivoBloqueoDetalle) pushCol("motivo_bloqueo_detalle", evalMotivoDetalle);
           if (hasContactIdCol && validContactId) pushCol("contact_id", validContactId);
-          columns.push("organization_id");
-          values.push(organizationId ?? null);
-          params.push(`$${p}`);
-          p += 1;
 
           if (!columns.length) {
             await client.query("ROLLBACK");
@@ -15753,17 +16064,6 @@ export const handler = async (event) => {
           return json(500, { ok: false, message: "No se pudo crear lead" });
         }
 
-        await client.query(
-          `
-          UPDATE datos_para_trabajar
-          SET organization_id = $2,
-              updated_at = now()
-          WHERE ${leadIdColumn} = $1
-            AND organization_id IS NULL
-          `,
-          [leadId, organizationId]
-        );
-
         const statusRes = await client.query(
           `
           SELECT 1
@@ -15779,11 +16079,10 @@ export const handler = async (event) => {
               `
               UPDATE lead_contact_status
               SET estado_venta = 'bloqueado',
-                  ${hasLeadStatusOrganizationId ? "organization_id = $2," : ""}
                   updated_at = NOW()
               WHERE contact_id = $1
               `,
-              hasLeadStatusOrganizationId ? [leadId, organizationId] : [leadId]
+              [leadId]
             );
           } else {
             await client.query(
@@ -15792,15 +16091,12 @@ export const handler = async (event) => {
               SET estado_venta = 'nuevo',
                   intentos = COALESCE(intentos, 0),
                   assigned_to = $3,
-                  ${hasLeadStatusOrganizationId ? "organization_id = $4," : ""}
                   ola_actual = COALESCE(ola_actual, 1),
                   ultimo_intento_at = now(),
                   updated_at = now()
               WHERE contact_id = $1 AND batch_id = $2
               `,
-              hasLeadStatusOrganizationId
-                ? [leadId, batchId, dbUser?.id || null, organizationId]
-                : [leadId, batchId, dbUser?.id || null]
+              [leadId, batchId, dbUser?.id || null]
             );
           }
         } else {
@@ -15817,9 +16113,8 @@ export const handler = async (event) => {
                 assigned_to,
                 ola_actual,
                 ultimo_intento_at
-                ${hasLeadStatusOrganizationId ? ", organization_id" : ""}
               )
-              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now()${hasLeadStatusOrganizationId ? ", $4" : ""})
+              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
               ON CONFLICT (contact_id) DO UPDATE
               SET
                 estado_venta = 'nuevo',
@@ -15827,14 +16122,11 @@ export const handler = async (event) => {
                 proxima_accion = NULL,
                 batch_id = EXCLUDED.batch_id,
                 assigned_to = EXCLUDED.assigned_to,
-                ${hasLeadStatusOrganizationId ? "organization_id = EXCLUDED.organization_id," : ""}
                 ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
                 ultimo_intento_at = now(),
                 updated_at = now()
               `,
-              hasLeadStatusOrganizationId
-                ? [leadId, batchId, dbUser?.id || null, organizationId]
-                : [leadId, batchId, dbUser?.id || null]
+              [leadId, batchId, dbUser?.id || null]
             );
           }
         }
@@ -15925,12 +16217,7 @@ export const handler = async (event) => {
           LEFT JOIN lead_batches lb ON lb.id = lcs.batch_id
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE d.id = $1
-            AND (
-              $2::uuid IS NULL
-              OR d.organization_id = $2
-              OR lcs.organization_id = $2
-              OR lb.organization_id = $2
-            )
+            AND ($2::uuid IS NULL OR d.organization_id = $2)
           LIMIT 1
           `,
           [leadId, organizationId]
@@ -16006,65 +16293,6 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to load lead",
-        error: error.message
-      });
-    }
-  }
-
-  if (method === "PATCH" && path.match(/\/leads\/([^/]+)\/reset$/)) {
-    const match = path.match(/\/leads\/([^/]+)\/reset$/);
-    const leadId = match?.[1];
-    if (!leadId) {
-      return json(400, { ok: false, message: "Lead id requerido" });
-    }
-
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
-      if (roleError) return roleError;
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const result = await client.query(
-          `
-          UPDATE lead_contact_status
-          SET estado_venta = 'nuevo',
-              intentos = 0,
-              ultimo_intento_at = NULL,
-              updated_at = now()
-          WHERE contact_id = $1
-          RETURNING contact_id, batch_id, assigned_to, estado_venta, intentos
-          `,
-          [leadId]
-        );
-
-        if (!result.rows.length) {
-          return json(404, { ok: false, message: "Lead not found" });
-        }
-
-        return json(200, {
-          ok: true,
-          success: true,
-          data: result.rows[0]
-        });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to reset lead",
         error: error.message
       });
     }
@@ -16732,7 +16960,7 @@ export const handler = async (event) => {
 
         if (currentEstadoVenta) {
           // Venta y dato_erroneo son siempre finales
-          const estadosFinalesPermanentes = ["venta", "venta_pendiente", "dato_erroneo"];
+          const estadosFinalesPermanentes = ["venta", "dato_erroneo"];
           if (estadosFinalesPermanentes.includes(currentEstadoVenta)) {
             const latestGestion = await client.query(
               `
@@ -16808,7 +17036,6 @@ export const handler = async (event) => {
           nuevaOla = 2;
         }
 
-
         let batchOrganizationId = null;
         try {
           const orgRes = await client.query(
@@ -16848,7 +17075,7 @@ export const handler = async (event) => {
         const updateLeadStatus = await client.query(
           `
           UPDATE lead_contact_status
-          SET estado_venta = CASE WHEN $2 = 'venta' THEN 'venta_pendiente' ELSE $2 END,
+          SET estado_venta = $2,
               intentos = $3,
               proxima_accion = $4,
               assigned_to = $6,
@@ -16958,7 +17185,34 @@ export const handler = async (event) => {
           [leadId]
         );
 
+        let externalConnectionTarget = null;
+        const externalConnectionOrganizationId = batchOrganizationId || requestOrganizationId || null;
+        if (effectiveResultado === "venta" && externalConnectionOrganizationId) {
+          try {
+            externalConnectionTarget = await resolveExternalConnectionTargetForLead(
+              client,
+              leadId,
+              externalConnectionOrganizationId
+            );
+          } catch (error) {
+            console.warn("[external-connections] failed to resolve target", error?.message || error);
+          }
+        }
+
         await client.query("COMMIT");
+
+        if (
+          effectiveResultado === "venta" &&
+          externalConnectionOrganizationId &&
+          externalConnectionTarget?.contactId &&
+          externalConnectionTarget?.productId
+        ) {
+          await sendToExternalConnections(
+            externalConnectionTarget.contactId,
+            externalConnectionTarget.productId,
+            externalConnectionOrganizationId
+          );
+        }
 
         const summary = await getTeamSummary(client, formatDateYmd(new Date()), new Date());
         await emitRealtime("new_call", {
@@ -18973,10 +19227,24 @@ async function getNewContactsDistribution(client, batchId) {
       let roleError = requireRole(event, dbUser, ["supervisor", "superadministrador"]);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
-        return await handleLeadManualContact(client, batchId, dbUser, body);
+        return await handleLeadManualContact(client, batchId, dbUser, organizationId, body);
       } finally {
         await client.end();
       }
@@ -26683,51 +26951,3 @@ export {
   formatTimeHm,
   LOCAL_TZ
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
