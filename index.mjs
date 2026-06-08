@@ -15049,11 +15049,10 @@ export const handler = async (event) => {
           WHERE lcs.batch_id = $1
             AND lcs.assigned_to = $2
             AND lcs.estado_venta = ANY($3)
-            AND lcs.intentos < $4
             AND d.estado <> 'bloqueado'
             AND (
               lcs.ultimo_intento_at IS NULL
-              OR EXTRACT(EPOCH FROM (NOW() - lcs.ultimo_intento_at)) > $5
+              OR EXTRACT(EPOCH FROM (NOW() - lcs.ultimo_intento_at)) > $4
             )
           ORDER BY ${orderBy}
           LIMIT 1
@@ -15062,7 +15061,6 @@ export const handler = async (event) => {
             batch.batch_id,
             dbUser.id,
             estadosPrioridad,
-            batch.max_intentos,
             minimoEntreIntentos
           ]
         );
@@ -15075,9 +15073,8 @@ export const handler = async (event) => {
             WHERE batch_id = $1
               AND assigned_to = $2
               AND estado_venta = ANY($3)
-              AND intentos < $4
             `,
-            [batch.batch_id, dbUser.id, estadosPrioridad, batch.max_intentos]
+            [batch.batch_id, dbUser.id, estadosPrioridad]
           );
           const pendientes = pendingRes.rows[0]?.total || 0;
           if (pendientes > 0) {
@@ -16750,26 +16747,6 @@ export const handler = async (event) => {
           nuevaOla = 2;
         }
 
-        // Si acumula 5 gestiones "no_contesta" en el mismo lote -> incontactable
-        if (effectiveResultado === "no_contesta") {
-          const noContactaRes = await client.query(
-            `
-            SELECT COUNT(*)::int AS total
-            FROM lead_management_history
-            WHERE contact_id = $1
-              AND batch_id = $2
-              AND resultado = 'no_contesta'
-            `,
-            [leadId, batchId]
-          );
-          const noContactaCount = Number(noContactaRes.rows[0]?.total || 0);
-          if (noContactaCount >= 4) {
-            const incontactableCatalog = await getLeadStatusCatalogEntry(client, "incontactable");
-            if (incontactableCatalog) {
-              effectiveResultado = "incontactable";
-            }
-          }
-        }
 
         let batchOrganizationId = null;
         try {
