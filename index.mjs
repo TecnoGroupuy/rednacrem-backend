@@ -25766,11 +25766,29 @@ async function getNewContactsDistribution(client, batchId) {
       try {
         const organizationId = await resolveOrganizationId(client, dbUser, event);
         const cpCols = await getTableColumns(client, "contact_products");
-        const orgClause = cpCols.has("organization_id")
-          ? "AND cp.organization_id = $4"
-          : "AND c.organization_id = $4";
         const dateColumn = type === "bajas" ? "cp.fecha_baja" : "cp.fecha_alta";
         const bajaClause = type === "bajas" ? "AND cp.estado = 'baja'" : "";
+
+        // For type='bajas' with no month/year params, return ALL bajas.
+        // type='ventas' (or bajas with month/year supplied) keeps the month filter.
+        const monthYearProvided =
+          monthRaw !== null && monthRaw !== undefined &&
+          yearRaw !== null && yearRaw !== undefined;
+        const applyMonthFilter = type !== "bajas" || monthYearProvided;
+
+        const params = [sellerId];
+        let monthFilterClause = "";
+        if (applyMonthFilter) {
+          params.push(month + 1, year);
+          monthFilterClause = `
+            AND EXTRACT(MONTH FROM ${dateColumn}) = $${params.length - 1}
+            AND EXTRACT(YEAR FROM ${dateColumn}) = $${params.length}`;
+        }
+        const orgParamIndex = params.push(organizationId);
+        const orgClause = cpCols.has("organization_id")
+          ? `AND cp.organization_id = $${orgParamIndex}`
+          : `AND c.organization_id = $${orgParamIndex}`;
+
         const result = await client.query(
           `
           SELECT
@@ -25783,13 +25801,12 @@ async function getNewContactsDistribution(client, batchId) {
           JOIN contacts c ON c.id = cp.contact_id
           WHERE cp.seller_user_id = $1
             AND ${dateColumn} IS NOT NULL
-            AND EXTRACT(MONTH FROM ${dateColumn}) = $2
-            AND EXTRACT(YEAR FROM ${dateColumn}) = $3
+            ${monthFilterClause}
             ${bajaClause}
             ${orgClause}
           ORDER BY ${dateColumn} DESC
           `,
-          [sellerId, month + 1, year, organizationId]
+          params
         );
         return json(200, { ok: true, ventas: result.rows, type, month, year, seller_id: sellerId });
       } finally {
