@@ -17424,6 +17424,18 @@ export const handler = async (event) => {
           }
 
           if (leadData && ventaContactId) {
+            console.log("[venta-product] body keys:", Object.keys(body));
+            console.log("[venta-product] product data:", JSON.stringify({
+              producto: body.producto,
+              product: body.product,
+              productId: body.productId,
+              product_id: body.product_id,
+              nombreProducto: body.nombreProducto,
+              nombre_producto: body.nombre_producto,
+              precio: body.precio,
+              price: body.price,
+              mediopago: body.medio_pago || body.medioPago
+            }));
             const productPayload =
               (body?.producto && typeof body.producto === "object" ? body.producto : null) ||
               (body?.product && typeof body.product === "object" ? body.product : null) ||
