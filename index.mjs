@@ -17332,6 +17332,20 @@ export const handler = async (event) => {
 
         if (effectiveResultado === "venta") {
           console.log('[venta-product-debug] full body:', JSON.stringify(body, null, 2));
+          console.log('[venta-full-body]', JSON.stringify({
+            status: body.status,
+            resultado: body.resultado,
+            products: body.products,
+            product: body.product,
+            productData: body.productData,
+            contact: body.contact ? Object.keys(body.contact) : null,
+            familySales: body.familySales?.length,
+            payment_method_id: body.payment_method_id,
+            medio_pago: body.medio_pago,
+            cobranza_documento: body.cobranza_documento,
+            gestion_id: body.gestion_id,
+            allKeys: Object.keys(body)
+          }, null, 2));
           const leadColumns = await getTableColumns(client, "datos_para_trabajar");
           const selectLeadColumn = (columnName, alias = columnName) =>
             leadColumns.has(columnName) ? columnName : `NULL::text AS ${alias}`;
