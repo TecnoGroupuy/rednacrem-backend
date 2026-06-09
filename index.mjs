@@ -17346,6 +17346,20 @@ export const handler = async (event) => {
             gestion_id: body.gestion_id,
             allKeys: Object.keys(body)
           }, null, 2));
+
+          const documento = body.contact?.documento || body.cobranza_documento ||
+                            body.contacto?.documento || body.documento;
+
+          if (!documento || !String(documento).trim()) {
+            await client.query("ROLLBACK");
+            return json(400, {
+              ok: false,
+              message: 'El documento de identidad es obligatorio para registrar la venta.'
+            });
+          }
+
+          console.log('[venta-validacion] documento:', documento);
+
           const leadColumns = await getTableColumns(client, "datos_para_trabajar");
           const selectLeadColumn = (columnName, alias = columnName) =>
             leadColumns.has(columnName) ? columnName : `NULL::text AS ${alias}`;
