@@ -6208,6 +6208,7 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
     const contactProductId = productId;
     const contactProductsColumns = await getTableColumns(client, "contact_products");
     const hasContactProductProductId = contactProductsColumns.has("product_id");
+    const hasContactProductSaleId = contactProductsColumns.has("sale_id");
     const contactProductsOrgClause = contactProductsColumns.has("organization_id")
       ? "AND cp.organization_id = $3"
       : "";
@@ -6265,6 +6266,29 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
       `,
       [contactId, contactProductId, organizationId]
     );
+    const medioPagoResult = hasContactProductSaleId
+      ? await client.query(
+          `
+          SELECT s.medio_pago
+          FROM sales s
+          JOIN contact_products cp ON cp.sale_id = s.id
+          WHERE cp.contact_id = $1
+            AND cp.estado = 'alta'
+          ORDER BY cp.created_at DESC
+          LIMIT 1
+          `,
+          [contactId]
+        )
+      : await client.query(
+          `
+          SELECT s.medio_pago
+          FROM sales s
+          WHERE s.contact_id = $1
+          ORDER BY s.created_at DESC
+          LIMIT 1
+          `,
+          [contactId]
+        );
 
     for (const connection of result.rows) {
       const payload = {
@@ -6277,6 +6301,7 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
         birthDate: connection.fecha_nacimiento,
         address: connection.direccion,
         department: connection.departamento,
+        paymentMethod: medioPagoResult.rows[0]?.medio_pago || null,
         state: "Activo",
         situation: "Normal"
       };
