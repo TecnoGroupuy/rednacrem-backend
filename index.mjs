@@ -8960,11 +8960,18 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
       }
 
       const leadCols = await getTableColumns(client, "datos_para_trabajar");
+      await client.query(`
+        ALTER TABLE datos_para_trabajar
+        ADD COLUMN IF NOT EXISTS ingresado_por uuid REFERENCES users(id)
+      `);
+      tableColumnsCache.delete("datos_para_trabajar");
+      leadCols.add("ingresado_por");
       const searchByDocumento = Boolean(documento);
-      const lookupValues = searchByDocumento ? [organizationId, documento] : [organizationId, celular];
+      const lookupPhone = celular || telefono;
+      const lookupValues = searchByDocumento ? [organizationId, documento] : [organizationId, lookupPhone];
       const lookupSql = searchByDocumento
         ? "organization_id = $1 AND documento = $2"
-        : "organization_id = $1 AND celular = $2";
+        : "organization_id = $1 AND (celular = $2 OR telefono = $2)";
 
       const existingRes = await client.query(
         `
@@ -9034,6 +9041,7 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
         addCol("departamento", departamento);
         addCol("origen_dato", normalizarOrigenDato(origenDato || "manual"));
         addCol("organization_id", organizationId);
+        addCol("ingresado_por", userId);
 
         const insertRes = await client.query(
           `
