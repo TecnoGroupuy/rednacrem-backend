@@ -17421,6 +17421,7 @@ export const handler = async (event) => {
             ventaContactId = existingContactRes.rows[0]?.id || null;
           }
 
+          const ventaContactExisted = Boolean(ventaContactId);
           const contactData = body.contact || {};
           if (leadData && !ventaContactId) {
             const insertContactRes = await client.query(
@@ -17460,6 +17461,44 @@ export const handler = async (event) => {
               ]
             );
             ventaContactId = insertContactRes.rows[0]?.id || null;
+          }
+
+          // If the contact already existed, replace its data with what the
+          // seller filled in the venta modal. COALESCE keeps the existing
+          // value when a field was left empty, so nothing is wiped.
+          if (ventaContactId && ventaContactExisted && body.contact) {
+            const updateValues = [
+              ventaContactId,
+              normalizeText(contactData.nombre) || null,
+              normalizeText(contactData.apellido) || null,
+              normalizeText(contactData.documento) || null,
+              contactData.fecha_nacimiento || contactData.fechaNacimiento || null,
+              cleanPhone(contactData.telefono) || null,
+              cleanPhone(contactData.celular) || null,
+              normalizeEmail(contactData.email || contactData.correo_electronico) || null,
+              normalizeText(contactData.direccion) || null,
+              normalizeText(contactData.departamento) || null,
+              normalizeText(contactData.pais) || null
+            ];
+            console.log('[venta-contact-update] updating existing contact:', ventaContactId, JSON.stringify(updateValues.slice(1)));
+            await client.query(
+              `
+              UPDATE contacts SET
+                nombre = COALESCE($2, nombre),
+                apellido = COALESCE($3, apellido),
+                documento = COALESCE($4, documento),
+                fecha_nacimiento = COALESCE($5, fecha_nacimiento),
+                telefono = COALESCE($6, telefono),
+                celular = COALESCE($7, celular),
+                email = COALESCE($8, email),
+                direccion = COALESCE($9, direccion),
+                departamento = COALESCE($10, departamento),
+                pais = COALESCE($11, pais),
+                updated_at = now()
+              WHERE id = $1
+              `,
+              updateValues
+            );
           }
 
           // Product data mapping from the frontend venta payload.
