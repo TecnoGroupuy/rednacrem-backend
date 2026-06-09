@@ -8967,7 +8967,16 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
       tableColumnsCache.delete("datos_para_trabajar");
       leadCols.add("ingresado_por");
       const searchByDocumento = Boolean(documento);
-      const lookupPhone = celular || telefono;
+      const lookupPhone = (celular || telefono || '').trim();
+      console.log('[dedup] lookupPhone:', lookupPhone,
+        '| celular:', celular,
+        '| telefono:', telefono,
+        '| searchByDocumento:', searchByDocumento,
+        '| documento:', documento);
+      if (!lookupPhone && !searchByDocumento) {
+        await client.query("ROLLBACK");
+        return json(400, { ok: false, message: "Se requiere teléfono o documento para crear el contacto." });
+      }
       const lookupValues = searchByDocumento ? [organizationId, documento] : [organizationId, lookupPhone];
       const lookupSql = searchByDocumento
         ? "organization_id = $1 AND documento = $2"
