@@ -6177,7 +6177,8 @@ function normalizeProductIds(value) {
 }
 
 async function sendToExternalConnections(contactId, productId, organizationId) {
-  if (!isValidUuid(contactId) || !isValidUuid(productId) || !isValidUuid(organizationId)) return;
+  const logs = [];
+  if (!isValidUuid(contactId) || !isValidUuid(productId) || !isValidUuid(organizationId)) return logs;
 
   const client = createDbClient();
   try {
@@ -6254,7 +6255,7 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
       }
 
       try {
-        await client.query(
+        const logResult = await client.query(
           `
           INSERT INTO external_connection_logs (
             connection_id,
@@ -6265,6 +6266,7 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
             error
           )
           VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6)
+          RETURNING id, connection_id, contact_id, response_status, response_body, error, created_at
           `,
           [
             connection.id,
@@ -6275,12 +6277,22 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
             errorText
           ]
         );
+        logs.push(logResult.rows[0]);
       } catch (logError) {
         console.warn("[external-connections] failed to write log", logError?.message || logError);
+        logs.push({
+          connection_id: connection.id,
+          contact_id: contactId,
+          response_status: responseStatus,
+          response_body: responseBody,
+          error: logError?.message || String(logError)
+        });
       }
     }
+    return logs;
   } catch (error) {
     console.warn("[external-connections] failed", error?.message || error);
+    return logs;
   } finally {
     await client.end().catch(() => {});
   }
@@ -9274,6 +9286,34 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to load connections", error: error.message });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/connections/test-send")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const contactId = String(body?.contact_id || "").trim();
+      const productId = String(body?.product_id || "").trim();
+      const organizationId = String(body?.organization_id || "").trim();
+      if (!isValidUuid(contactId) || !isValidUuid(productId) || !isValidUuid(organizationId)) {
+        return json(400, { ok: false, message: "contact_id, product_id y organization_id válidos son requeridos" });
+      }
+
+      const logs = await sendToExternalConnections(contactId, productId, organizationId);
+      return json(200, { ok: true, logs });
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to test external connections", error: error.message });
     }
   }
 
