@@ -17073,6 +17073,11 @@ export const handler = async (event) => {
 
         // Validaciones extra para venta: evitar duplicar ventas / clientes ya activos
         if (resultadoInput === "venta") {
+          const contactResponse = null;
+          console.log("[venta-contact] contactId from body:", body.contactId || body.contact_id);
+          console.log("[venta-contact] contact payload:", JSON.stringify(body.contact || body.contactData || null));
+          console.log("[venta-contact] contacts response:", JSON.stringify(contactResponse || null));
+
           const leadRes = await client.query(
             `
             SELECT id, organization_id, nombre, telefono, celular, documento
