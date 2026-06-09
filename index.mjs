@@ -25284,6 +25284,168 @@ async function getNewContactsDistribution(client, batchId) {
     }
   }
 
+  if (method === "GET" && path.endsWith("/api/seller/ventas-historicas")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["vendedor", "supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const now = new Date();
+      const monthRaw = getQueryParam(event, "month");
+      const yearRaw = getQueryParam(event, "year");
+      const month = monthRaw !== null && monthRaw !== undefined
+        ? Number.parseInt(String(monthRaw), 10)
+        : now.getMonth();
+      const year = yearRaw !== null && yearRaw !== undefined
+        ? Number.parseInt(String(yearRaw), 10)
+        : now.getFullYear();
+      const type = normalizeText(getQueryParam(event, "type") || "ventas") || "ventas";
+      if (!Number.isInteger(month) || month < 0 || month > 11) {
+        return json(400, { ok: false, message: "month inválido" });
+      }
+      if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+        return json(400, { ok: false, message: "year inválido" });
+      }
+      if (!["ventas", "bajas"].includes(type)) {
+        return json(400, { ok: false, message: "type inválido" });
+      }
+
+      const sellerParam = getQueryParam(event, "seller_id");
+      if (sellerParam && !isValidUuid(sellerParam)) {
+        return json(400, { ok: false, message: "seller_id inválido" });
+      }
+      const sellerId = dbUser?.role_key === "vendedor"
+        ? dbUser.id
+        : (sellerParam || dbUser.id);
+      if (!sellerId || !isValidUuid(sellerId)) {
+        return json(400, { ok: false, message: "seller_id inválido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const cpCols = await getTableColumns(client, "contact_products");
+        const orgClause = cpCols.has("organization_id")
+          ? "AND cp.organization_id = $4"
+          : "AND c.organization_id = $4";
+        const dateColumn = type === "bajas" ? "cp.fecha_baja" : "cp.fecha_alta";
+        const bajaClause = type === "bajas" ? "AND cp.estado = 'baja'" : "";
+        const result = await client.query(
+          `
+          SELECT
+            ${dateColumn} AS fecha,
+            TRIM(CONCAT(c.nombre, ' ', c.apellido)) AS cliente,
+            cp.nombre_producto AS producto,
+            cp.precio,
+            cp.estado
+          FROM contact_products cp
+          JOIN contacts c ON c.id = cp.contact_id
+          WHERE cp.seller_user_id = $1
+            AND ${dateColumn} IS NOT NULL
+            AND EXTRACT(MONTH FROM ${dateColumn}) = $2
+            AND EXTRACT(YEAR FROM ${dateColumn}) = $3
+            ${bajaClause}
+            ${orgClause}
+          ORDER BY ${dateColumn} DESC
+          `,
+          [sellerId, month + 1, year, organizationId]
+        );
+        return json(200, { ok: true, ventas: result.rows, type, month, year, seller_id: sellerId });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load historical seller sales", error: error.message });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/api/seller/ventas-meses")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["vendedor", "supervisor", "superadministrador"]);
+      if (roleError) return roleError;
+
+      const sellerParam = getQueryParam(event, "seller_id");
+      if (sellerParam && !isValidUuid(sellerParam)) {
+        return json(400, { ok: false, message: "seller_id inválido" });
+      }
+      const sellerId = dbUser?.role_key === "vendedor"
+        ? dbUser.id
+        : (sellerParam || dbUser.id);
+      if (!sellerId || !isValidUuid(sellerId)) {
+        return json(400, { ok: false, message: "seller_id inválido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const cpCols = await getTableColumns(client, "contact_products");
+        const orgClause = cpCols.has("organization_id")
+          ? "AND cp.organization_id = $2"
+          : "AND c.organization_id = $2";
+        const result = await client.query(
+          `
+          WITH eventos AS (
+            SELECT cp.fecha_alta AS fecha, 1 AS venta, 0 AS baja
+            FROM contact_products cp
+            JOIN contacts c ON c.id = cp.contact_id
+            WHERE cp.seller_user_id = $1
+              AND cp.fecha_alta IS NOT NULL
+              ${orgClause}
+            UNION ALL
+            SELECT cp.fecha_baja AS fecha, 0 AS venta, 1 AS baja
+            FROM contact_products cp
+            JOIN contacts c ON c.id = cp.contact_id
+            WHERE cp.seller_user_id = $1
+              AND cp.estado = 'baja'
+              AND cp.fecha_baja IS NOT NULL
+              ${orgClause}
+          )
+          SELECT
+            (EXTRACT(MONTH FROM fecha)::int - 1) AS month,
+            EXTRACT(YEAR FROM fecha)::int AS year,
+            SUM(venta)::int AS total_ventas,
+            SUM(baja)::int AS total_bajas
+          FROM eventos
+          GROUP BY year, month
+          ORDER BY year DESC, month DESC
+          `,
+          [sellerId, organizationId]
+        );
+        const monthNames = [
+          "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+          "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+        ];
+        const months = result.rows.map((row) => ({
+          month: row.month,
+          year: row.year,
+          label: `${monthNames[row.month]} ${row.year}`,
+          total_ventas: row.total_ventas,
+          total_bajas: row.total_bajas
+        }));
+        return json(200, { ok: true, months, seller_id: sellerId });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load seller sales months", error: error.message });
+    }
+  }
+
   // GET /api/supervisor/seller-detail?seller_id=xxx&fecha_desde=yyyy-mm-dd&fecha_hasta=yyyy-mm-dd
   // Detalle global del vendedor: último resultado por contacto en el rango.
   if (method === "GET" && path.endsWith("/api/supervisor/seller-detail")) {
