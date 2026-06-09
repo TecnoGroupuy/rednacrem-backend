@@ -6184,9 +6184,33 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
   try {
     await client.connect();
     await ensureExternalConnectionsTables(client);
+    const contactProductId = productId;
+    const contactProductsColumns = await getTableColumns(client, "contact_products");
+    const hasContactProductProductId = contactProductsColumns.has("product_id");
+    const contactProductsOrgClause = contactProductsColumns.has("organization_id")
+      ? "AND cp.organization_id = $3"
+      : "";
+    const contactProductProductIdSelect = hasContactProductProductId
+      ? "cp.product_id"
+      : "NULL::uuid";
+    const catalogProductMatch = hasContactProductProductId
+      ? "p.id = cp.product_id"
+      : "TRIM(LOWER(p.nombre)) = TRIM(LOWER(cp.nombre_producto))";
 
     const result = await client.query(
       `
+      WITH contact_product AS (
+        SELECT
+          cp.id,
+          cp.contact_id,
+          cp.nombre_producto,
+          ${contactProductProductIdSelect} AS product_id
+        FROM contact_products cp
+        WHERE cp.id = $2
+          AND cp.contact_id = $1
+          ${contactProductsOrgClause}
+        LIMIT 1
+      )
       SELECT
         ec.id,
         ec.url,
@@ -6200,15 +6224,25 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
         c.fecha_nacimiento,
         c.direccion,
         c.departamento,
-        o.nombre AS organization_nombre
+        o.nombre AS organization_nombre,
+        cp.id AS contact_product_id,
+        p.id AS catalog_product_id
       FROM external_connections ec
-      JOIN contacts c ON c.id = $1
+      JOIN contact_product cp ON cp.contact_id = $1
+      JOIN contacts c ON c.id = cp.contact_id
       JOIN organizations o ON o.id = $3
+      LEFT JOIN LATERAL (
+        SELECT p.id
+        FROM products p
+        WHERE ${catalogProductMatch}
+        ORDER BY p.activo DESC NULLS LAST, p.updated_at DESC NULLS LAST
+        LIMIT 1
+      ) p ON true
       WHERE ec.organization_id = $3
         AND ec.activa = true
-        AND (COALESCE(cardinality(ec.product_ids), 0) = 0 OR $2::uuid = ANY(ec.product_ids))
+        AND (COALESCE(cardinality(ec.product_ids), 0) = 0 OR p.id = ANY(ec.product_ids))
       `,
-      [contactId, productId, organizationId]
+      [contactId, contactProductId, organizationId]
     );
 
     for (const connection of result.rows) {
@@ -6344,10 +6378,9 @@ async function resolveExternalConnectionTargetForLead(client, leadId, organizati
   const contactProductsValues = contactProductsColumns.has("organization_id")
     ? [contactId, organizationId]
     : [contactId];
-  const productIdColumn = contactProductsColumns.has("product_id") ? "product_id" : "id";
   const productRes = await client.query(
     `
-    SELECT ${productIdColumn} AS product_id
+    SELECT id AS product_id
     FROM contact_products
     WHERE contact_id = $1
       ${contactProductsOrgClause}
