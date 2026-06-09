@@ -17421,6 +17421,7 @@ export const handler = async (event) => {
             ventaContactId = existingContactRes.rows[0]?.id || null;
           }
 
+          const contactData = body.contact || {};
           if (leadData && !ventaContactId) {
             const insertContactRes = await client.query(
               `
@@ -17444,16 +17445,16 @@ export const handler = async (event) => {
               RETURNING id
               `,
               [
-                normalizeText(leadData.nombre) || "Sin nombre",
-                normalizeText(leadData.apellido) || "",
-                normalizeText(leadData.documento) || null,
-                leadData.fecha_nacimiento || null,
-                cleanPhone(leadData.telefono) || null,
-                cleanPhone(leadData.celular) || null,
-                normalizeEmail(leadData.correo_electronico) || null,
-                normalizeText(leadData.direccion) || null,
-                normalizeText(leadData.departamento) || null,
-                "Uruguay",
+                normalizeText(contactData.nombre || leadData.nombre) || "Sin nombre",
+                normalizeText(contactData.apellido || leadData.apellido) || "",
+                normalizeText(contactData.documento || leadData.documento) || null,
+                contactData.fecha_nacimiento || contactData.fechaNacimiento || leadData.fecha_nacimiento || null,
+                cleanPhone(contactData.telefono || leadData.telefono) || null,
+                cleanPhone(contactData.celular || leadData.celular) || null,
+                normalizeEmail(contactData.email || contactData.correo_electronico || leadData.correo_electronico) || null,
+                normalizeText(contactData.direccion || leadData.direccion) || null,
+                normalizeText(contactData.departamento || leadData.departamento) || null,
+                normalizeText(contactData.pais) || "Uruguay",
                 "activo",
                 ventaOrganizationId
               ]
