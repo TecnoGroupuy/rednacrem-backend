@@ -9220,6 +9220,9 @@ export const handler = async (event) => {
   const connectionMatch =
     path.match(/\/api\/connections\/([^/]+)$/) ||
     path.match(/\/connections\/([^/]+)$/);
+  const connectionLogsMatch =
+    path.match(/\/api\/connections\/([^/]+)\/logs$/) ||
+    path.match(/\/connections\/([^/]+)\/logs$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
@@ -9323,6 +9326,87 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to create connection", error: error.message });
+    }
+  }
+
+  if (method === "GET" && connectionLogsMatch) {
+    const connectionId = connectionLogsMatch[1];
+    if (!isValidUuid(connectionId)) return json(400, { ok: false, message: "connection id inválido" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const pageParam = Number.parseInt(String(getQueryParam(event, "page") || "1"), 10);
+      const limitParam = Number.parseInt(String(getQueryParam(event, "limit") || "20"), 10);
+      const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 20;
+      const offset = (page - 1) * limit;
+      const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await ensureExternalConnectionsTables(client);
+        const countResult = await client.query(
+          `
+          SELECT COUNT(*)::int AS total
+          FROM external_connection_logs ecl
+          JOIN external_connections ec ON ec.id = ecl.connection_id
+          WHERE ecl.connection_id = $1
+            AND ec.organization_id = $2
+          `,
+          [connectionId, organizationId]
+        );
+        const total = countResult.rows[0]?.total || 0;
+        const logsResult = await client.query(
+          `
+          SELECT
+            ecl.id,
+            ecl.created_at,
+            ecl.response_status,
+            ecl.response_body,
+            ecl.error,
+            COALESCE(
+              NULLIF(TRIM(CONCAT(c.nombre, ' ', c.apellido)), ''),
+              c.nombre,
+              c.apellido,
+              c.documento,
+              'Sin cliente'
+            ) AS cliente
+          FROM external_connection_logs ecl
+          JOIN external_connections ec ON ec.id = ecl.connection_id
+          LEFT JOIN contacts c ON c.id = ecl.contact_id
+          WHERE ecl.connection_id = $1
+            AND ec.organization_id = $2
+          ORDER BY ecl.created_at DESC
+          LIMIT $3 OFFSET $4
+          `,
+          [connectionId, organizationId, limit, offset]
+        );
+
+        return json(200, {
+          ok: true,
+          logs: logsResult.rows.map((row) => ({
+            id: row.id,
+            fecha: row.created_at,
+            cliente: row.cliente,
+            estado: row.response_status,
+            respuesta: row.response_body ?? row.error
+          })),
+          totalPages: Math.ceil(total / limit),
+          page
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load connection logs", error: error.message });
     }
   }
 
