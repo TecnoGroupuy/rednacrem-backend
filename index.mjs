@@ -9350,8 +9350,13 @@ export const handler = async (event) => {
         const hasTodosProductos = Object.prototype.hasOwnProperty.call(body, "todos_productos");
         const todosProductos = hasTodosProductos ? body.todos_productos === true : null;
         const productIds = hasTodosProductos
-          ? (todosProductos ? [] : normalizeProductIds(body?.product_ids))
-          : (Object.prototype.hasOwnProperty.call(body, "product_ids") ? normalizeProductIds(body.product_ids) : null);
+          ? normalizeProductIds(todosProductos ? [] : (body.productos || body.product_ids || []))
+          : (
+            Object.prototype.hasOwnProperty.call(body, "productos") ||
+            Object.prototype.hasOwnProperty.call(body, "product_ids")
+              ? normalizeProductIds(body.productos || body.product_ids || [])
+              : null
+          );
         const apiKey = normalizeText(body?.api_key);
         const result = await client.query(
           `
