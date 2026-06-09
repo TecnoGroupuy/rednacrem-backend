@@ -17500,6 +17500,14 @@ export const handler = async (event) => {
           // Insert a contact_products row for a contact from a product spec.
           const insertContactProduct = async (contactId, orgId, prod, medioPagoVal) => {
             if (!contactId) return;
+            console.log('[venta-product] prod data:', JSON.stringify(prod));
+            // Only insert if we have real product data — avoids creating
+            // "Sin producto" / precio=0 rows on the first management POST
+            // (before the product modal has sent anything).
+            if (!prod || (!prod.nombre_producto && !prod.nombre && !prod.name && !prod.product_id && !prod.id)) {
+              console.log('[venta-product] skipping contact_products insert — no product data in body');
+              return;
+            }
             const productName = normalizeText(
               prod?.nombre_producto || prod?.nombre || prod?.name
             ) || "Sin producto";
