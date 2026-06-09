@@ -6150,10 +6150,12 @@ async function ensureExternalConnectionsTables(client) {
       api_key text NOT NULL,
       activa boolean DEFAULT true,
       product_ids uuid[] DEFAULT '{}',
+      todos_productos boolean DEFAULT true,
       created_at timestamptz DEFAULT now(),
       updated_at timestamptz DEFAULT now()
     )
   `);
+  await client.query("ALTER TABLE external_connections ADD COLUMN IF NOT EXISTS todos_productos boolean DEFAULT true");
   await client.query(`
     CREATE TABLE IF NOT EXISTS external_connection_logs (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -9256,7 +9258,7 @@ export const handler = async (event) => {
         await ensureExternalConnectionsTables(client);
         const result = await client.query(
           `
-          SELECT id, nombre, url, api_key, activa, product_ids, created_at, updated_at
+          SELECT id, nombre, url, api_key, activa, product_ids, todos_productos, created_at, updated_at
           FROM external_connections
           WHERE organization_id = $1
           ORDER BY created_at DESC
@@ -9345,28 +9347,36 @@ export const handler = async (event) => {
       await client.connect();
       try {
         await ensureExternalConnectionsTables(client);
+        const hasTodosProductos = Object.prototype.hasOwnProperty.call(body, "todos_productos");
+        const todosProductos = hasTodosProductos ? body.todos_productos === true : null;
+        const productIds = hasTodosProductos
+          ? (todosProductos ? [] : normalizeProductIds(body?.product_ids))
+          : (Object.prototype.hasOwnProperty.call(body, "product_ids") ? normalizeProductIds(body.product_ids) : null);
+        const apiKey = normalizeText(body?.api_key);
         const result = await client.query(
           `
           UPDATE external_connections
           SET
             nombre = COALESCE($3, nombre),
             url = COALESCE($4, url),
-            api_key = COALESCE($5, api_key),
+            api_key = COALESCE(NULLIF($5, ''), api_key),
             activa = COALESCE($6, activa),
             product_ids = COALESCE($7::uuid[], product_ids),
+            todos_productos = COALESCE($8, todos_productos),
             updated_at = now()
           WHERE id = $1
             AND organization_id = $2
-          RETURNING id, nombre, url, api_key, activa, product_ids, created_at, updated_at
+          RETURNING id, nombre, url, api_key, activa, product_ids, todos_productos, created_at, updated_at
           `,
           [
             connectionId,
             organizationId,
             Object.prototype.hasOwnProperty.call(body, "nombre") ? normalizeText(body.nombre) : null,
             Object.prototype.hasOwnProperty.call(body, "url") ? normalizeText(body.url) : null,
-            Object.prototype.hasOwnProperty.call(body, "api_key") ? normalizeText(body.api_key) : null,
+            apiKey || null,
             typeof body?.activa === "boolean" ? body.activa : null,
-            Object.prototype.hasOwnProperty.call(body, "product_ids") ? normalizeProductIds(body.product_ids) : null
+            productIds,
+            todosProductos
           ]
         );
         if (!result.rows.length) return json(404, { ok: false, message: "Connection not found" });
