@@ -8973,6 +8973,13 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
         ? "organization_id = $1 AND documento = $2"
         : "organization_id = $1 AND (celular = $2 OR telefono = $2)";
 
+      console.log("[dedup] searching by:", searchByDocumento ? "documento" : "phone", {
+        documento,
+        celular,
+        telefono,
+        organizationId
+      });
+
       const existingRes = await client.query(
         `
         SELECT *
@@ -8983,6 +8990,15 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
         `,
         lookupValues
       );
+
+      console.log(
+        "[dedup] existingRes rows:",
+        existingRes.rows.length,
+        existingRes.rows[0] ? { id: existingRes.rows[0].id, nombre: existingRes.rows[0].nombre } : null
+      );
+      console.log("[dedup] action:", existingRes.rows[0] ? "REUSE existing" : "CREATE new", {
+        contactId: existingRes.rows[0]?.id
+      });
 
       let leadId = null;
       let wasCreated = false;
