@@ -17321,6 +17321,256 @@ export const handler = async (event) => {
           }
         }
 
+        if (effectiveResultado === "venta") {
+          const leadColumns = await getTableColumns(client, "datos_para_trabajar");
+          const selectLeadColumn = (columnName, alias = columnName) =>
+            leadColumns.has(columnName) ? columnName : `NULL::text AS ${alias}`;
+          const leadDataRes = await client.query(
+            `
+            SELECT
+              id,
+              organization_id,
+              ${selectLeadColumn("nombre")},
+              ${selectLeadColumn("apellido")},
+              ${selectLeadColumn("telefono")},
+              ${selectLeadColumn("celular")},
+              ${selectLeadColumn("documento")},
+              ${
+                leadColumns.has("correo_electronico")
+                  ? "correo_electronico"
+                  : (leadColumns.has("email") ? "email AS correo_electronico" : "NULL::text AS correo_electronico")
+              },
+              ${selectLeadColumn("departamento")},
+              ${selectLeadColumn("direccion")},
+              ${
+                leadColumns.has("fecha_nacimiento")
+                  ? "fecha_nacimiento"
+                  : "NULL::date AS fecha_nacimiento"
+              }
+            FROM datos_para_trabajar
+            WHERE id = $1
+            LIMIT 1
+            `,
+            [leadId]
+          );
+          const leadData = leadDataRes.rows[0] || null;
+          const ventaOrganizationId = leadData?.organization_id || batchOrganizationId || requestOrganizationId || null;
+          const leadTelefonoDigits = normalizePhoneDigits(leadData?.telefono || "");
+          const leadCelularDigits = normalizePhoneDigits(leadData?.celular || "");
+          let ventaContactId = null;
+
+          if (leadData && (leadTelefonoDigits || leadCelularDigits)) {
+            const existingContactRes = await client.query(
+              `
+              SELECT id
+              FROM contacts
+              WHERE ($1::uuid IS NULL OR organization_id = $1)
+                AND (
+                  ($2::text <> '' AND (
+                    regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
+                    OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $2
+                  ))
+                  OR ($3::text <> '' AND (
+                    regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $3
+                    OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3
+                  ))
+                )
+              ORDER BY updated_at DESC NULLS LAST, created_at DESC
+              LIMIT 1
+              `,
+              [ventaOrganizationId, leadTelefonoDigits || "", leadCelularDigits || ""]
+            );
+            ventaContactId = existingContactRes.rows[0]?.id || null;
+          }
+
+          if (leadData && !ventaContactId) {
+            const insertContactRes = await client.query(
+              `
+              INSERT INTO contacts (
+                nombre,
+                apellido,
+                documento,
+                fecha_nacimiento,
+                telefono,
+                celular,
+                email,
+                direccion,
+                departamento,
+                pais,
+                status,
+                organization_id,
+                created_at,
+                updated_at
+              )
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
+              RETURNING id
+              `,
+              [
+                normalizeText(leadData.nombre) || "Sin nombre",
+                normalizeText(leadData.apellido) || "",
+                normalizeText(leadData.documento) || null,
+                leadData.fecha_nacimiento || null,
+                cleanPhone(leadData.telefono) || null,
+                cleanPhone(leadData.celular) || null,
+                normalizeEmail(leadData.correo_electronico) || null,
+                normalizeText(leadData.direccion) || null,
+                normalizeText(leadData.departamento) || null,
+                "Uruguay",
+                "activo",
+                ventaOrganizationId
+              ]
+            );
+            ventaContactId = insertContactRes.rows[0]?.id || null;
+          }
+
+          if (leadData && ventaContactId) {
+            const productPayload =
+              (body?.producto && typeof body.producto === "object" ? body.producto : null) ||
+              (body?.product && typeof body.product === "object" ? body.product : null) ||
+              (body?.productData && typeof body.productData === "object" ? body.productData : null) ||
+              body;
+            const productName = normalizeText(
+              productPayload?.nombre_producto ||
+              productPayload?.nombreProducto ||
+              productPayload?.producto_nombre ||
+              productPayload?.product_name ||
+              productPayload?.nombre ||
+              productPayload?.producto
+            ) || "Producto";
+            const precio = parseNumber(productPayload?.precio ?? productPayload?.price) ?? 0;
+            const medioPago = normalizeText(
+              productPayload?.medio_pago ||
+              productPayload?.medioPago ||
+              productPayload?.payment_method ||
+              productPayload?.paymentMethod
+            ) || null;
+            const fechaAltaRaw = normalizeText(
+              productPayload?.fecha_alta ||
+              productPayload?.fechaAlta ||
+              productPayload?.fecha_venta ||
+              productPayload?.fechaVenta
+            );
+            const fechaAlta = (/^\d{4}-\d{2}-\d{2}$/.test(fechaAltaRaw) ? fechaAltaRaw : parseDate(fechaAltaRaw)) ||
+              formatDateYmd(new Date());
+            const cpCols = await getTableColumns(client, "contact_products");
+            const existingProductValues = [ventaContactId];
+            const existingProductOrgClause = cpCols.has("organization_id") && ventaOrganizationId
+              ? "AND organization_id = $2"
+              : "";
+            if (existingProductOrgClause) existingProductValues.push(ventaOrganizationId);
+            const existingProductRes = await client.query(
+              `
+              SELECT id
+              FROM contact_products
+              WHERE contact_id = $1
+                AND estado = 'alta'
+                ${existingProductOrgClause}
+              LIMIT 1
+              `,
+              existingProductValues
+            );
+
+            if (!existingProductRes.rows.length) {
+              let resolvedProductId = null;
+              if (cpCols.has("product_id")) {
+                const productCols = await getTableColumns(client, "products");
+                const productOrgClause = productCols.has("organization_id") && ventaOrganizationId
+                  ? "AND organization_id = $2"
+                  : "";
+                const productValues = productOrgClause ? [productName, ventaOrganizationId] : [productName];
+                const productRes = await client.query(
+                  `
+                  SELECT id
+                  FROM products
+                  WHERE TRIM(LOWER(nombre)) = TRIM(LOWER($1))
+                    ${productOrgClause}
+                  LIMIT 1
+                  `,
+                  productValues
+                );
+                resolvedProductId = productRes.rows[0]?.id || null;
+                if (!resolvedProductId) {
+                  const insertProductCols = ["nombre", "categoria", "precio", "activo"];
+                  const insertProductVals = [productName, "General", precio || 0, true];
+                  if (productCols.has("organization_id")) {
+                    insertProductCols.push("organization_id");
+                    insertProductVals.push(ventaOrganizationId);
+                  }
+                  const insertProductPlaceholders = insertProductVals.map((_, idx) => `$${idx + 1}`);
+                  const insertProductRes = await client.query(
+                    `
+                    INSERT INTO products (${insertProductCols.join(", ")})
+                    VALUES (${insertProductPlaceholders.join(", ")})
+                    RETURNING id
+                    `,
+                    insertProductVals
+                  );
+                  resolvedProductId = insertProductRes.rows[0]?.id || null;
+                }
+              }
+
+              const contactProductCols = [
+                "contact_id",
+                "nombre_producto",
+                "plan",
+                "precio",
+                "fecha_alta",
+                "cuotas_pagas",
+                "carencia_cuotas",
+                "estado",
+                "motivo_baja",
+                "motivo_baja_detalle",
+                "fecha_baja"
+              ];
+              const contactProductVals = [
+                ventaContactId,
+                productName,
+                normalizeText(productPayload?.plan) || null,
+                precio || 0,
+                fechaAlta,
+                0,
+                0,
+                "alta",
+                null,
+                null,
+                null
+              ];
+              if (cpCols.has("medio_pago")) {
+                contactProductCols.push("medio_pago");
+                contactProductVals.push(medioPago);
+              }
+              if (cpCols.has("seller_user_id")) {
+                contactProductCols.push("seller_user_id");
+                contactProductVals.push(assignedTo || dbUser?.id || null);
+              }
+              if (cpCols.has("seller_name_snapshot")) {
+                contactProductCols.push("seller_name_snapshot");
+                contactProductVals.push([dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || null);
+              }
+              if (cpCols.has("seller_origin")) {
+                contactProductCols.push("seller_origin");
+                contactProductVals.push("interno");
+              }
+              if (cpCols.has("organization_id")) {
+                contactProductCols.push("organization_id");
+                contactProductVals.push(ventaOrganizationId);
+              }
+              if (cpCols.has("product_id")) {
+                contactProductCols.push("product_id");
+                contactProductVals.push(resolvedProductId);
+              }
+              const contactProductPlaceholders = contactProductVals.map((_, idx) => `$${idx + 1}`);
+              await client.query(
+                `
+                INSERT INTO contact_products (${contactProductCols.join(", ")})
+                VALUES (${contactProductPlaceholders.join(", ")})
+                `,
+                contactProductVals
+              );
+            }
+          }
+        }
+
         if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
           await client.query(
             `
