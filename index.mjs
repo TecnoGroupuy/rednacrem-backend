@@ -433,6 +433,7 @@ function createDbClient() {
     user: process.env.PGUSER || process.env.DATABASE_USER,
     password: process.env.PGPASSWORD || process.env.DATABASE_PASSWORD,
     database: process.env.PGDATABASE || process.env.DATABASE_NAME,
+    client_encoding: "UTF8",
     ssl: useSsl ? { rejectUnauthorized: false } : undefined
   });
 }
@@ -463,6 +464,11 @@ function normalizeEmail(email) {
 function normalizeText(value) {
   return String(value || "").trim();
 }
+
+const MESES = [
+  "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+  "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"
+];
 
 function isValidUuid(value) {
   const v = String(value || "").trim();
@@ -3617,6 +3623,13 @@ function normalizeCsvValue(value) {
   return text === "" ? null : text;
 }
 
+const normalizeEncoding = (str) => {
+  if (!str || typeof str !== "string") return str;
+  return str
+    .replace(/\uFFFD/g, "")
+    .normalize("NFC");
+};
+
 function detectCsvSeparator(headerLine) {
   const firstLine = String(headerLine || "").split("\n")[0];
   const semicolons = (firstLine.match(/;/g) || []).length;
@@ -3764,6 +3777,14 @@ function mapDatosParaTrabajarCsv(csvText) {
       const rawValue = normalizeCsvValue(row[i]);
       if (key === "fecha_nacimiento") {
         item[key] = rawValue ? parseDate(rawValue) : null;
+      } else if (
+        key === "nombre" ||
+        key === "apellido" ||
+        key === "direccion" ||
+        key === "departamento" ||
+        key === "correo_electronico"
+      ) {
+        item[key] = normalizeEncoding(rawValue);
       } else {
         item[key] = rawValue;
       }
@@ -25735,12 +25756,12 @@ async function getNewContactsDistribution(client, batchId) {
       const yearRaw = getQueryParam(event, "year");
       const month = monthRaw !== null && monthRaw !== undefined
         ? Number.parseInt(String(monthRaw), 10)
-        : now.getMonth();
+        : now.getMonth() + 1;
       const year = yearRaw !== null && yearRaw !== undefined
         ? Number.parseInt(String(yearRaw), 10)
         : now.getFullYear();
       const type = normalizeText(getQueryParam(event, "type") || "ventas") || "ventas";
-      if (!Number.isInteger(month) || month < 0 || month > 11) {
+      if (!Number.isInteger(month) || month < 1 || month > 12) {
         return json(400, { ok: false, message: "month inválido" });
       }
       if (!Number.isInteger(year) || year < 2000 || year > 2100) {
@@ -25779,7 +25800,7 @@ async function getNewContactsDistribution(client, batchId) {
         const params = [sellerId];
         let monthFilterClause = "";
         if (applyMonthFilter) {
-          params.push(month + 1, year);
+          params.push(month, year);
           monthFilterClause = `
             AND EXTRACT(MONTH FROM ${dateColumn}) = $${params.length - 1}
             AND EXTRACT(YEAR FROM ${dateColumn}) = $${params.length}`;
@@ -25870,7 +25891,7 @@ async function getNewContactsDistribution(client, batchId) {
               ${orgClause}
           )
           SELECT
-            (EXTRACT(MONTH FROM fecha)::int - 1) AS month,
+            EXTRACT(MONTH FROM fecha)::int AS month,
             EXTRACT(YEAR FROM fecha)::int AS year,
             SUM(venta)::int AS total_ventas,
             SUM(baja)::int AS total_bajas
@@ -25880,14 +25901,10 @@ async function getNewContactsDistribution(client, batchId) {
           `,
           [sellerId, organizationId]
         );
-        const monthNames = [
-          "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-          "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-        ];
         const months = result.rows.map((row) => ({
           month: row.month,
           year: row.year,
-          label: `${monthNames[row.month]} ${row.year}`,
+          label: `${MESES[row.month - 1]}. ${row.year}`,
           total_ventas: row.total_ventas,
           total_bajas: row.total_bajas
         }));
