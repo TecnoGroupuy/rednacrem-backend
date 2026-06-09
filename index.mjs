@@ -17433,56 +17433,76 @@ export const handler = async (event) => {
             ventaContactId = insertContactRes.rows[0]?.id || null;
           }
 
-          // TODO: product insert temporarily disabled until product data mapping is fixed.
-          // The contacts insert above remains active so the contact is still created.
-          /* DISABLED: contact_products insert
-          if (leadData && ventaContactId) {
-            console.log("[venta-product] body keys:", Object.keys(body));
-            console.log("[venta-product] product data:", JSON.stringify({
-              producto: body.producto,
-              product: body.product,
-              productId: body.productId,
-              product_id: body.product_id,
-              nombreProducto: body.nombreProducto,
-              nombre_producto: body.nombre_producto,
-              precio: body.precio,
-              price: body.price,
-              mediopago: body.medio_pago || body.medioPago
-            }));
-            const productPayload =
-              (body?.producto && typeof body.producto === "object" ? body.producto : null) ||
-              (body?.product && typeof body.product === "object" ? body.product : null) ||
-              (body?.productData && typeof body.productData === "object" ? body.productData : null) ||
-              body;
+          // Product data mapping from the frontend venta payload.
+          const productData = body.products?.[0] || body.product || {};
+          const medioPago = body.medio_pago || body.medioPago || null;
+          const cobranzaDocumento = body.cobranza_documento || body.cobranzaDocumento || null;
+          console.log('[venta-backend] products from body:', JSON.stringify(productData));
+          console.log('[venta-backend] familySales:', body.familySales?.length || 0);
+
+          const cpCols = await getTableColumns(client, "contact_products");
+
+          // Resolve (or create) a products row id by explicit id or by name.
+          const resolveProductId = async (productName, precioVal, orgId, explicitId) => {
+            if (!cpCols.has("product_id")) return null;
+            if (explicitId && isValidUuid(String(explicitId))) return explicitId;
+            const productCols = await getTableColumns(client, "products");
+            const productOrgClause = productCols.has("organization_id") && orgId
+              ? "AND organization_id = $2"
+              : "";
+            const productValues = productOrgClause ? [productName, orgId] : [productName];
+            const productRes = await client.query(
+              `
+              SELECT id
+              FROM products
+              WHERE TRIM(LOWER(nombre)) = TRIM(LOWER($1))
+                ${productOrgClause}
+              LIMIT 1
+              `,
+              productValues
+            );
+            let pid = productRes.rows[0]?.id || null;
+            if (!pid) {
+              const insertProductCols = ["nombre", "categoria", "precio", "activo"];
+              const insertProductVals = [productName, "General", precioVal || 0, true];
+              if (productCols.has("organization_id")) {
+                insertProductCols.push("organization_id");
+                insertProductVals.push(orgId);
+              }
+              const insertProductPlaceholders = insertProductVals.map((_, idx) => `$${idx + 1}`);
+              const insertProductRes = await client.query(
+                `
+                INSERT INTO products (${insertProductCols.join(", ")})
+                VALUES (${insertProductPlaceholders.join(", ")})
+                RETURNING id
+                `,
+                insertProductVals
+              );
+              pid = insertProductRes.rows[0]?.id || null;
+            }
+            return pid;
+          };
+
+          // Insert a contact_products row for a contact from a product spec.
+          const insertContactProduct = async (contactId, orgId, prod, medioPagoVal) => {
+            if (!contactId) return;
             const productName = normalizeText(
-              productPayload?.nombre_producto ||
-              productPayload?.nombreProducto ||
-              productPayload?.producto_nombre ||
-              productPayload?.product_name ||
-              productPayload?.nombre ||
-              productPayload?.producto
-            ) || "Producto";
-            const precio = parseNumber(productPayload?.precio ?? productPayload?.price) ?? 0;
-            const medioPago = normalizeText(
-              productPayload?.medio_pago ||
-              productPayload?.medioPago ||
-              productPayload?.payment_method ||
-              productPayload?.paymentMethod
-            ) || null;
+              prod?.nombre_producto || prod?.nombre || prod?.name
+            ) || "Sin producto";
+            const precioVal = parseNumber(prod?.precio ?? prod?.price) ?? 0;
+            const explicitId = prod?.product_id || prod?.id || null;
+            const planVal = normalizeText(prod?.plan) || null;
             const fechaAltaRaw = normalizeText(
-              productPayload?.fecha_alta ||
-              productPayload?.fechaAlta ||
-              productPayload?.fecha_venta ||
-              productPayload?.fechaVenta
+              prod?.fecha_alta || prod?.fechaAlta || prod?.fecha_venta || prod?.fechaVenta
             );
             const fechaAlta = (/^\d{4}-\d{2}-\d{2}$/.test(fechaAltaRaw) ? fechaAltaRaw : parseDate(fechaAltaRaw)) ||
               formatDateYmd(new Date());
-            const cpCols = await getTableColumns(client, "contact_products");
-            const existingProductValues = [ventaContactId];
-            const existingProductOrgClause = cpCols.has("organization_id") && ventaOrganizationId
+
+            const existingProductValues = [contactId];
+            const existingProductOrgClause = cpCols.has("organization_id") && orgId
               ? "AND organization_id = $2"
               : "";
-            if (existingProductOrgClause) existingProductValues.push(ventaOrganizationId);
+            if (existingProductOrgClause) existingProductValues.push(orgId);
             const existingProductRes = await client.query(
               `
               SELECT id
@@ -17494,107 +17514,148 @@ export const handler = async (event) => {
               `,
               existingProductValues
             );
+            if (existingProductRes.rows.length) return;
 
-            if (!existingProductRes.rows.length) {
-              let resolvedProductId = null;
-              if (cpCols.has("product_id")) {
-                const productCols = await getTableColumns(client, "products");
-                const productOrgClause = productCols.has("organization_id") && ventaOrganizationId
-                  ? "AND organization_id = $2"
-                  : "";
-                const productValues = productOrgClause ? [productName, ventaOrganizationId] : [productName];
-                const productRes = await client.query(
-                  `
-                  SELECT id
-                  FROM products
-                  WHERE TRIM(LOWER(nombre)) = TRIM(LOWER($1))
-                    ${productOrgClause}
-                  LIMIT 1
-                  `,
-                  productValues
-                );
-                resolvedProductId = productRes.rows[0]?.id || null;
-                if (!resolvedProductId) {
-                  const insertProductCols = ["nombre", "categoria", "precio", "activo"];
-                  const insertProductVals = [productName, "General", precio || 0, true];
-                  if (productCols.has("organization_id")) {
-                    insertProductCols.push("organization_id");
-                    insertProductVals.push(ventaOrganizationId);
-                  }
-                  const insertProductPlaceholders = insertProductVals.map((_, idx) => `$${idx + 1}`);
-                  const insertProductRes = await client.query(
-                    `
-                    INSERT INTO products (${insertProductCols.join(", ")})
-                    VALUES (${insertProductPlaceholders.join(", ")})
-                    RETURNING id
-                    `,
-                    insertProductVals
-                  );
-                  resolvedProductId = insertProductRes.rows[0]?.id || null;
-                }
-              }
+            const resolvedProductId = await resolveProductId(productName, precioVal, orgId, explicitId);
 
-              const contactProductCols = [
-                "contact_id",
-                "nombre_producto",
-                "plan",
-                "precio",
-                "fecha_alta",
-                "cuotas_pagas",
-                "carencia_cuotas",
-                "estado",
-                "motivo_baja",
-                "motivo_baja_detalle",
-                "fecha_baja"
-              ];
-              const contactProductVals = [
-                ventaContactId,
-                productName,
-                normalizeText(productPayload?.plan) || null,
-                precio || 0,
-                fechaAlta,
-                0,
-                0,
-                "alta",
-                null,
-                null,
-                null
-              ];
-              if (cpCols.has("medio_pago")) {
-                contactProductCols.push("medio_pago");
-                contactProductVals.push(medioPago);
-              }
-              if (cpCols.has("seller_user_id")) {
-                contactProductCols.push("seller_user_id");
-                contactProductVals.push(assignedTo || dbUser?.id || null);
-              }
-              if (cpCols.has("seller_name_snapshot")) {
-                contactProductCols.push("seller_name_snapshot");
-                contactProductVals.push([dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || null);
-              }
-              if (cpCols.has("seller_origin")) {
-                contactProductCols.push("seller_origin");
-                contactProductVals.push("interno");
-              }
-              if (cpCols.has("organization_id")) {
-                contactProductCols.push("organization_id");
-                contactProductVals.push(ventaOrganizationId);
-              }
-              if (cpCols.has("product_id")) {
-                contactProductCols.push("product_id");
-                contactProductVals.push(resolvedProductId);
-              }
-              const contactProductPlaceholders = contactProductVals.map((_, idx) => `$${idx + 1}`);
-              await client.query(
+            const contactProductCols = [
+              "contact_id",
+              "nombre_producto",
+              "plan",
+              "precio",
+              "fecha_alta",
+              "cuotas_pagas",
+              "carencia_cuotas",
+              "estado",
+              "motivo_baja",
+              "motivo_baja_detalle",
+              "fecha_baja"
+            ];
+            const contactProductVals = [
+              contactId,
+              productName,
+              planVal,
+              precioVal || 0,
+              fechaAlta,
+              0,
+              0,
+              "alta",
+              null,
+              null,
+              null
+            ];
+            if (cpCols.has("medio_pago")) {
+              contactProductCols.push("medio_pago");
+              contactProductVals.push(medioPagoVal);
+            }
+            if (cpCols.has("cobranza_documento")) {
+              contactProductCols.push("cobranza_documento");
+              contactProductVals.push(cobranzaDocumento);
+            }
+            if (cpCols.has("seller_user_id")) {
+              contactProductCols.push("seller_user_id");
+              contactProductVals.push(assignedTo || dbUser?.id || null);
+            }
+            if (cpCols.has("seller_name_snapshot")) {
+              contactProductCols.push("seller_name_snapshot");
+              contactProductVals.push([dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || null);
+            }
+            if (cpCols.has("seller_origin")) {
+              contactProductCols.push("seller_origin");
+              contactProductVals.push("interno");
+            }
+            if (cpCols.has("organization_id")) {
+              contactProductCols.push("organization_id");
+              contactProductVals.push(orgId);
+            }
+            if (cpCols.has("product_id")) {
+              contactProductCols.push("product_id");
+              contactProductVals.push(resolvedProductId);
+            }
+            const contactProductPlaceholders = contactProductVals.map((_, idx) => `$${idx + 1}`);
+            await client.query(
+              `
+              INSERT INTO contact_products (${contactProductCols.join(", ")})
+              VALUES (${contactProductPlaceholders.join(", ")})
+              `,
+              contactProductVals
+            );
+          };
+
+          // Find-or-create a contact from a payload (used for family sales).
+          const findOrCreateContact = async (payload, orgId) => {
+            const telDigits = normalizePhoneDigits(payload?.telefono || "");
+            const celDigits = normalizePhoneDigits(payload?.celular || "");
+            let cid = null;
+            if (telDigits || celDigits) {
+              const r = await client.query(
                 `
-                INSERT INTO contact_products (${contactProductCols.join(", ")})
-                VALUES (${contactProductPlaceholders.join(", ")})
+                SELECT id
+                FROM contacts
+                WHERE ($1::uuid IS NULL OR organization_id = $1)
+                  AND (
+                    ($2::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $2
+                    ))
+                    OR ($3::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $3
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3
+                    ))
+                  )
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
                 `,
-                contactProductVals
+                [orgId, telDigits || "", celDigits || ""]
               );
+              cid = r.rows[0]?.id || null;
+            }
+            if (cid) return cid;
+            const ins = await client.query(
+              `
+              INSERT INTO contacts (
+                nombre, apellido, documento, fecha_nacimiento, telefono, celular,
+                email, direccion, departamento, pais, status, organization_id,
+                created_at, updated_at
+              )
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
+              RETURNING id
+              `,
+              [
+                normalizeText(payload?.nombre) || "Sin nombre",
+                normalizeText(payload?.apellido) || "",
+                normalizeText(payload?.documento) || null,
+                payload?.fecha_nacimiento || null,
+                cleanPhone(payload?.telefono) || null,
+                cleanPhone(payload?.celular) || null,
+                normalizeEmail(payload?.email || payload?.correo_electronico) || null,
+                normalizeText(payload?.direccion) || null,
+                normalizeText(payload?.departamento) || null,
+                "Uruguay",
+                "activo",
+                orgId
+              ]
+            );
+            return ins.rows[0]?.id || null;
+          };
+
+          // Main sale product.
+          if (leadData && ventaContactId) {
+            await insertContactProduct(ventaContactId, ventaOrganizationId, productData, medioPago);
+          }
+
+          // Family sales: create a contact and its product(s) for each item.
+          const familySales = Array.isArray(body.familySales) ? body.familySales : [];
+          for (const fam of familySales) {
+            const famContactPayload = fam?.contact || {};
+            const famContactId = await findOrCreateContact(famContactPayload, ventaOrganizationId);
+            if (!famContactId) continue;
+            const famMedioPago = fam?.medio_pago || fam?.medioPago || medioPago || null;
+            const famProducts = Array.isArray(fam?.products) ? fam.products : [];
+            for (const famProduct of (famProducts.length ? famProducts : [{}])) {
+              await insertContactProduct(famContactId, ventaOrganizationId, famProduct, famMedioPago);
             }
           }
-          END DISABLED: contact_products insert */
         }
 
         if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
