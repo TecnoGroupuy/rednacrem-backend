@@ -25812,6 +25812,11 @@ async function getNewContactsDistribution(client, batchId) {
       try {
         const organizationId = await resolveOrganizationId(client, dbUser, event);
         const cpCols = await getTableColumns(client, "contact_products");
+        const salesCols = await getTableColumns(client, "sales");
+        const hasSaleId = cpCols.has("sale_id");
+        const sellerExpr = salesCols.has("seller_user_id")
+          ? "s.seller_user_id"
+          : "s.seller_id";
         const dateColumn = type === "bajas" ? "cp.fecha_baja" : "cp.fecha_alta";
         const bajaClause = type === "bajas" ? "AND cp.estado = 'baja'" : "";
 
@@ -25834,6 +25839,15 @@ async function getNewContactsDistribution(client, batchId) {
         const orgClause = cpCols.has("organization_id")
           ? `AND cp.organization_id = $${orgParamIndex}`
           : `AND c.organization_id = $${orgParamIndex}`;
+        const saleJoinClause = hasSaleId
+          ? "LEFT JOIN sales s ON s.id = cp.sale_id"
+          : `LEFT JOIN LATERAL (
+               SELECT s.*
+               FROM sales s
+               WHERE s.contact_id = cp.contact_id
+               ORDER BY s.created_at DESC
+               LIMIT 1
+             ) s ON true`;
 
         const result = await client.query(
           `
@@ -25847,8 +25861,9 @@ async function getNewContactsDistribution(client, batchId) {
             cp.motivo_baja,
             cp.motivo_baja_detalle
           FROM contact_products cp
+          ${saleJoinClause}
           JOIN contacts c ON c.id = cp.contact_id
-          WHERE cp.seller_user_id = $1
+          WHERE COALESCE(cp.seller_user_id, ${sellerExpr}) = $1
             AND ${dateColumn} IS NOT NULL
             ${monthFilterClause}
             ${bajaClause}
