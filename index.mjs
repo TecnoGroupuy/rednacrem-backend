@@ -25796,7 +25796,10 @@ async function getNewContactsDistribution(client, batchId) {
             TRIM(CONCAT(c.nombre, ' ', c.apellido)) AS cliente,
             cp.nombre_producto AS producto,
             cp.precio,
-            cp.estado
+            cp.estado,
+            COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(cp.motivo_baja, '')) AS motivo,
+            cp.motivo_baja,
+            cp.motivo_baja_detalle
           FROM contact_products cp
           JOIN contacts c ON c.id = cp.contact_id
           WHERE cp.seller_user_id = $1
