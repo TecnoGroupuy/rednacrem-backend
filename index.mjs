@@ -17331,6 +17331,7 @@ export const handler = async (event) => {
         }
 
         if (effectiveResultado === "venta") {
+          console.log('[venta-product-debug] full body:', JSON.stringify(body, null, 2));
           const leadColumns = await getTableColumns(client, "datos_para_trabajar");
           const selectLeadColumn = (columnName, alias = columnName) =>
             leadColumns.has(columnName) ? columnName : `NULL::text AS ${alias}`;
@@ -17432,6 +17433,9 @@ export const handler = async (event) => {
             ventaContactId = insertContactRes.rows[0]?.id || null;
           }
 
+          // TODO: product insert temporarily disabled until product data mapping is fixed.
+          // The contacts insert above remains active so the contact is still created.
+          /* DISABLED: contact_products insert
           if (leadData && ventaContactId) {
             console.log("[venta-product] body keys:", Object.keys(body));
             console.log("[venta-product] product data:", JSON.stringify({
@@ -17590,6 +17594,7 @@ export const handler = async (event) => {
               );
             }
           }
+          END DISABLED: contact_products insert */
         }
 
         if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
