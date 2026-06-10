@@ -9142,11 +9142,18 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
 
       let leadId = null;
       let wasCreated = false;
+      let duplicateField = null;
 
       if (existingRes.rows.length) {
         const row = existingRes.rows[0];
         leadId = row.id;
         wasCreated = false;
+        duplicateField = (() => {
+          if (documento && existingRes.rows[0]?.documento === documento) return "documento";
+          if (telefono && (existingRes.rows[0]?.telefono === telefono || existingRes.rows[0]?.celular === telefono)) return "telefono";
+          if (celular && (existingRes.rows[0]?.celular === celular || existingRes.rows[0]?.telefono === celular)) return "celular";
+          return "telefono";
+        })();
 
         const updateParts = [];
         const updateValues = [];
@@ -9356,7 +9363,16 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
       }
 
       await client.query("COMMIT");
-      return json(200, { ok: true, contact_id: leadId, assigned_to: assignedTo, created: wasCreated });
+      return wasCreated
+        ? json(200, { ok: true, contact_id: leadId, assigned_to: assignedTo, created: true })
+        : json(200, {
+            ok: true,
+            created: false,
+            reason: "duplicate",
+            duplicate_field: duplicateField,
+            contact_id: leadId,
+            assigned_to: assignedTo
+          });
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
