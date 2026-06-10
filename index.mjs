@@ -15514,7 +15514,7 @@ export const handler = async (event) => {
               )
             )
             ${tabWhere}
-          ORDER BY lcs.intentos ASC, lcs.updated_at DESC, lcs.contact_id ASC
+          ORDER BY lcs.intentos ASC, d.created_at DESC, lcs.contact_id ASC
           LIMIT $5 OFFSET $6
           `,
           [sellerId, tipo, search, origenDato, limit, offset, tipoExcluir, organizationId]
