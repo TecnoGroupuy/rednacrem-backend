@@ -6197,6 +6197,91 @@ function normalizeProductIds(value) {
   return [...new Set(value.map((id) => String(id || "").trim()).filter((id) => isValidUuid(id)))];
 }
 
+async function insertSaleRecord(client, saleInput, organizationId = null) {
+  const salesCols = await getTableColumns(client, "sales");
+  const sellerUserCol = salesCols.has("seller_user_id")
+    ? "seller_user_id"
+    : (salesCols.has("seller_id") ? "seller_id" : null);
+  const fechaVentaCol = salesCols.has("fecha_venta")
+    ? "fecha_venta"
+    : (salesCols.has("fecha") ? "fecha" : null);
+  const hasDocumentoCobranza = salesCols.has("documento_cobranza");
+  const hasSaleGroupId = salesCols.has("sale_group_id");
+  const hasParentSaleId = salesCols.has("parent_sale_id");
+  const hasGestionId = await columnExists(client, "sales", "gestion_id");
+  const hasTitularContactId = await columnExists(client, "sales", "titular_contact_id");
+  const hasRelation = await columnExists(client, "sales", "relation");
+  const hasProductId = await columnExists(client, "sales", "product_id");
+
+  const safeContactId = isValidUuid(saleInput?.contactId) ? saleInput.contactId : null;
+  const safeProductId = isValidUuid(saleInput?.productId) ? saleInput.productId : null;
+  const safeSellerId = isValidUuid(saleInput?.sellerId) ? saleInput.sellerId : null;
+  const safeSaleGroupId = isValidUuid(saleInput?.saleGroupId) ? saleInput.saleGroupId : null;
+  const safeParentSaleId = isValidUuid(saleInput?.parentSaleId) ? saleInput.parentSaleId : null;
+  const safeGestionId = isValidUuid(saleInput?.gestionId) ? saleInput.gestionId : null;
+  const safeTitularContactId = isValidUuid(saleInput?.titularContactId) ? saleInput.titularContactId : null;
+
+  const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
+  const vals = [
+    safeContactId,
+    saleInput?.medioPago ?? null,
+    saleInput?.sellerNameSnapshot ?? null,
+    saleInput?.sellerOrigin ?? null
+  ];
+
+  if (organizationId) {
+    cols.push("organization_id");
+    vals.push(organizationId);
+  }
+  if (sellerUserCol) {
+    cols.push(sellerUserCol);
+    vals.push(safeSellerId);
+  }
+  if (fechaVentaCol) {
+    cols.push(fechaVentaCol);
+    vals.push(saleInput?.fechaVenta ?? null);
+  }
+  if (hasDocumentoCobranza) {
+    cols.push("documento_cobranza");
+    vals.push(saleInput?.documentoCobranza || null);
+  }
+  if (hasProductId) {
+    cols.push("product_id");
+    vals.push(safeProductId);
+  }
+  if (hasSaleGroupId) {
+    cols.push("sale_group_id");
+    vals.push(safeSaleGroupId);
+  }
+  if (hasParentSaleId) {
+    cols.push("parent_sale_id");
+    vals.push(safeParentSaleId);
+  }
+  if (hasGestionId) {
+    cols.push("gestion_id");
+    vals.push(safeGestionId);
+  }
+  if (hasTitularContactId) {
+    cols.push("titular_contact_id");
+    vals.push(safeTitularContactId);
+  }
+  if (hasRelation) {
+    cols.push("relation");
+    vals.push(saleInput?.relation ?? null);
+  }
+
+  const placeholders = vals.map((_, idx) => `$${idx + 1}`);
+  const saleInsert = await client.query(
+    `
+    INSERT INTO sales (${cols.join(", ")})
+    VALUES (${placeholders.join(", ")})
+    RETURNING id
+    `,
+    vals
+  );
+  return saleInsert.rows[0]?.id || null;
+}
+
 async function sendToExternalConnections(contactId, productId, organizationId) {
   const logs = [];
   if (!isValidUuid(contactId) || !isValidUuid(productId) || !isValidUuid(organizationId)) return logs;
@@ -11082,68 +11167,21 @@ export const handler = async (event) => {
           gestionId,
           titularContactId,
           relation
-        }) => {
-          const safeContactId = isValidUuid(contactId) ? contactId : null;
-          const safeProductId = isValidUuid(productId) ? productId : null;
-          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
-          const safeSaleGroupId = isValidUuid(saleGroupId) ? saleGroupId : null;
-          const safeParentSaleId = isValidUuid(parentSaleId) ? parentSaleId : null;
-          const safeGestionId = isValidUuid(gestionId) ? gestionId : null;
-          const safeTitularContactId = isValidUuid(titularContactId) ? titularContactId : null;
-          const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
-          const vals = [safeContactId, medioPago, sellerNameSnapshot, sellerOrigin];
-          if (organizationId) {
-            cols.push("organization_id");
-            vals.push(organizationId);
-          }
-          if (sellerUserCol) {
-            cols.push(sellerUserCol);
-            vals.push(safeSellerId);
-          }
-          if (fechaVentaCol) {
-            cols.push(fechaVentaCol);
-            vals.push(fechaVenta);
-          }
-          if (hasDocumentoCobranza) {
-            cols.push("documento_cobranza");
-            vals.push(documentoCobranza || null);
-          }
-          if (hasProductId) {
-            cols.push("product_id");
-            vals.push(safeProductId);
-          }
-          if (hasSaleGroupId) {
-            cols.push("sale_group_id");
-            vals.push(safeSaleGroupId);
-          }
-          if (hasParentSaleId) {
-            cols.push("parent_sale_id");
-            vals.push(safeParentSaleId);
-          }
-          if (hasGestionId) {
-            cols.push("gestion_id");
-            vals.push(safeGestionId);
-          }
-          if (hasTitularContactId) {
-            cols.push("titular_contact_id");
-            vals.push(safeTitularContactId);
-          }
-          if (hasRelation) {
-            cols.push("relation");
-            vals.push(relation ?? null);
-          }
-
-          const placeholders = vals.map((_, idx) => `$${idx + 1}`);
-          const saleInsert = await client.query(
-            `
-            INSERT INTO sales (${cols.join(", ")})
-            VALUES (${placeholders.join(", ")})
-            RETURNING id
-            `,
-            vals
-          );
-          return saleInsert.rows[0]?.id || null;
-        };
+        }) => insertSaleRecord(client, {
+          contactId,
+          productId,
+          sellerId,
+          medioPago,
+          sellerNameSnapshot,
+          sellerOrigin,
+          fechaVenta,
+          documentoCobranza,
+          saleGroupId,
+          parentSaleId,
+          gestionId,
+          titularContactId,
+          relation
+        }, organizationId);
 
         const products = Array.isArray(body?.products) ? body.products : [];
         const rawSellerId = normalizeText(body?.vendedor_id || "");
@@ -17695,13 +17733,43 @@ export const handler = async (event) => {
               contactProductVals.push(resolvedProductId);
             }
             const contactProductPlaceholders = contactProductVals.map((_, idx) => `$${idx + 1}`);
-            await client.query(
+            const contactProductInsert = await client.query(
               `
               INSERT INTO contact_products (${contactProductCols.join(", ")})
               VALUES (${contactProductPlaceholders.join(", ")})
+              RETURNING id
               `,
               contactProductVals
             );
+
+            const contactProductId = contactProductInsert.rows[0]?.id || null;
+            const saleId = await insertSaleRecord(client, {
+              contactId,
+              productId: resolvedProductId,
+              sellerId: assignedTo || dbUser?.id || null,
+              medioPago: medioPagoVal,
+              sellerNameSnapshot: [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || null,
+              sellerOrigin: "interno",
+              fechaVenta: fechaAlta,
+              documentoCobranza: cobranzaDocumento,
+              saleGroupId: null,
+              parentSaleId: null,
+              gestionId: null,
+              titularContactId: contactId,
+              relation: null
+            }, orgId);
+
+            if (saleId && contactProductId && cpCols.has("sale_id")) {
+              await client.query(
+                `
+                UPDATE contact_products
+                SET sale_id = $1
+                WHERE id = $2
+                  AND sale_id IS NULL
+                `,
+                [saleId, contactProductId]
+              );
+            }
           };
 
           // Find-or-create a contact from a payload (used for family sales).
