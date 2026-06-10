@@ -9178,7 +9178,6 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
           forceSet("direccion", direccion);
           forceSet("localidad", localidad);
           if (leadCols.has("estado")) forceUpdate.push(`estado = 'nuevo'`);
-          forceUpdate.push(`intentos = 0`);
           forceUpdate.push(`updated_at = now()`);
           if (forceUpdate.length) {
             forceValues.push(leadId);
