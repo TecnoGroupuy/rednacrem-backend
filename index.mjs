@@ -9358,39 +9358,26 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
         );
       }
 
-      if (mensaje) {
-        const hasOrgColumn = await columnExists(client, "lead_management_history", "organization_id");
+      const histResult = reactivar ? 'reactivado' : 'seguimiento';
+      const histNota = reactivar
+        ? (mensaje || 'Contacto reactivado por supervisor')
+        : mensaje;
 
+      if (reactivar || mensaje) {
+        const hasOrgColumn = await columnExists(client, 'lead_management_history', 'organization_id');
         if (hasOrgColumn) {
           await client.query(
-            `
-            INSERT INTO lead_management_history
+            `INSERT INTO lead_management_history
               (contact_id, batch_id, user_id, resultado, nota, fecha_gestion, organization_id)
-            SELECT
-              $1 AS contact_id,
-              $2 AS batch_id,
-              $3 AS user_id,
-              'seguimiento' AS resultado,
-              $4 AS nota,
-              (NOW() AT TIME ZONE 'America/Montevideo') AS fecha_gestion,
-              $5 AS organization_id
-            `,
-            [leadId, batchId, userId, mensaje, organizationId]
+             VALUES ($1, $2, $3, $4, $5, (NOW() AT TIME ZONE 'America/Montevideo'), $6)`,
+            [leadId, batchId, userId, histResult, histNota, organizationId]
           );
         } else {
           await client.query(
-            `
-            INSERT INTO lead_management_history
+            `INSERT INTO lead_management_history
               (contact_id, batch_id, user_id, resultado, nota, fecha_gestion)
-            SELECT
-              $1 AS contact_id,
-              $2 AS batch_id,
-              $3 AS user_id,
-              'seguimiento' AS resultado,
-              $4 AS nota,
-              (NOW() AT TIME ZONE 'America/Montevideo') AS fecha_gestion
-            `,
-            [leadId, batchId, userId, mensaje]
+             VALUES ($1, $2, $3, $4, $5, (NOW() AT TIME ZONE 'America/Montevideo'))`,
+            [leadId, batchId, userId, histResult, histNota]
           );
         }
       }
