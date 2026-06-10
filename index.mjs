@@ -9030,9 +9030,12 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
   const documento = normalizeText(body?.documento || "") || null;
   const correoElectronico = normalizeEmail(body?.correo_electronico || body?.correoElectronico) || null;
   const departamento = normalizeText(body?.departamento || "") || null;
+  const direccion = normalizeText(body?.direccion || "") || null;
+  const localidad = normalizeText(body?.localidad || "") || null;
   const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato || body?.origenDato) || "manual");
   const mensaje = normalizeText(body?.mensaje || "") || null;
   const sellerId = body?.seller_id && isValidUuid(body.seller_id) ? body.seller_id : null;
+  const reactivar = body?.reactivar === true;
 
   const stripUY = (n) => {
     if (!n) return n;
@@ -9155,30 +9158,61 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
           return "telefono";
         })();
 
-        const updateParts = [];
-        const updateValues = [];
-        let idx = 1;
+        if (reactivar) {
+          const forceUpdate = [];
+          const forceValues = [];
+          let fi = 1;
+          const forceSet = (col, value) => {
+            if (!leadCols.has(col) || value === null || value === undefined || value === "") return;
+            forceUpdate.push(`${col} = $${fi}`);
+            forceValues.push(value);
+            fi += 1;
+          };
+          forceSet("nombre", nombre);
+          forceSet("apellido", apellido);
+          forceSet("celular", celular);
+          forceSet("telefono", telefono);
+          forceSet("origen_dato", origenDato);
+          forceSet("correo_electronico", correoElectronico);
+          forceSet("departamento", departamento);
+          forceSet("direccion", direccion);
+          forceSet("localidad", localidad);
+          if (leadCols.has("estado")) forceUpdate.push(`estado = 'nuevo'`);
+          forceUpdate.push(`intentos = 0`);
+          forceUpdate.push(`updated_at = now()`);
+          if (forceUpdate.length) {
+            forceValues.push(leadId);
+            await client.query(
+              `UPDATE datos_para_trabajar SET ${forceUpdate.join(", ")} WHERE id = $${fi}`,
+              forceValues
+            );
+          }
+        } else {
+          const updateParts = [];
+          const updateValues = [];
+          let idx = 1;
 
-        const setIfEmpty = (col, value) => {
-          if (!leadCols.has(col)) return;
-          if (value === null || value === undefined || value === "") return;
-          const current = row[col];
-          if (current !== null && current !== undefined && String(current).trim() !== "") return;
-          updateParts.push(`${col} = $${idx}`);
-          updateValues.push(value);
-          idx += 1;
-        };
+          const setIfEmpty = (col, value) => {
+            if (!leadCols.has(col)) return;
+            if (value === null || value === undefined || value === "") return;
+            const current = row[col];
+            if (current !== null && current !== undefined && String(current).trim() !== "") return;
+            updateParts.push(`${col} = $${idx}`);
+            updateValues.push(value);
+            idx += 1;
+          };
 
-        setIfEmpty("correo_electronico", correoElectronico);
-        setIfEmpty("departamento", departamento);
-        setIfEmpty("telefono", telefono);
+          setIfEmpty("correo_electronico", correoElectronico);
+          setIfEmpty("departamento", departamento);
+          setIfEmpty("telefono", telefono);
 
-        if (updateParts.length) {
-          updateValues.push(leadId);
-          await client.query(
-            `UPDATE datos_para_trabajar SET ${updateParts.join(", ")}, updated_at = now() WHERE id = $${idx}`,
-            updateValues
-          );
+          if (updateParts.length) {
+            updateValues.push(leadId);
+            await client.query(
+              `UPDATE datos_para_trabajar SET ${updateParts.join(", ")}, updated_at = now() WHERE id = $${idx}`,
+              updateValues
+            );
+          }
         }
       } else {
         wasCreated = true;
@@ -9365,6 +9399,14 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
       await client.query("COMMIT");
       return wasCreated
         ? json(200, { ok: true, contact_id: leadId, assigned_to: assignedTo, created: true })
+        : reactivar
+          ? json(200, {
+              ok: true,
+              created: false,
+              reactivated: true,
+              contact_id: leadId,
+              assigned_to: assignedTo
+            })
         : json(200, {
             ok: true,
             created: false,
