@@ -26189,16 +26189,23 @@ async function getNewContactsDistribution(client, batchId) {
 
         const pendientesRes = await client.query(
           `
-          SELECT COUNT(*)::int AS total
+          SELECT
+            lcs.estado_venta,
+            COUNT(*)::int AS total
           FROM lead_contact_status lcs
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
-            AND lcs.estado_venta = 'nuevo'
+            AND lcs.estado_venta IN ('nuevo', 'no_contesta', 'seguimiento', 'rellamar')
             AND lb.estado IN ('activo', 'asignado')
+          GROUP BY lcs.estado_venta
+          ORDER BY lcs.estado_venta
           `,
           [sellerId]
         );
-        const pendientes_count = pendientesRes.rows[0]?.total || 0;
+        const pendientes_by_estado = Object.fromEntries(
+          (pendientesRes.rows || []).map((row) => [row.estado_venta, Number(row.total || 0)])
+        );
+        const pendientes_count = Object.values(pendientes_by_estado).reduce((sum, value) => sum + value, 0);
 
         return json(200, {
           ok: true,
@@ -26206,6 +26213,7 @@ async function getNewContactsDistribution(client, batchId) {
           fecha_desde: desde,
           fecha_hasta: hasta,
           pendientes_count,
+          pendientes_by_estado,
           resumen: {
             ventas: groupBy("venta").length,
             rechazos: groupBy("rechazo").length,
