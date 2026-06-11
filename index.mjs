@@ -19222,6 +19222,23 @@ export const handler = async (event) => {
         )
       `);
 
+      const excludeBatchId = getQueryParam(event, "excludeBatchId");
+      if (excludeBatchId) {
+        if (!isValidUuid(excludeBatchId)) {
+          return json(400, { ok: false, message: "excludeBatchId inválido" });
+        }
+        conditions.push(`
+          id NOT IN (
+            SELECT lbc.contact_id
+            FROM lead_batch_contacts lbc
+            WHERE lbc.batch_id = $${i}
+            ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+          )
+        `);
+        params.push(excludeBatchId);
+        i += 1;
+      }
+
       const edadDesde = getQueryParam(event, "edad_desde");
       if (edadDesde) {
         conditions.push(`DATE_PART('year', AGE(fecha_nacimiento)) >= $${i}`);
@@ -25045,15 +25062,42 @@ async function getNewContactsDistribution(client, batchId) {
         const values = [];
         let idx = 1;
 
-        if (organizationId) {
-          whereParts.push(`organization_id = $${idx}`);
-          values.push(organizationId);
-          idx += 1;
-        }
+      if (organizationId) {
+        whereParts.push(`organization_id = $${idx}`);
+        values.push(organizationId);
+        idx += 1;
+      }
 
-        if (search) {
-          whereParts.push(`(
-            d.nombre ILIKE $${idx}
+      whereParts.push(`
+        d.id NOT IN (
+          SELECT lbc.contact_id
+          FROM lead_batch_contacts lbc
+          JOIN lead_batches lb ON lb.id = lbc.batch_id
+          WHERE lb.estado IN ('activo', 'asignado')
+          ${organizationId ? `AND lbc.organization_id = $1` : ""}
+        )
+      `);
+
+      const excludeBatchId = getQueryParam(event, "excludeBatchId");
+      if (excludeBatchId) {
+        if (!isValidUuid(excludeBatchId)) {
+          return json(400, { ok: false, message: "excludeBatchId inválido" });
+        }
+        whereParts.push(`
+          d.id NOT IN (
+            SELECT lbc.contact_id
+            FROM lead_batch_contacts lbc
+            WHERE lbc.batch_id = $${idx}
+            ${organizationId ? `AND lbc.organization_id = $1` : ""}
+          )
+        `);
+        values.push(excludeBatchId);
+        idx += 1;
+      }
+
+      if (search) {
+        whereParts.push(`(
+          d.nombre ILIKE $${idx}
             OR d.apellido ILIKE $${idx}
             OR d.documento ILIKE $${idx}
             OR d.telefono ILIKE $${idx}
