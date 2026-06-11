@@ -9504,8 +9504,10 @@ export const handler = async (event) => {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
       if (roleError) return roleError;
+      const body = normalizeEmptyStringsToNull(safeParseBody(event) || {});
+      const motivoPausa = normalizeText(body?.motivo_pausa || body?.motivoPausa || "") || null;
 
       const organizationId = await resolveOrganizationIdForRequest(dbUser, event);
       const client = createDbClient();
@@ -26929,7 +26931,7 @@ async function getNewContactsDistribution(client, batchId) {
       const client = createDbClient();
       await client.connect();
       try {
-        const values = [userId];
+        const values = [userId, motivoPausa];
         let orgClause = "";
         if (organizationId) {
           values.push(organizationId);
@@ -26946,7 +26948,7 @@ async function getNewContactsDistribution(client, batchId) {
 
         const res = await client.query(
           `UPDATE users
-           SET status = 'pausado', updated_at = NOW()
+           SET status = 'pausado', motivo_pausa = $2, pausado_at = NOW(), updated_at = NOW()
            WHERE id = $1
            ${orgClause}
            RETURNING id, nombre, apellido, status`,
@@ -26956,13 +26958,13 @@ async function getNewContactsDistribution(client, batchId) {
 
         const pausedUser = res.rows[0];
 
-        // Reasignar leads activos (no_contesta, seguimiento, nuevo) a vendedores activos del mismo lote
+        // Reasignar leads activos (no_contesta, seguimiento, nuevo, rellamar) a vendedores activos del mismo lote
         const leadsToReassign = await client.query(
           `SELECT lcs.contact_id, lbc.batch_id
            FROM lead_contact_status lcs
            JOIN lead_batch_contacts lbc ON lbc.contact_id = lcs.contact_id
            WHERE lcs.assigned_to = $1
-           AND lcs.estado_venta IN ('no_contesta', 'seguimiento', 'nuevo')`,
+           AND lcs.estado_venta IN ('no_contesta', 'seguimiento', 'nuevo', 'rellamar')`,
           [userId]
         );
 
@@ -26991,7 +26993,7 @@ async function getNewContactsDistribution(client, batchId) {
             for (let i = 0; i < batchLeads.length; i++) {
               const newVendor = vendors[i % vendors.length];
               await client.query(
-                `UPDATE lead_contact_status SET assigned_to = $1 WHERE contact_id = $2`,
+                `UPDATE lead_contact_status SET assigned_to = $1, updated_at = NOW() WHERE contact_id = $2`,
                 [newVendor, batchLeads[i].contact_id]
               );
             }
