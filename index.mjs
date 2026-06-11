@@ -9543,7 +9543,7 @@ export const handler = async (event) => {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
       if (roleError) return roleError;
 
       const contactId = String(body?.contact_id || "").trim();
