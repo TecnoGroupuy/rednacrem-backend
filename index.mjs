@@ -19038,6 +19038,16 @@ export const handler = async (event) => {
         i += 1;
       }
 
+      conditions.push(`
+        id NOT IN (
+          SELECT lbc.contact_id
+          FROM lead_batch_contacts lbc
+          JOIN lead_batches lb ON lb.id = lbc.batch_id
+          WHERE lb.estado IN ('activo', 'asignado')
+          ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+        )
+      `);
+
       const excludeBatchId = getQueryParam(event, "excludeBatchId");
       if (excludeBatchId) {
         if (!isValidUuid(excludeBatchId)) {
@@ -19201,6 +19211,16 @@ export const handler = async (event) => {
         orgParamIndex = i;
         i += 1;
       }
+
+      conditions.push(`
+        id NOT IN (
+          SELECT lbc.contact_id
+          FROM lead_batch_contacts lbc
+          JOIN lead_batches lb ON lb.id = lbc.batch_id
+          WHERE lb.estado IN ('activo', 'asignado')
+          ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+        )
+      `);
 
       const edadDesde = getQueryParam(event, "edad_desde");
       if (edadDesde) {
