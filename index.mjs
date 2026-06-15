@@ -971,21 +971,23 @@ async function fetchRecuperoContactos({
   let idx = 1;
   const motivoNormalizadoExpr = `
     CASE
-      -- Prioridad 1: motivo_baja controlado (viene de BAJA_MOTIVOS)
-      WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
-      WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
-      WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
-      WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
-      WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
-      WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
-
-      -- Prioridad 2: fallback por motivo_baja_detalle (imports CSV)
+      -- Prioridad 1: motivo_baja_detalle (fuente real del dato)
       WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
         THEN 'fallecimiento'
       WHEN cp.motivo_baja_detalle IS NULL
         OR TRIM(cp.motivo_baja_detalle) = ''
         OR cp.motivo_baja_detalle = '?'
-        THEN 'sin_detalle'
+        THEN (
+          CASE
+            WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
+            WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
+            WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
+            WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
+            WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
+            WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
+            ELSE 'sin_detalle'
+          END
+        )
       WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
         THEN 'voluntaria'
       WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
@@ -15428,18 +15430,22 @@ export const handler = async (event) => {
           LEFT JOIN LATERAL (
             SELECT
               CASE
-                WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
-                WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
-                WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
-                WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
-                WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
-                WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
                   THEN 'fallecimiento'
                 WHEN cp.motivo_baja_detalle IS NULL
                   OR TRIM(cp.motivo_baja_detalle) = ''
                   OR cp.motivo_baja_detalle = '?'
-                  THEN 'sin_detalle'
+                  THEN (
+                    CASE
+                      WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
+                      WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
+                      WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
+                      WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
+                      WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
+                      WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
+                      ELSE 'sin_detalle'
+                    END
+                  )
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
                   THEN 'voluntaria'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
@@ -15542,18 +15548,22 @@ export const handler = async (event) => {
               cp.fecha_baja,
               cp.motivo_baja_detalle,
               CASE
-                WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
-                WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
-                WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
-                WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
-                WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
-                WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
                   THEN 'fallecimiento'
                 WHEN cp.motivo_baja_detalle IS NULL
                   OR TRIM(cp.motivo_baja_detalle) = ''
                   OR cp.motivo_baja_detalle = '?'
-                  THEN 'sin_detalle'
+                  THEN (
+                    CASE
+                      WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
+                      WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
+                      WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
+                      WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
+                      WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
+                      WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
+                      ELSE 'sin_detalle'
+                    END
+                  )
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
                   THEN 'voluntaria'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
