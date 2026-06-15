@@ -18346,9 +18346,30 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const tipoRaw = getQueryParam(event, "tipo");
+        const tipo = tipoRaw ? String(tipoRaw).trim().toLowerCase() : null;
+        const tipoExcluirRaw = getQueryParam(event, "tipo_excluir");
+        const tipoExcluir = tipoExcluirRaw ? String(tipoExcluirRaw).trim().toLowerCase() : null;
+
         const values = [];
-        const orgFilter = organizationId ? "WHERE lb.organization_id = $1" : "";
-        if (organizationId) values.push(organizationId);
+        const whereParts = [];
+
+        if (organizationId) {
+          values.push(organizationId);
+          whereParts.push(`lb.organization_id = $${values.length}`);
+        }
+
+        if (tipo) {
+          values.push(tipo);
+          whereParts.push(`lb.tipo = $${values.length}`);
+        }
+
+        if (tipoExcluir) {
+          values.push(tipoExcluir);
+          whereParts.push(`lb.tipo != $${values.length}`);
+        }
+
+        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
         const result = await client.query(
           `
           SELECT
@@ -18390,7 +18411,7 @@ export const handler = async (event) => {
             ) vc ON vc.batch_id = lbs.batch_id AND vc.assigned_to = lbs.seller_id
             GROUP BY lbs.batch_id
           ) vnd ON vnd.batch_id = lb.id
-          ${orgFilter}
+          ${whereClause}
           ORDER BY lb.created_at DESC
           `,
           values
