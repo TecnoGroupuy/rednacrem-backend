@@ -15425,6 +15425,50 @@ export const handler = async (event) => {
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           LEFT JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           LEFT JOIN contacts c ON c.id = d.contact_id
+          LEFT JOIN LATERAL (
+            SELECT
+              CASE
+                WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
+                WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
+                WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
+                WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
+                WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
+                WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
+                  THEN 'fallecimiento'
+                WHEN cp.motivo_baja_detalle IS NULL
+                  OR TRIM(cp.motivo_baja_detalle) = ''
+                  OR cp.motivo_baja_detalle = '?'
+                  THEN 'sin_detalle'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
+                  THEN 'voluntaria'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALTA DE PAGO%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN LIQUIDEZ%'
+                  THEN 'falta_de_pago'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ANTEL%'
+                  THEN 'baja_antel'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%BPS%'
+                  THEN 'baja_bps'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%AUDIT%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADMINISTRAT%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADIMINISTRAT%'
+                  THEN 'administrativa'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%REPETIDA%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ACTIVACI%'
+                  THEN 'error_activacion'
+                WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%NO LLAMAR%'
+                  THEN 'no_llamar'
+                ELSE 'otro'
+              END AS motivo_normalizado
+            FROM contact_products cp
+            WHERE lb.tipo = 'recupero'
+              AND c.id IS NOT NULL
+              AND cp.contact_id = c.id
+              AND cp.estado = 'baja'
+            ORDER BY cp.fecha_baja DESC NULLS LAST
+            LIMIT 1
+          ) prod ON true
           WHERE lcs.assigned_to = $1
             AND COALESCE(lcs.estado_venta, '') != 'bloqueado'
             AND lb.estado IN ('activo', 'asignado')
@@ -15432,6 +15476,7 @@ export const handler = async (event) => {
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($5::text IS NULL OR lb.tipo != $5)
             AND ($6::uuid IS NULL OR lb.organization_id = $6)
+            AND ($2::text != 'recupero' OR COALESCE(prod.motivo_normalizado, '') != 'fallecimiento')
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
@@ -15497,6 +15542,12 @@ export const handler = async (event) => {
               cp.fecha_baja,
               cp.motivo_baja_detalle,
               CASE
+                WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
+                WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
+                WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
+                WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
+                WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
+                WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
                   THEN 'fallecimiento'
                 WHEN cp.motivo_baja_detalle IS NULL
@@ -15515,6 +15566,7 @@ export const handler = async (event) => {
                   THEN 'baja_bps'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%AUDIT%'
                   OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADMINISTRAT%'
+                  OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADIMINISTRAT%'
                   THEN 'administrativa'
                 WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%REPETIDA%'
                   OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ACTIVACI%'
@@ -15537,6 +15589,7 @@ export const handler = async (event) => {
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($7::text IS NULL OR lb.tipo != $7)
             AND ($8::uuid IS NULL OR lb.organization_id = $8)
+            AND ($2::text != 'recupero' OR COALESCE(prod.motivo_normalizado, '') != 'fallecimiento')
             AND ($4::text IS NULL OR COALESCE(d.origen_dato, '') ILIKE $4)
             AND (
               $3::text IS NULL OR (
