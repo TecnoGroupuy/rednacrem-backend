@@ -11331,7 +11331,37 @@ export const handler = async (event) => {
             titularContactId: main.id,
             relation: "titular"
           });
-          if (!mainSaleId && saleId) mainSaleId = saleId;
+          if (!mainSaleId && saleId) {
+            mainSaleId = saleId;
+
+            if (main?.fields?.documento || main?.fields?.telefono || main?.fields?.celular) {
+              const telDigits = normalizePhoneDigits(main.fields?.telefono || "");
+              const celDigits = normalizePhoneDigits(main.fields?.celular || "");
+              await client.query(
+                `
+                UPDATE recupero_candidatos
+                SET estado = 'recuperado',
+                    contact_id = $1,
+                    fecha_ultimo_contacto = NOW(),
+                    updated_at = NOW()
+                WHERE organization_id = $2
+                  AND estado = 'en_gestion'
+                  AND (
+                    ($3::text IS NOT NULL AND documento = $3)
+                    OR ($4::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $4
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $4
+                    ))
+                    OR ($5::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $5
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $5
+                    ))
+                  )
+                `,
+                [main.id, organizationId, main.fields?.documento || null, telDigits || "", celDigits || ""]
+              );
+            }
+          }
         }
 
         const hasAnyContactSignal = (contact = {}) => {
