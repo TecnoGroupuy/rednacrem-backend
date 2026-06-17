@@ -14737,6 +14737,160 @@ export const handler = async (event) => {
       return json(500, { ok: false, message: "Failed to register recupero sale", error: error.message });
     }
   }
+  if (method === "POST" && path.match(/\/api\/recupero\/candidatos\/([^/]+)\/gestionar$/)) {
+    const match = path.match(/\/api\/recupero\/candidatos\/([^/]+)\/gestionar$/);
+    const candidatoId = match ? match[1] : null;
+    if (!isValidUuid(candidatoId)) {
+      return json(400, { ok: false, message: "candidato_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+
+      const resultadoInput = normalizeLeadResultado(body?.status || body?.resultado);
+      if (resultadoInput === "venta") {
+        return json(400, {
+          ok: false,
+          message: "Para registrar una venta usá POST /api/recupero/candidatos/:id/venta"
+        });
+      }
+      const resultadosValidos = ["no_contesta", "rellamar", "seguimiento", "rechazo", "dato_erroneo"];
+      if (!resultadosValidos.includes(resultadoInput)) {
+        return json(422, { ok: false, message: "Resultado de gestión inválido" });
+      }
+
+      const nota = normalizeText(body?.note || body?.nota || "") || null;
+      const proximaAccion = body?.fecha_agenda || body?.fechaAgenda || null;
+
+      if (resultadoInput === "seguimiento" && !proximaAccion) {
+        return json(422, { ok: false, message: "fecha_agenda requerida para seguimiento" });
+      }
+      if (resultadoInput === "rellamar" && !proximaAccion) {
+        return json(422, { ok: false, message: "fecha_agenda requerida para rellamar" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const candidatoRes = await client.query(
+          `
+          SELECT id, seller_id, estado_administrativo, resultado_gestion, intentos
+          FROM recupero_candidatos
+          WHERE id = $1 AND organization_id = $2
+          LIMIT 1
+          `,
+          [candidatoId, organizationId]
+        );
+        const candidato = candidatoRes.rows[0];
+        if (!candidato) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Candidato no encontrado" });
+        }
+        if (candidato.estado_administrativo !== "activo") {
+          await client.query("ROLLBACK");
+          return json(409, { ok: false, message: "El candidato no está activo" });
+        }
+        if (candidato.seller_id && candidato.seller_id !== dbUser.id && !["superadministrador", "supervisor", "director"].includes(dbUser.role_key)) {
+          await client.query("ROLLBACK");
+          return json(403, { ok: false, message: "No tenés asignado este candidato" });
+        }
+
+        const estadosFinalesPermanentes = ["dato_erroneo"];
+        if (estadosFinalesPermanentes.includes(candidato.resultado_gestion)) {
+          await client.query("ROLLBACK");
+          return json(409, { ok: false, message: "El candidato ya está en estado final" });
+        }
+
+        if (candidato.resultado_gestion === "rechazo") {
+          const ultimaGestionRes = await client.query(
+            `
+            SELECT (created_at AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
+            FROM recupero_candidatos_historial
+            WHERE candidato_id = $1
+              AND seller_id = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [candidatoId, dbUser.id]
+          );
+          const fechaUltimaGestion = ultimaGestionRes.rows[0]?.fecha_uy;
+          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
+          if (!fechaUltimaGestion || fechaUltimaGestion.toString() !== hoy) {
+            await client.query("ROLLBACK");
+            return json(409, { ok: false, message: "El rechazo solo puede corregirse el mismo día" });
+          }
+        }
+
+        const nextAttempts = (candidato.intentos || 0) + 1;
+        const estadoAnterior = candidato.resultado_gestion;
+
+        await client.query(
+          `
+          UPDATE recupero_candidatos
+          SET resultado_gestion = $1,
+              intentos = $2,
+              proxima_accion = $3,
+              fecha_ultimo_contacto = NOW(),
+              updated_at = NOW()
+          WHERE id = $4
+          `,
+          [resultadoInput, nextAttempts, proximaAccion, candidatoId]
+        );
+
+        const historialRes = await client.query(
+          `
+          INSERT INTO recupero_candidatos_historial
+            (candidato_id, estado_anterior, estado_nuevo, seller_id, nota, created_at)
+          VALUES ($1, $2, $3, $4, $5, NOW())
+          RETURNING id
+          `,
+          [candidatoId, estadoAnterior, resultadoInput, dbUser.id, nota]
+        );
+        const gestionId = historialRes.rows[0]?.id || null;
+
+        await client.query("COMMIT");
+        return json(200, {
+          ok: true,
+          success: true,
+          data: { resultado: resultadoInput, intentos: nextAttempts, gestion_id: gestionId },
+          error: null
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to register recupero management", error: error.message });
+    }
+  }
   if (method === "GET" && path.endsWith("/api/recupero/mis-candidatos")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
