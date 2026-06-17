@@ -17240,7 +17240,7 @@ export const handler = async (event) => {
               ORDER BY fecha_gestion DESC
               LIMIT 1
               `,
-              [contactId, userId]
+              [leadId, dbUser?.id || null]
             );
 
             const fechaUltimaGestion = ultimaGestionRes.rows[0]?.fecha_uy;
