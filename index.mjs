@@ -14341,7 +14341,12 @@ export const handler = async (event) => {
           const nombre = normalizeText(payload?.nombre) || null;
           const apellido = normalizeText(payload?.apellido) || null;
           const documento = normalizeText(payload?.documento) || null;
-          const fechaNacimiento = parseDate(payload?.fecha_nacimiento || payload?.fechaNacimiento || null);
+          const rawFechaNacimiento = payload?.fecha_nacimiento || payload?.fechaNacimiento || null;
+          const fechaNacimiento = rawFechaNacimiento instanceof Date
+            ? rawFechaNacimiento.toISOString().slice(0, 10)
+            : (typeof rawFechaNacimiento === "string" && /^\d{4}-\d{2}-\d{2}/.test(rawFechaNacimiento)
+                ? rawFechaNacimiento.slice(0, 10)
+                : parseDate(rawFechaNacimiento));
           const telefono = cleanPhone(payload?.telefono) || null;
           const celular = cleanPhone(payload?.celular) || null;
           const correo = normalizeEmail(payload?.correo_electronico || payload?.email);
