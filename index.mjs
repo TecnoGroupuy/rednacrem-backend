@@ -14821,30 +14821,10 @@ export const handler = async (event) => {
           return json(403, { ok: false, message: "No tenés asignado este candidato" });
         }
 
-        const estadosFinalesPermanentes = ["dato_erroneo"];
+        const estadosFinalesPermanentes = ["dato_erroneo", "rechazo"];
         if (estadosFinalesPermanentes.includes(candidato.resultado_gestion)) {
           await client.query("ROLLBACK");
           return json(409, { ok: false, message: "El candidato ya está en estado final" });
-        }
-
-        if (candidato.resultado_gestion === "rechazo") {
-          const ultimaGestionRes = await client.query(
-            `
-            SELECT (created_at AT TIME ZONE 'America/Montevideo')::date AS fecha_uy
-            FROM recupero_candidatos_historial
-            WHERE candidato_id = $1
-              AND seller_id = $2
-            ORDER BY created_at DESC
-            LIMIT 1
-            `,
-            [candidatoId, dbUser.id]
-          );
-          const fechaUltimaGestion = ultimaGestionRes.rows[0]?.fecha_uy;
-          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
-          if (!fechaUltimaGestion || fechaUltimaGestion.toString() !== hoy) {
-            await client.query("ROLLBACK");
-            return json(409, { ok: false, message: "El rechazo solo puede corregirse el mismo día" });
-          }
         }
 
         const nextAttempts = (candidato.intentos || 0) + 1;
