@@ -14271,6 +14271,432 @@ export const handler = async (event) => {
       });
     }
   }
+  if (method === "POST" && path.match(/\/api\/recupero\/candidatos\/([^/]+)\/venta$/)) {
+    const match = path.match(/\/api\/recupero\/candidatos\/([^/]+)\/venta$/);
+    const candidatoId = match ? match[1] : null;
+    if (!isValidUuid(candidatoId)) {
+      return json(400, { ok: false, message: "candidato_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const candidatoRes = await client.query(
+          `
+          SELECT id, nombre, apellido, documento, telefono, celular,
+                 fecha_nacimiento, direccion, departamento, seller_id, estado
+          FROM recupero_candidatos
+          WHERE id = $1 AND organization_id = $2
+          LIMIT 1
+          `,
+          [candidatoId, organizationId]
+        );
+        const candidato = candidatoRes.rows[0];
+        if (!candidato) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Candidato no encontrado" });
+        }
+        if (candidato.estado !== "en_gestion") {
+          await client.query("ROLLBACK");
+          return json(409, { ok: false, message: "El candidato no está en gestión" });
+        }
+
+        const sellerIdForSale = isValidUuid(dbUser?.id) ? dbUser.id : (isValidUuid(candidato.seller_id) ? candidato.seller_id : null);
+        const sellerNameSnapshot = normalizeText(
+          [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || ""
+        ) || null;
+        const sellerOrigin = sellerIdForSale ? "interno" : "externo";
+        const cobranzaDocumento = normalizeText(body?.cobranza_documento || body?.documento_cobranza) || null;
+
+        const buildContactFields = (payload) => {
+          const nombre = normalizeText(payload?.nombre) || null;
+          const apellido = normalizeText(payload?.apellido) || null;
+          const documento = normalizeText(payload?.documento) || null;
+          const fechaNacimiento = parseDate(payload?.fecha_nacimiento || payload?.fechaNacimiento || null);
+          const telefono = cleanPhone(payload?.telefono) || null;
+          const celular = cleanPhone(payload?.celular) || null;
+          const correo = normalizeEmail(payload?.correo_electronico || payload?.email);
+          const email = correo ? correo : null;
+          const direccion = normalizeText(payload?.direccion) || null;
+          const departamento = normalizeText(payload?.departamento) || null;
+          const pais = normalizeText(payload?.pais) || "Uruguay";
+          const status = normalizeText(payload?.estado || payload?.status || "activo") || "activo";
+          return {
+            nombre,
+            apellido,
+            documento,
+            fechaNacimiento,
+            telefono,
+            celular,
+            email,
+            direccion,
+            departamento,
+            pais,
+            status
+          };
+        };
+
+        const upsertContact = async (payload) => {
+          const fields = buildContactFields(payload || {});
+          let existingId = null;
+
+          if (fields.documento) {
+            const existingRes = await client.query(
+              `
+              SELECT id
+              FROM contacts
+              WHERE documento = $1
+                AND organization_id = $2
+              LIMIT 1
+              `,
+              [fields.documento, organizationId]
+            );
+            existingId = existingRes.rows[0]?.id || null;
+          }
+
+          if (!existingId) {
+            const telDigits = normalizePhoneDigits(fields.telefono || "");
+            const celDigits = normalizePhoneDigits(fields.celular || "");
+            if (telDigits || celDigits) {
+              const existingRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE organization_id = $1
+                  AND (
+                    ($2::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $2
+                    ))
+                    OR ($3::text <> '' AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $3
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3
+                    ))
+                  )
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                `,
+                [organizationId, telDigits || "", celDigits || ""]
+              );
+              existingId = existingRes.rows[0]?.id || null;
+            }
+          }
+
+          if (existingId) {
+            await client.query(
+              `
+              UPDATE contacts
+              SET nombre = COALESCE($2, nombre),
+                  apellido = COALESCE($3, apellido),
+                  documento = COALESCE($4, documento),
+                  fecha_nacimiento = COALESCE($5, fecha_nacimiento),
+                  telefono = COALESCE($6, telefono),
+                  celular = COALESCE($7, celular),
+                  email = COALESCE($8, email),
+                  direccion = COALESCE($9, direccion),
+                  departamento = COALESCE($10, departamento),
+                  pais = COALESCE($11, pais),
+                  status = COALESCE($12, status),
+                  updated_at = now()
+              WHERE id = $1
+                AND organization_id = $13
+              `,
+              [
+                existingId,
+                fields.nombre,
+                fields.apellido,
+                fields.documento,
+                fields.fechaNacimiento,
+                fields.telefono,
+                fields.celular,
+                fields.email,
+                fields.direccion,
+                fields.departamento,
+                fields.pais,
+                fields.status,
+                organizationId
+              ]
+            );
+            return { id: existingId, fields };
+          }
+
+          const insertRes = await client.query(
+            `
+            INSERT INTO contacts (
+              nombre,
+              apellido,
+              documento,
+              fecha_nacimiento,
+              telefono,
+              celular,
+              email,
+              direccion,
+              departamento,
+              pais,
+              status,
+              organization_id,
+              created_at,
+              updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
+            RETURNING id
+            `,
+            [
+              fields.nombre || "Sin nombre",
+              fields.apellido || "",
+              fields.documento,
+              fields.fechaNacimiento,
+              fields.telefono,
+              fields.celular,
+              fields.email,
+              fields.direccion,
+              fields.departamento,
+              fields.pais,
+              fields.status,
+              organizationId
+            ]
+          );
+          return { id: insertRes.rows[0]?.id || null, fields };
+        };
+
+        const createProductAndSale = async ({
+          contactId,
+          product,
+          medioPagoOverride,
+          parentSaleId,
+          gestionId = null,
+          titularContactId = null,
+          relation = null
+        }) => {
+          const productId = isValidUuid(product?.id || product?.product_id) ? (product.id || product.product_id) : null;
+          if (!productId) {
+            throw new Error("product requerido");
+          }
+
+          const productRes = await client.query(
+            `
+            SELECT id, nombre, precio
+            FROM products
+            WHERE id = $1
+              AND organization_id = $2
+            LIMIT 1
+            `,
+            [productId, organizationId]
+          );
+          const productRow = productRes.rows[0] || null;
+          if (!productRow) {
+            throw new Error("Producto no encontrado");
+          }
+
+          const productName = normalizeText(
+            product?.nombre_producto || product?.nombreProducto || product?.nombre || productRow.nombre
+          ) || "Producto";
+          const plan = normalizeText(product?.plan) || null;
+          const precio = parseNumber(product?.precio ?? product?.price ?? productRow.precio) ?? 0;
+          const fechaAlta = parseDate(
+            product?.fecha_alta || product?.fechaAlta || product?.fecha_venta || product?.fechaVenta
+          ) || new Date().toISOString().slice(0, 10);
+          const medioPago = normalizeText(product?.medio_pago || product?.medioPago || medioPagoOverride) || null;
+
+          const saleId = await insertSaleRecord(client, {
+            contactId,
+            productId,
+            sellerId: sellerIdForSale,
+            medioPago,
+            sellerNameSnapshot,
+            sellerOrigin,
+            fechaVenta: fechaAlta,
+            documentoCobranza: cobranzaDocumento,
+            saleGroupId: null,
+            parentSaleId,
+            gestionId,
+            titularContactId,
+            relation
+          }, organizationId);
+
+          await client.query(
+            `
+            INSERT INTO sale_items (
+              sale_id,
+              product_id,
+              product_name_snapshot,
+              price
+            )
+            VALUES ($1, $2, $3, $4)
+            `,
+            [saleId, productId, productName, precio]
+          );
+
+          const cpCols = await getTableColumns(client, "contact_products");
+          const contactProductCols = [
+            "contact_id",
+            "nombre_producto",
+            "plan",
+            "precio",
+            "fecha_alta",
+            "cuotas_pagas",
+            "carencia_cuotas",
+            "estado",
+            "motivo_baja",
+            "motivo_baja_detalle",
+            "fecha_baja"
+          ];
+          const contactProductVals = [
+            contactId,
+            productName,
+            plan,
+            precio,
+            fechaAlta,
+            0,
+            0,
+            "alta",
+            null,
+            null,
+            null
+          ];
+          if (cpCols.has("medio_pago")) {
+            contactProductCols.push("medio_pago");
+            contactProductVals.push(medioPago);
+          }
+          if (cpCols.has("cobranza_documento")) {
+            contactProductCols.push("cobranza_documento");
+            contactProductVals.push(cobranzaDocumento);
+          }
+          if (cpCols.has("seller_user_id")) {
+            contactProductCols.push("seller_user_id");
+            contactProductVals.push(sellerIdForSale);
+          }
+          if (cpCols.has("seller_name_snapshot")) {
+            contactProductCols.push("seller_name_snapshot");
+            contactProductVals.push(sellerNameSnapshot);
+          }
+          if (cpCols.has("seller_origin")) {
+            contactProductCols.push("seller_origin");
+            contactProductVals.push(sellerOrigin);
+          }
+          if (cpCols.has("sale_id")) {
+            contactProductCols.push("sale_id");
+            contactProductVals.push(saleId);
+          }
+          if (cpCols.has("organization_id")) {
+            contactProductCols.push("organization_id");
+            contactProductVals.push(organizationId);
+          }
+          if (cpCols.has("product_id")) {
+            contactProductCols.push("product_id");
+            contactProductVals.push(productId);
+          }
+          const contactProductPlaceholders = contactProductVals.map((_, idx) => `$${idx + 1}`);
+          await client.query(
+            `
+            INSERT INTO contact_products (${contactProductCols.join(", ")})
+            VALUES (${contactProductPlaceholders.join(", ")})
+            `,
+            contactProductVals
+          );
+
+          return saleId;
+        };
+
+        const contactPayload = {
+          nombre: body?.nombre || candidato.nombre,
+          apellido: body?.apellido || candidato.apellido,
+          documento: body?.documento || candidato.documento,
+          fechaNacimiento: body?.fecha_nacimiento || candidato.fecha_nacimiento,
+          telefono: body?.telefono || candidato.telefono,
+          celular: body?.celular || candidato.celular,
+          email: body?.email || null,
+          direccion: body?.direccion || candidato.direccion,
+          departamento: body?.departamento || candidato.departamento,
+          pais: body?.pais || "Uruguay",
+          status: "activo",
+          organization_id: organizationId
+        };
+
+        const main = await upsertContact(contactPayload);
+        if (!main?.id) {
+          await client.query("ROLLBACK");
+          return json(422, { ok: false, message: "No se pudo crear o actualizar el contacto" });
+        }
+
+        const product = body?.product || body?.producto;
+        if (!product || !(product.id || product.product_id)) {
+          await client.query("ROLLBACK");
+          return json(400, { ok: false, message: "product requerido" });
+        }
+
+        const saleId = await createProductAndSale({
+          contactId: main.id,
+          product,
+          medioPagoOverride: body?.medioPago || body?.medio_pago || null,
+          parentSaleId: null,
+          gestionId: null,
+          titularContactId: main.id,
+          relation: "titular"
+        });
+
+        await client.query(
+          `
+          UPDATE recupero_candidatos
+          SET estado = 'recuperado',
+              contact_id = $1,
+              fecha_ultimo_contacto = NOW(),
+              updated_at = NOW()
+          WHERE id = $2
+          `,
+          [main.id, candidatoId]
+        );
+
+        await client.query(
+          `
+          INSERT INTO recupero_candidatos_historial
+            (candidato_id, estado_anterior, estado_nuevo, seller_id, nota, created_at)
+          VALUES ($1, 'en_gestion', 'recuperado', $2, $3, NOW())
+          `,
+          [candidatoId, dbUser?.id || candidato.seller_id, body?.nota || null]
+        );
+
+        await client.query("COMMIT");
+        return json(201, { ok: true, contact_id: main.id, sale_id: saleId });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to register recupero sale", error: error.message });
+    }
+  }
   if (method === "GET" && path.endsWith("/api/recupero/mis-candidatos")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
