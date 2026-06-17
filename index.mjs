@@ -927,719 +927,198 @@ function validateSimpleFilters(filters) {
 }
 
 async function fetchRecuperoContactos({
-  client,
-  producto,
-  departamento,
-  search,
-  motivoBaja,
-  motivoNormalizado,
-  tab,
-  loteId,
-  sortField,
-  sortDir,
-  page,
-  limit,
-  filters,
-  organizationId,
-  sellerId
+  client, search, motivoBaja, tab, sortField, sortDir,
+  page, limit, filters, organizationId, sellerId
 }) {
-  console.log("[recupero-fn] sellerId recibido:", sellerId);
-  const sortableColumns = {
-    edad: "DATE_PART('year', AGE(c.fecha_nacimiento))",
-    telefono: "c.telefono",
-    departamento: "c.departamento",
-    nombre_producto: "cp.nombre_producto",
-    precio: "cp.precio",
-    fecha_baja: "cp.fecha_baja"
-  };
-
   const offset = (page - 1) * limit;
-  const conditions = [
-    "cp.estado = 'baja'",
-    "(COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) IS NOT NULL)",
-    `COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, '')) NOT IN (
-      SELECT COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, ''))
-      FROM contacts c2
-      JOIN contact_products cp2 ON cp2.contact_id = c2.id
-      WHERE cp2.estado = 'alta'
-        AND COALESCE(NULLIF(c2.telefono, ''), NULLIF(c2.celular, '')) IS NOT NULL
-    )`,
-    "cp.fecha_baja BETWEEN '2000-01-01' AND '2030-12-31'"
-  ];
+  const conditions = [`rc.organization_id = $1`];
+  const values = [organizationId];
+  let idx = 2;
 
-  const values = [];
-  let idx = 1;
-  const motivoNormalizadoExpr = `
-    CASE
-      -- Prioridad 1: motivo_baja_detalle (fuente real del dato)
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
-        THEN 'fallecimiento'
-      WHEN cp.motivo_baja_detalle IS NULL
-        OR TRIM(cp.motivo_baja_detalle) = ''
-        OR cp.motivo_baja_detalle = '?'
-        THEN (
-          CASE
-            WHEN cp.motivo_baja = 'Fallecido' THEN 'fallecimiento'
-            WHEN cp.motivo_baja = 'Voluntaria' THEN 'voluntaria'
-            WHEN cp.motivo_baja = 'Antel' THEN 'baja_antel'
-            WHEN cp.motivo_baja = 'BPS' THEN 'baja_bps'
-            WHEN cp.motivo_baja IN ('Auditoría', 'Administrativa') THEN 'administrativa'
-            WHEN cp.motivo_baja IN ('Medio de pago', 'Deuda') THEN 'falta_de_pago'
-            ELSE 'sin_detalle'
-          END
-        )
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%VOLUNTARIA%'
-        THEN 'voluntaria'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN PAGO%'
-        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALTA DE PAGO%'
-        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%SIN LIQUIDEZ%'
-        THEN 'falta_de_pago'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ANTEL%'
-        THEN 'baja_antel'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%BPS%'
-        THEN 'baja_bps'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%AUDIT%'
-        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADMINISTRAT%'
-        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ADIMINISTRAT%'
-        THEN 'administrativa'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%REPETIDA%'
-        OR UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%ACTIVACI%'
-        THEN 'error_activacion'
-      WHEN UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%NO LLAMAR%'
-        THEN 'no_llamar'
-      ELSE 'otro'
-    END
-  `;
-
-  conditions.push(`($${idx}::uuid IS NULL OR c.organization_id = $${idx}::uuid)`);
-  values.push(organizationId ?? null);
-  idx += 1;
+  const tabKey = String(tab || '').trim().toLowerCase();
+  if (tabKey === 'disponibles' || !tabKey) {
+    conditions.push(`rc.estado = 'disponible'`);
+  } else if (tabKey === 'asignados') {
+    conditions.push(`rc.estado = 'en_gestion'`);
+  } else if (tabKey === 'recuperados') {
+    conditions.push(`rc.estado = 'recuperado'`);
+  } else if (tabKey === 'rechazados') {
+    conditions.push(`rc.estado = 'rechazado'`);
+  } else if (tabKey === 'fallecidos') {
+    conditions.push(`rc.motivo_baja = 'fallecimiento'`);
+  }
 
   if (sellerId) {
-    conditions.push(`EXISTS (
-      SELECT 1
-      FROM datos_para_trabajar d3
-      JOIN lead_contact_status lcs3 ON lcs3.contact_id = d3.id
-      JOIN lead_batches lb3 ON lb3.id = lcs3.batch_id
-      WHERE lb3.tipo = 'recupero'
-        AND lb3.estado IN ('activo', 'asignado')
-        AND lcs3.assigned_to = $${idx}::uuid
-        AND (
-          d3.contact_id = c.id
-          OR REGEXP_REPLACE(COALESCE(d3.celular, d3.telefono, ''), '[^0-9]', '', 'g')
-             = REGEXP_REPLACE(COALESCE(NULLIF(c.celular,''), NULLIF(c.telefono,'')), '[^0-9]', '', 'g')
-        )
-    )`);
+    conditions.push(`rc.seller_id = $${idx}::uuid`);
     values.push(sellerId);
     idx += 1;
   }
 
-  console.log("[recupero] organizationId type:", typeof organizationId, "value:", organizationId);
-  console.log("[recupero] values array:", values);
-  console.log("[recupero] idx at query time:", idx);
-
-  if (producto) {
-    conditions.push(`cp.nombre_producto = $${idx}`);
-    values.push(producto);
-    idx += 1;
-  }
-  if (departamento) {
-    conditions.push(`c.departamento = $${idx}`);
-    values.push(departamento);
-    idx += 1;
-  }
-  if (search) {
-    conditions.push(`
-      (
-        c.nombre ILIKE $${idx}
-        OR c.apellido ILIKE $${idx}
-        OR c.telefono ILIKE $${idx}
-        OR c.celular ILIKE $${idx}
-        OR c.documento ILIKE $${idx}
-        OR c.departamento ILIKE $${idx}
-        OR cp.nombre_producto ILIKE $${idx}
-      )
-    `);
-    values.push(`%${search}%`);
-    idx += 1;
-  }
-    if (motivoBaja) {
-      const normalizedMotivo = motivoBaja.toLowerCase();
-      if (normalizedMotivo === "sin motivo" || normalizedMotivo === "sin_motivo" || normalizedMotivo === "sin-motivo") {
-      conditions.push(`(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL)`);
-      } else {
-      conditions.push(`COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) = $${idx}`);
-        values.push(motivoBaja);
-        idx += 1;
-      }
-    }
-
-  const simpleFilters = !isAdvancedFilterPayload(filters) ? filters : null;
-  if (simpleFilters) {
-    const contactoVal = normalizeTextValue(simpleFilters.contacto);
-    if (contactoVal) {
-      conditions.push(`COALESCE(NULLIF(TRIM(CONCAT(c.nombre, ' ', c.apellido)), ''), c.nombre) ILIKE $${idx}`);
-      values.push(`%${contactoVal}%`);
-      idx += 1;
-    }
-
-    const documentoVal = normalizeTextValue(simpleFilters.documento);
-    if (documentoVal) {
-      conditions.push(`c.documento ILIKE $${idx}`);
-      values.push(`%${documentoVal}%`);
-      idx += 1;
-    }
-
-    const telefonoVal = normalizeTextValue(simpleFilters.telefono);
-    if (telefonoVal) {
-      const telefonoDigits = normalizePhoneDigits(telefonoVal);
-      if (telefonoDigits) {
-        const telefonoExpr = buildNormalizedPhoneSql("c.telefono");
-        const celularExpr = buildNormalizedPhoneSql("c.celular");
-        conditions.push(`(${telefonoExpr} ILIKE $${idx} OR ${celularExpr} ILIKE $${idx})`);
-        values.push(`%${telefonoDigits}%`);
-      } else {
-        conditions.push(`(c.telefono ILIKE $${idx} OR c.celular ILIKE $${idx})`);
-        values.push(`%${telefonoVal}%`);
-      }
-      idx += 1;
-    }
-
-    const edadExpr = "DATE_PART('year', AGE(c.fecha_nacimiento))";
-    const edadMin = simpleFilters.edad_min !== undefined && simpleFilters.edad_min !== null
-      ? Number(simpleFilters.edad_min)
-      : null;
-    const edadMax = simpleFilters.edad_max !== undefined && simpleFilters.edad_max !== null
-      ? Number(simpleFilters.edad_max)
-      : null;
-    if (edadMin !== null && !Number.isNaN(edadMin)) {
-      conditions.push(`${edadExpr} >= $${idx}`);
-      values.push(edadMin);
-      idx += 1;
-    }
-    if (edadMax !== null && !Number.isNaN(edadMax)) {
-      conditions.push(`${edadExpr} <= $${idx}`);
-      values.push(edadMax);
-      idx += 1;
-    }
-
-    const fechaDesde = normalizeTextValue(simpleFilters.fecha_baja_desde);
-    const fechaHasta = normalizeTextValue(simpleFilters.fecha_baja_hasta);
-    if (fechaDesde && fechaHasta) {
-      conditions.push(`cp.fecha_baja BETWEEN $${idx}::date AND $${idx + 1}::date`);
-      values.push(fechaDesde, fechaHasta);
-      idx += 2;
-    } else if (fechaDesde) {
-      conditions.push(`cp.fecha_baja >= $${idx}::date`);
-      values.push(fechaDesde);
-      idx += 1;
-    } else if (fechaHasta) {
-      conditions.push(`cp.fecha_baja <= $${idx}::date`);
-      values.push(fechaHasta);
-      idx += 1;
-    }
-
-    const precioMin = simpleFilters.precio_min !== undefined && simpleFilters.precio_min !== null
-      ? Number(simpleFilters.precio_min)
-      : null;
-    const precioMax = simpleFilters.precio_max !== undefined && simpleFilters.precio_max !== null
-      ? Number(simpleFilters.precio_max)
-      : null;
-    if (precioMin !== null && !Number.isNaN(precioMin)) {
-      conditions.push(`cp.precio >= $${idx}`);
-      values.push(precioMin);
-      idx += 1;
-    }
-    if (precioMax !== null && !Number.isNaN(precioMax)) {
-      conditions.push(`cp.precio <= $${idx}`);
-      values.push(precioMax);
-      idx += 1;
-    }
-
-    const motivosRaw = normalizeArrayValue(simpleFilters.motivo_baja, normalizeLowerValue);
-    if (motivosRaw.length) {
-      const sinMotivo = motivosRaw.some((v) => ["sin motivo", "sin_motivo", "sin-motivo"].includes(v));
-      const motivos = motivosRaw.filter((v) => !["sin motivo", "sin_motivo", "sin-motivo"].includes(v));
-      if (sinMotivo && motivos.length) {
-        conditions.push(`(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL OR LOWER(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[]))`);
-        values.push(motivos);
-        idx += 1;
-      } else if (sinMotivo) {
-        conditions.push(`COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) IS NULL`);
-      } else if (motivos.length) {
-        conditions.push(`LOWER(COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))) = ANY($${idx}::text[])`);
-        values.push(motivos);
-        idx += 1;
-      }
-    }
-
-    const estadosRaw = normalizeArrayValue(simpleFilters.ultimo_estado, normalizeEstadoValue);
-    if (estadosRaw.length) {
-      const sinEstado = estadosRaw.some((v) => ["sin estado", "sin_estado", "sin-estado"].includes(v));
-      const estados = estadosRaw.filter((v) => !["sin estado", "sin_estado", "sin-estado"].includes(v));
-      if (sinEstado && estados.length) {
-        conditions.push(`(COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL OR LOWER(COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)) = ANY($${idx}::text[]))`);
-        values.push(estados);
-        idx += 1;
-      } else if (sinEstado) {
-        conditions.push(`COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL`);
-      } else if (estados.length) {
-        conditions.push(`LOWER(COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)) = ANY($${idx}::text[])`);
-        values.push(estados);
-        idx += 1;
-      }
-    }
-
-    const productos = normalizeArrayValue(simpleFilters.producto, normalizeLowerValue);
-    if (productos.length) {
-      conditions.push(`LOWER(cp.nombre_producto) = ANY($${idx}::text[])`);
-      values.push(productos);
-      idx += 1;
-    }
-
-    const departamentos = normalizeArrayValue(simpleFilters.departamento, normalizeLowerValue);
-    if (departamentos.length) {
-      conditions.push(`LOWER(c.departamento) = ANY($${idx}::text[])`);
-      values.push(departamentos);
-      idx += 1;
-    }
-
-    const vendedores = normalizeArrayValue(simpleFilters.vendedor_asignado, normalizeLowerValue);
-    if (vendedores.length) {
-      conditions.push(`LOWER(lote.vendedor_asignado_nombre) = ANY($${idx}::text[])`);
-      values.push(vendedores);
-      idx += 1;
-    }
-
-    const lotes = normalizeArrayValue(simpleFilters.lote, normalizeLowerValue);
-    if (lotes.length) {
-      conditions.push(`LOWER(lote.nombre_lote) = ANY($${idx}::text[])`);
-      values.push(lotes);
-      idx += 1;
-    }
-
-    if (motivoNormalizado == null) {
-      const motivoNormalizadoFromFilters = simpleFilters.motivo_normalizado;
-      const motivoNormalizadoList = normalizeArrayValue(motivoNormalizadoFromFilters, normalizeLowerValue);
-      if (motivoNormalizadoList.length) {
-        conditions.push(`(${motivoNormalizadoExpr}) = ANY($${idx}::text[])`);
-        values.push(motivoNormalizadoList);
-        idx += 1;
-      }
-    }
-  }
-
-  if (motivoNormalizado != null) {
-    const motivoNormalizadoList = normalizeArrayValue(motivoNormalizado, normalizeLowerValue);
-    if (motivoNormalizadoList.length) {
-      conditions.push(`(${motivoNormalizadoExpr}) = ANY($${idx}::text[])`);
-      values.push(motivoNormalizadoList);
-      idx += 1;
-    }
-  }
-
-  let loteIdParam = null;
-  if (loteId && isValidUuid(loteId)) {
-    loteIdParam = idx;
-    conditions.push(`lote.batch_id = $${loteIdParam}::uuid`);
-    values.push(loteId);
+  const simpleFilters = filters && !isAdvancedFilterPayload(filters) ? filters : null;
+  const contactoVal = simpleFilters?.contacto
+    ? normalizeTextValue(simpleFilters.contacto)
+    : (search ? search.trim() : null);
+  if (contactoVal) {
+    conditions.push(`(
+      rc.nombre ILIKE $${idx}
+      OR rc.apellido ILIKE $${idx}
+      OR rc.telefono ILIKE $${idx}
+      OR rc.celular ILIKE $${idx}
+      OR rc.documento ILIKE $${idx}
+    )`);
+    values.push(`%${contactoVal}%`);
     idx += 1;
   }
 
-  const filterFields = {
-    contacto: { expr: "COALESCE(NULLIF(TRIM(CONCAT(c.nombre, ' ', c.apellido)), ''), c.nombre)", type: "text" },
-    documento: { expr: "c.documento", type: "text" },
-    edad: { expr: "DATE_PART('year', AGE(c.fecha_nacimiento))", type: "number" },
-    telefono: { expr: "COALESCE(NULLIF(c.telefono, ''), NULLIF(c.celular, ''))", type: "text" },
-    departamento: { expr: "c.departamento", type: "text" },
-    producto: { expr: "cp.nombre_producto", type: "text" },
-    precio: { expr: "cp.precio", type: "number" },
-    fecha_baja: { expr: "cp.fecha_baja", type: "date" },
-    motivo_baja: { expr: "COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, ''))", type: "text" },
-    lote: { expr: "lote.nombre_lote", type: "text" },
-    vendedor_asignado: { expr: "lote.vendedor_asignado_nombre", type: "text" },
-    ultimo_estado: { expr: "COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado)", type: "text" },
-    ultima_gestion: { expr: "COALESCE(gestion.fecha_ultima_gestion, gestion.fecha_ultima_gestion_ts)", type: "date" }
-  };
-
-  const buildRuleClause = (rule) => {
-    if (!rule || typeof rule !== "object") return null;
-    const fieldKey = String(rule.field || "").trim();
-    const operator = String(rule.operator || "").trim();
-    const field = filterFields[fieldKey];
-    if (!field || !operator) return null;
-    const expr = field.expr;
-    const type = field.type;
-    const value = rule.value;
-
-    const pushValue = (val) => {
-      values.push(val);
-      const placeholder = `$${idx}`;
-      idx += 1;
-      return placeholder;
-    };
-
-    if (operator === "empty") {
-      return type === "text"
-        ? `(${expr} IS NULL OR ${expr} = '')`
-        : `${expr} IS NULL`;
-    }
-    if (operator === "not_empty") {
-      return type === "text"
-        ? `(${expr} IS NOT NULL AND ${expr} <> '')`
-        : `${expr} IS NOT NULL`;
-    }
-
-    if (type === "text") {
-      const textVal = value === null || value === undefined ? "" : String(value);
-      if (operator === "contains") return `${expr} ILIKE ${pushValue(`%${textVal}%`)}`;
-      if (operator === "not_contains") return `${expr} NOT ILIKE ${pushValue(`%${textVal}%`)}`;
-      if (operator === "eq") return `${expr} ILIKE ${pushValue(textVal)}`;
-      if (operator === "ne") return `${expr} NOT ILIKE ${pushValue(textVal)}`;
-      if (operator === "starts") return `${expr} ILIKE ${pushValue(`${textVal}%`)}`;
-      if (operator === "ends") return `${expr} ILIKE ${pushValue(`%${textVal}`)}`;
-      if (operator === "in") {
-        const list = Array.isArray(value) ? value : [value];
-        const cleaned = list.map((v) => String(v)).filter(Boolean);
-        if (!cleaned.length) return null;
-        return `${expr} = ANY(${pushValue(cleaned)}::text[])`;
-      }
-      if (operator === "not_in") {
-        const list = Array.isArray(value) ? value : [value];
-        const cleaned = list.map((v) => String(v)).filter(Boolean);
-        if (!cleaned.length) return null;
-        return `${expr} <> ALL(${pushValue(cleaned)}::text[])`;
-      }
-    }
-
-    if (type === "number") {
-      const numVal = value === null || value === undefined || value === "" ? null : Number(value);
-      if (operator === "between" && Array.isArray(value) && value.length === 2) {
-        const minVal = Number(value[0]);
-        const maxVal = Number(value[1]);
-        const p1 = pushValue(minVal);
-        const p2 = pushValue(maxVal);
-        return `${expr} BETWEEN ${p1} AND ${p2}`;
-      }
-      if (numVal === null || Number.isNaN(numVal)) return null;
-      if (operator === "eq") return `${expr} = ${pushValue(numVal)}`;
-      if (operator === "ne") return `${expr} <> ${pushValue(numVal)}`;
-      if (operator === "gt") return `${expr} > ${pushValue(numVal)}`;
-      if (operator === "gte") return `${expr} >= ${pushValue(numVal)}`;
-      if (operator === "lt") return `${expr} < ${pushValue(numVal)}`;
-      if (operator === "lte") return `${expr} <= ${pushValue(numVal)}`;
-    }
-
-    if (type === "date") {
-      if (operator === "today") return `${expr} = CURRENT_DATE`;
-      if (operator === "this_month") {
-        return `${expr} >= date_trunc('month', CURRENT_DATE)::date AND ${expr} < (date_trunc('month', CURRENT_DATE) + interval '1 month')::date`;
-      }
-      if (operator === "last_days") {
-        const daysVal = value === null || value === undefined || value === "" ? null : Number(value);
-        if (daysVal === null || Number.isNaN(daysVal)) return null;
-        return `${expr} >= (CURRENT_DATE - ${pushValue(daysVal)}::int)`;
-      }
-      if (operator === "between" && Array.isArray(value) && value.length === 2) {
-        const p1 = pushValue(value[0]);
-        const p2 = pushValue(value[1]);
-        return `${expr} BETWEEN ${p1}::date AND ${p2}::date`;
-      }
-      if (operator === "before" && value) return `${expr} < ${pushValue(value)}::date`;
-      if (operator === "after" && value) return `${expr} > ${pushValue(value)}::date`;
-    }
-
-    if (type === "boolean") {
-      if (operator === "is_true") return `${expr} = TRUE`;
-      if (operator === "is_false") return `${expr} = FALSE`;
-    }
-
-    return null;
-  };
-
-  const buildFilterClause = (node) => {
-    if (!node || typeof node !== "object") return null;
-    if (Array.isArray(node.rules)) {
-      const combinator = String(node.combinator || "AND").toUpperCase() === "OR" ? "OR" : "AND";
-      const parts = [];
-      for (const rule of node.rules) {
-        const clause = rule?.rules ? buildFilterClause(rule) : buildRuleClause(rule);
-        if (clause) parts.push(clause);
-      }
-      if (!parts.length) return null;
-      return `(${parts.join(` ${combinator} `)})`;
-    }
-    return buildRuleClause(node);
-  };
-
-  const advancedFilters = isAdvancedFilterPayload(filters) ? filters : null;
-  const advancedClause = buildFilterClause(advancedFilters);
-  if (advancedClause) conditions.push(advancedClause);
-
-  const baseConditions = [...conditions];
-
-  const tabKey = String(tab || "").trim().toLowerCase().replace(/\s+/g, "_");
-  if (tabKey) {
-    if (tabKey === "disponibles") {
-      conditions.push(`
-        NOT EXISTS (
-          SELECT 1
-          FROM lead_batch_contacts lbc
-          JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.client_contact_id = c.id
-            AND lb.tipo = 'recupero'
-            AND lb.estado IN ('activo', 'asignado')
-        )
-      `);
-    } else if (tabKey === "en_lote") {
-      conditions.push(`
-        EXISTS (
-          SELECT 1
-          FROM lead_batch_contacts lbc
-          JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.client_contact_id = c.id
-            AND lb.tipo = 'recupero'
-        )
-      `);
-    } else if (tabKey === "asignados") {
-      conditions.push(`
-        EXISTS (
-          SELECT 1
-          FROM datos_para_trabajar d2
-          JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
-          JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE d2.contact_id = c.id
-            AND lb.tipo = 'recupero'
-            AND lcs.assigned_to IS NOT NULL
-        )
-      `);
-    } else if (tabKey === "gestionados") {
-      conditions.push(`
-        (
-          EXISTS (
-            SELECT 1
-            FROM datos_para_trabajar d2
-            JOIN lead_contact_status lcs ON lcs.contact_id = d2.id
-            JOIN lead_batches lb ON lb.id = lcs.batch_id
-            WHERE d2.contact_id = c.id
-              AND lb.tipo = 'recupero'
-              AND lcs.intentos > 0
-          )
-          OR COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NOT NULL
-        )
-      `);
-    } else if (tabKey === "nuevos" || tabKey === "nuevo") {
-      conditions.push(`COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IS NULL`);
-    } else if (tabKey === "seguimiento") {
-      conditions.push(
-        `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('seguimiento', 'rellamar', 'volver_a_llamar')`
-      );
-    } else if (tabKey === "no_contacto" || tabKey === "no_contesta") {
-      conditions.push(
-        `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'no_contesta'`
-      );
-    } else if (tabKey === "recuperados" || tabKey === "recuperado") {
-      conditions.push(
-        `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) IN ('venta', 'alta')`
-      );
-    } else if (tabKey === "rechazados" || tabKey === "rechazos") {
-      conditions.push(
-        `COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) = 'rechazo'`
-      );
-    }
+  const motivosRaw = simpleFilters?.motivo_baja
+    ? (Array.isArray(simpleFilters.motivo_baja) ? simpleFilters.motivo_baja : [simpleFilters.motivo_baja])
+    : (motivoBaja ? [motivoBaja] : []);
+  if (motivosRaw.length) {
+    conditions.push(`rc.motivo_baja = ANY($${idx}::text[])`);
+    values.push(motivosRaw);
+    idx += 1;
   }
 
-  const where = conditions.join(" AND ");
-  const baseWhere = baseConditions.join(" AND ");
-  const distinctKeyExpr = "COALESCE(NULLIF(c.documento,''), NULLIF(c.telefono,''), NULLIF(c.celular,''), c.id::text)";
-  const orderExpr = sortField && sortableColumns[sortField] ? sortableColumns[sortField] : null;
-  const isFechaBajaOrder = (orderExpr || "cp.fecha_baja") === "cp.fecha_baja";
-  const fechaDir = isFechaBajaOrder ? (orderExpr ? sortDir : "DESC") : null;
-  const orderByInner = isFechaBajaOrder
-    ? `
-      CASE WHEN cp.fecha_baja < '2000-01-01'::date THEN 1 ELSE 0 END ASC,
-      cp.fecha_baja ${fechaDir}
-    `
-    : orderExpr
-    ? `${orderExpr} ${sortDir}`
-    : "cp.fecha_baja DESC";
-  const orderByOuter = isFechaBajaOrder
-    ? `
-      CASE WHEN fecha_baja < '2000-01-01'::date THEN 1 ELSE 0 END ASC,
-      fecha_baja ${fechaDir}
-    `
-    : null;
-
-  console.log("[recupero] organizationId:", organizationId);
-  console.log("[recupero] params:", { producto, tab, page });
-
-  let itemsRes;
-  try {
-    console.log("[recupero] starting itemsRes query");
-    console.log("[recupero-sql] sellerId:", sellerId);
-    console.log("[recupero-sql] conditions count:", conditions.length);
-    console.log("[recupero-sql] last condition:", conditions[conditions.length - 1]);
-    console.log("[recupero-sql] values:", JSON.stringify(values));
-    itemsRes = await client.query(
-      `
-      ${orderByOuter ? "SELECT * FROM (" : ""}
-      SELECT DISTINCT ON (${distinctKeyExpr})
-        c.id,
-        c.nombre,
-        c.apellido,
-        c.telefono,
-        c.celular,
-        c.documento,
-        CASE WHEN c.fecha_nacimiento IS NULL THEN NULL ELSE DATE_PART('year', AGE(c.fecha_nacimiento))::int END AS edad,
-        c.departamento,
-        cp.nombre_producto,
-        cp.precio,
-        cp.fecha_baja,
-        COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja,
-        COALESCE(NULLIF(cp.motivo_baja_detalle, ''), NULLIF(ems.motivo_baja, ''), NULLIF(cp.motivo_baja, '')) AS motivo_baja_detalle,
-        (${motivoNormalizadoExpr}) AS motivo_normalizado,
-        lote.batch_id,
-        lote.nombre_lote,
-        lote.vendedor_asignado_id,
-        lote.vendedor_asignado_nombre,
-        lote.vendedor_asignado_nombre AS vendedor_asignado,
-        COALESCE(gestion.ultimo_estado_gestion, ems.estado_normalizado) AS ultimo_estado_gestion,
-        gestion.fecha_ultima_gestion,
-        COALESCE(gestion.fecha_ultima_gestion, gestion.fecha_ultima_gestion_ts) AS ultima_gestion
-      FROM contacts c
-      JOIN contact_products cp ON cp.contact_id = c.id
-      LEFT JOIN external_management_status ems
-        ON ems.documento = c.documento
-      LEFT JOIN datos_para_trabajar d
-        ON d.contact_id = c.id
-      LEFT JOIN LATERAL (
-        SELECT
-          lbc.batch_id,
-          lb.nombre AS nombre_lote,
-          lcs.assigned_to AS vendedor_asignado_id,
-          COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
-        FROM lead_batch_contacts lbc
-        JOIN lead_batches lb ON lb.id = lbc.batch_id
-        LEFT JOIN lead_contact_status lcs
-          ON lcs.contact_id = d.id
-         AND lcs.batch_id = lbc.batch_id
-        LEFT JOIN users u ON u.id = lcs.assigned_to
-        WHERE lbc.client_contact_id = c.id
-          AND lb.tipo = 'recupero'
-          AND lb.estado IN ('activo', 'asignado')
-        ORDER BY lb.created_at DESC
-        LIMIT 1
-      ) lote ON true
-      LEFT JOIN LATERAL (
-        SELECT
-          lmh.resultado AS ultimo_estado_gestion,
-          (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
-          lmh.created_at AS fecha_ultima_gestion_ts
-        FROM lead_management_history lmh
-        JOIN lead_batches lb ON lb.id = lmh.batch_id
-        WHERE lmh.contact_id = d.id
-          AND lb.tipo = 'recupero'
-          ${loteIdParam ? `AND lmh.batch_id = $${loteIdParam}::uuid` : ""}
-        ORDER BY lmh.fecha_gestion DESC
-        LIMIT 1
-      ) gestion ON true
-      WHERE ${where}
-      ORDER BY
-        ${distinctKeyExpr},
-        c.created_at DESC,
-        cp.fecha_baja DESC NULLS LAST
-      ${orderByOuter ? ") subq ORDER BY " + orderByOuter + ", id" : ""}
-      LIMIT $${idx} OFFSET $${idx + 1}
-      `,
-      [...values, limit, offset]
-    );
-    console.log("[recupero] itemsRes done, rows:", itemsRes.rows.length);
-  } catch (err) {
-    console.error("[recupero] SQL error:", err.message);
-    console.error("[recupero] SQL detail:", err.detail);
-    throw err;
+  const fechaDesde = simpleFilters?.fecha_baja_desde;
+  const fechaHasta = simpleFilters?.fecha_baja_hasta;
+  if (fechaDesde && fechaHasta) {
+    conditions.push(`rc.fecha_baja BETWEEN $${idx}::date AND $${idx + 1}::date`);
+    values.push(fechaDesde, fechaHasta);
+    idx += 2;
+  } else if (fechaDesde) {
+    conditions.push(`rc.fecha_baja >= $${idx}::date`);
+    values.push(fechaDesde);
+    idx += 1;
+  } else if (fechaHasta) {
+    conditions.push(`rc.fecha_baja <= $${idx}::date`);
+    values.push(fechaHasta);
+    idx += 1;
   }
 
-  let countRes;
-  try {
-    console.log("[recupero] starting countRes query");
-    countRes = await client.query(
-      `
-      SELECT COUNT(DISTINCT ${distinctKeyExpr})::int AS total
-      FROM contacts c
-      JOIN contact_products cp ON cp.contact_id = c.id
-      LEFT JOIN external_management_status ems
-        ON ems.documento = c.documento
-      LEFT JOIN datos_para_trabajar d
-        ON d.contact_id = c.id
-      LEFT JOIN LATERAL (
-        SELECT
-          lbc.batch_id,
-          lb.nombre AS nombre_lote,
-          lcs.assigned_to AS vendedor_asignado_id,
-          COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
-        FROM lead_batch_contacts lbc
-        JOIN lead_batches lb ON lb.id = lbc.batch_id
-        LEFT JOIN lead_contact_status lcs
-          ON lcs.contact_id = d.id
-         AND lcs.batch_id = lbc.batch_id
-        LEFT JOIN users u ON u.id = lcs.assigned_to
-        WHERE lbc.client_contact_id = c.id
-          AND lb.tipo = 'recupero'
-          AND lb.estado IN ('activo', 'asignado')
-        ORDER BY lb.created_at DESC
-        LIMIT 1
-      ) lote ON true
-      LEFT JOIN LATERAL (
-        SELECT
-          lmh.resultado AS ultimo_estado_gestion,
-          (lmh.fecha_gestion AT TIME ZONE 'America/Montevideo')::date AS fecha_ultima_gestion,
-          lmh.created_at AS fecha_ultima_gestion_ts
-        FROM lead_management_history lmh
-        JOIN lead_batches lb ON lb.id = lmh.batch_id
-        WHERE lmh.contact_id = d.id
-          AND lb.tipo = 'recupero'
-          ${loteIdParam ? `AND lmh.batch_id = $${loteIdParam}::uuid` : ""}
-        ORDER BY lmh.fecha_gestion DESC
-        LIMIT 1
-      ) gestion ON true
-      WHERE ${where}
-      `,
-      values
-    );
-    console.log("[recupero] countRes done:", countRes.rows[0]);
-  } catch (err) {
-    console.error("[recupero] SQL error:", err.message);
-    console.error("[recupero] SQL detail:", err.detail);
-    throw err;
+  const productos = simpleFilters?.producto
+    ? (Array.isArray(simpleFilters.producto) ? simpleFilters.producto : [simpleFilters.producto])
+    : [];
+  if (productos.length) {
+    conditions.push(`LOWER(rc.producto_anterior) = ANY($${idx}::text[])`);
+    values.push(productos.map((p) => p.toLowerCase()));
+    idx += 1;
   }
 
-  const total = Number(countRes.rows[0]?.total || 0);
-  const metricsRow = {
-    disponibles: total,
-    en_lote: 0,
-    asignados: 0,
-    gestionados: 0,
-    recuperados: 0,
-    rechazados: 0
+  const departamentos = simpleFilters?.departamento
+    ? (Array.isArray(simpleFilters.departamento) ? simpleFilters.departamento : [simpleFilters.departamento])
+    : [];
+  if (departamentos.length) {
+    conditions.push(`LOWER(rc.departamento) = ANY($${idx}::text[])`);
+    values.push(departamentos.map((d) => d.toLowerCase()));
+    idx += 1;
+  }
+
+  const vendedores = simpleFilters?.vendedor_asignado
+    ? (Array.isArray(simpleFilters.vendedor_asignado) ? simpleFilters.vendedor_asignado : [simpleFilters.vendedor_asignado])
+    : [];
+  if (vendedores.length) {
+    conditions.push(`rc.seller_id = ANY($${idx}::uuid[])`);
+    values.push(vendedores);
+    idx += 1;
+  }
+
+  const lotes = simpleFilters?.lote
+    ? (Array.isArray(simpleFilters.lote) ? simpleFilters.lote : [simpleFilters.lote])
+    : [];
+  if (lotes.length) {
+    conditions.push(`rc.batch_id = ANY($${idx}::uuid[])`);
+    values.push(lotes);
+    idx += 1;
+  }
+
+  const sortableColumns = {
+    fecha_baja: 'rc.fecha_baja',
+    nombre: 'rc.apellido',
+    precio: 'rc.precio_anterior',
+    motivo_baja: 'rc.motivo_baja'
   };
-  const data = {
+  const orderExpr = (sortField && sortableColumns[sortField]) || 'rc.fecha_baja';
+  const orderDir = sortDir === 'DESC' ? 'DESC' : 'ASC';
+  const where = conditions.join(' AND ');
+
+  const itemsRes = await client.query(
+    `SELECT
+      rc.id,
+      rc.nombre,
+      rc.apellido,
+      rc.telefono,
+      rc.celular,
+      rc.documento,
+      rc.departamento,
+      rc.producto_anterior AS nombre_producto,
+      rc.precio_anterior AS precio,
+      rc.fecha_baja,
+      rc.motivo_baja,
+      rc.motivo_baja_detalle,
+      rc.motivo_baja AS motivo_normalizado,
+      rc.estado,
+      rc.observacion,
+      rc.fecha_nacimiento,
+      rc.vendedor_origen,
+      rc.batch_id,
+      rc.seller_id AS vendedor_asignado_id,
+      COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre,
+      COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado,
+      lb.nombre AS nombre_lote,
+      rc.fecha_asignacion,
+      rc.fecha_ultimo_contacto,
+      rc.intentos_contacto
+    FROM recupero_candidatos rc
+    LEFT JOIN users u ON u.id = rc.seller_id
+    LEFT JOIN lead_batches lb ON lb.id = rc.batch_id
+    WHERE ${where}
+    ORDER BY ${orderExpr} ${orderDir} NULLS LAST
+    LIMIT $${idx} OFFSET $${idx + 1}`,
+    [...values, limit, offset]
+  );
+
+  const countRes = await client.query(
+    `SELECT COUNT(*)::int AS total
+     FROM recupero_candidatos rc
+     WHERE ${where}`,
+    values
+  );
+
+  const total = countRes.rows[0]?.total || 0;
+
+  const baseConditions = [`rc.organization_id = $1`];
+  const baseValues = [organizationId];
+  if (sellerId) {
+    baseConditions.push(`rc.seller_id = $2::uuid`);
+    baseValues.push(sellerId);
+  }
+  const baseWhere = baseConditions.join(' AND ');
+
+  const tabCountsRes = await client.query(
+    `SELECT
+      COUNT(*) FILTER (WHERE rc.estado = 'disponible')::int AS disponibles,
+      COUNT(*) FILTER (WHERE rc.estado = 'en_gestion')::int AS en_gestion,
+      COUNT(*) FILTER (WHERE rc.estado = 'recuperado')::int AS recuperados,
+      COUNT(*) FILTER (WHERE rc.estado = 'rechazado')::int AS rechazados,
+      COUNT(*) FILTER (WHERE rc.motivo_baja = 'fallecimiento')::int AS fallecidos
+     FROM recupero_candidatos rc
+     WHERE ${baseWhere}`,
+    baseValues
+  );
+
+  const tabCounts = tabCountsRes.rows[0] || {};
+
+  return {
     items: itemsRes.rows,
     total,
-    page,
-    limit,
-    metrics: {
-      total,
-      disponibles: Number(metricsRow.disponibles || 0),
-      enLote: Number(metricsRow.en_lote || 0),
-      asignados: Number(metricsRow.asignados || 0),
-      gestionados: Number(metricsRow.gestionados || 0),
-      recuperados: Number(metricsRow.recuperados || 0),
-      rechazados: Number(metricsRow.rechazados || 0)
+    tab_counts: {
+      disponibles: tabCounts.disponibles || 0,
+      en_gestion: tabCounts.en_gestion || 0,
+      recuperados: tabCounts.recuperados || 0,
+      rechazados: tabCounts.rechazados || 0,
+      fallecidos: tabCounts.fallecidos || 0
     }
   };
-
-  return { data, emptyCondition: total === 0 };
 }
 
 function getFuenteFromNumber(numero) {
