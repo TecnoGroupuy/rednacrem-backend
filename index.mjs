@@ -2027,18 +2027,25 @@ function buildRecuperoErrorCsv(errors = []) {
 
 function normalizeMotivoBaja(value) {
   const normalized = normalizeImportValue(value);
-  if (!normalized) return null;
-  if (normalized.includes("fallec")) return "fallecido";
+  if (!normalized) return "voluntaria";
+  if (normalized.includes("fallec")) return "fallecimiento";
+  if (normalized.includes("falta de pago") || normalized.includes("falta pago"))
+    return "falta_de_pago";
+  if (normalized.includes("sin pago") && normalized.includes("bps")) return "sin_pago_bps";
+  if (normalized.includes("bps")) return "baja_bps";
+  if (normalized.includes("antel")) return "baja_antel";
+  if (normalized.includes("liquidez")) return "sin_liquidez";
+  if (normalized.includes("auditor")) return "auditoria";
   if (
-    normalized.includes("medio pago") ||
-    normalized.includes("tarjeta") ||
-    normalized.includes("cobro") ||
-    normalized.includes("debito") ||
-    normalized.includes("dÃ©bito")
+    normalized.includes("activac") ||
+    normalized.includes("repetida") ||
+    normalized.includes("pendiente")
   )
-    return "error_medio_pago";
-  if (normalized.includes("auditor")) return "no_pasa_auditoria";
-  return "otro";
+    return "error_activacion";
+  if (normalized.includes("administrat")) return "administrativa";
+  if (normalized.includes("no llamar")) return "no_llamar";
+  if (normalized.includes("voluntar") || normalized.includes("baja")) return "voluntaria";
+  return "voluntaria";
 }
 
 function detectCsvDelimiter(headerLine) {
@@ -4349,16 +4356,13 @@ export async function processRecuperoImportJob(jobId) {
 
   try {
     const jobRes = await client.query(
-      `
-      SELECT id, csv_text, status, total_rows, processed_rows, updated_rows, error_rows, delimiter, created_by, organization_id
-      FROM recupero_import_jobs
-      WHERE id = $1
-      LIMIT 1
-      `,
+      `SELECT id, csv_text, status, total_rows, processed_rows,
+              updated_rows, error_rows, delimiter, created_by, organization_id
+       FROM recupero_import_jobs WHERE id = $1 LIMIT 1`,
       [jobId]
     );
-
     if (!jobRes.rows.length) return;
+
     const job = jobRes.rows[0];
     const createdBy = job.created_by || null;
     const organizationId = job.organization_id || null;
@@ -4366,37 +4370,19 @@ export async function processRecuperoImportJob(jobId) {
     const totalRows = Math.max(0, countCsvRows(csvText) - 1);
 
     await client.query(
-      `
-      UPDATE recupero_import_jobs
-      SET status = 'processing',
-          total_rows = $1,
-          processed_rows = $2,
-          updated_rows = $3,
-          error_rows = $4,
-          error_message = NULL,
-          started_at = now(),
-          updated_at = now()
-      WHERE id = $5
-      `,
-      [
-        totalRows,
-        job.processed_rows || 0,
-        job.updated_rows || 0,
-        job.error_rows || 0,
-        jobId
-      ]
+      `UPDATE recupero_import_jobs
+       SET status = 'processing', total_rows = $1, processed_rows = 0,
+           updated_rows = 0, error_rows = 0, error_message = NULL,
+           started_at = now(), updated_at = now()
+       WHERE id = $2`,
+      [totalRows, jobId]
     );
 
     if (!csvText.trim()) {
       await client.query(
-        `
-        UPDATE recupero_import_jobs
-        SET status = 'failed',
-            error_message = 'CSV vacio',
-            finished_at = now(),
-            updated_at = now()
-        WHERE id = $1
-        `,
+        `UPDATE recupero_import_jobs SET status = 'failed',
+         error_message = 'CSV vacio', finished_at = now(), updated_at = now()
+         WHERE id = $1`,
         [jobId]
       );
       return;
@@ -4404,14 +4390,9 @@ export async function processRecuperoImportJob(jobId) {
 
     if (!organizationId) {
       await client.query(
-        `
-        UPDATE recupero_import_jobs
-        SET status = 'failed',
-            error_message = 'organization_id faltante',
-            finished_at = now(),
-            updated_at = now()
-        WHERE id = $1
-        `,
+        `UPDATE recupero_import_jobs SET status = 'failed',
+         error_message = 'organization_id faltante', finished_at = now(), updated_at = now()
+         WHERE id = $1`,
         [jobId]
       );
       return;
@@ -4423,128 +4404,132 @@ export async function processRecuperoImportJob(jobId) {
     const delimiter = job.delimiter || detectCsvDelimiter(headerLine);
     const headers = parseCsvLine(headerLine, delimiter).map((h) => normalizeImportValue(h));
 
-    const idxDocumento = headers.findIndex((h) => h === "documento");
-    const idxMotivo = headers.findIndex(
-      (h) => h === "motivo de la baja" || h === "motivo de baja"
-    );
-    const idxEstado = headers.findIndex(
-      (h) => h === "ultimo estado" || h === "Ãºltimo estado"
-    );
+    const col = (names) => {
+      const n = Array.isArray(names) ? names : [names];
+      return headers.findIndex((h) => n.some((name) => h === name || h.includes(name)));
+    };
 
-    if (idxDocumento === -1 || idxMotivo === -1 || idxEstado === -1) {
+    const idxNombre = col(["nombres", "nombre"]);
+    const idxApellido = col(["apellidos", "apellido"]);
+    const idxDocumento = col("documento");
+    const idxTelefono = col("telefono");
+    const idxCelular = col("celular");
+    const idxVendedor = col("vendedor");
+    const idxMedioPago = col("medio de pago");
+    const idxEstado = col(["estado", "ultimo estado"]);
+    const idxFechaBaja = col("fecha de baja");
+    const idxObservacion = col(["observacion", "observacion"]);
+    const idxFechaNac = col(["fecha de nacimiento", "fecha nacimiento"]);
+    const idxDepartamento = col("departamento");
+    const idxDireccion = col(["direccion", "direccion"]);
+    const idxPlan = col(["plan contratado", "plan"]);
+    const idxPrecio = col("precio");
+    const idxFechaVenta = col("fecha de venta");
+
+    if (idxDocumento === -1 && idxTelefono === -1) {
       await client.query(
-        `
-        UPDATE recupero_import_jobs
-        SET status = 'failed',
-            error_message = 'Headers invalidos',
-            finished_at = now(),
-            updated_at = now()
-        WHERE id = $1
-        `,
+        `UPDATE recupero_import_jobs SET status = 'failed',
+         error_message = 'Se requiere columna documento o telefono',
+         finished_at = now(), updated_at = now() WHERE id = $1`,
         [jobId]
       );
       return;
     }
 
-    const entriesByDocumento = new Map();
+    const entries = [];
     const errors = [];
     let duplicateRows = 0;
     let invalidRows = 0;
-    let notFoundRows = 0;
+    let activosRows = 0;
     let rowNumber = 1;
+    const seenDocumentos = new Set();
+
+    const parseDate = (val) => {
+      if (!val) return null;
+      const clean = String(val).trim();
+      const m = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+      return null;
+    };
 
     for (const line of iterator) {
       rowNumber += 1;
-      if (!line) continue;
+      if (!line.trim()) continue;
       const cells = parseCsvLine(line, delimiter);
-      const rawDocumento = cells[idxDocumento] || "";
-      const documento = normalizeDocumento(rawDocumento);
-      const motivoBajaRaw = String(cells[idxMotivo] || "").trim();
-      const motivoBajaNorm = normalizeMotivoBaja(motivoBajaRaw);
-      const ultimoEstadoRaw = String(cells[idxEstado] || "").trim();
+      const get = (idx) => (idx >= 0 ? String(cells[idx] || "").trim() : "");
 
-      if (!documento) {
+      const nombre = get(idxNombre);
+      const apellido = get(idxApellido);
+      const documentoRaw = get(idxDocumento);
+      const documento = normalizeDocumento(documentoRaw);
+      const telefono = get(idxTelefono).replace(/\D/g, "");
+      const celular = get(idxCelular).replace(/\D/g, "");
+      const vendedor = get(idxVendedor);
+      const medioPago = get(idxMedioPago);
+      const estadoRaw = get(idxEstado);
+      const fechaBaja = parseDate(get(idxFechaBaja));
+      const observacion = get(idxObservacion);
+      const fechaNac = parseDate(get(idxFechaNac));
+      const departamento = get(idxDepartamento);
+      const direccion = get(idxDireccion);
+      const plan = get(idxPlan);
+      const precio = parseFloat(get(idxPrecio)) || null;
+      const fechaVenta = parseDate(get(idxFechaVenta));
+
+      if (!nombre && !apellido) {
         invalidRows += 1;
         errors.push({
           row: rowNumber,
-          documento: rawDocumento,
-          motivo_baja: motivoBajaRaw,
-          ultimo_estado: ultimoEstadoRaw,
+          documento: documentoRaw,
           code: "MISSING_FIELD",
-          message: "Documento requerido"
+          message: "Nombre y apellido requeridos"
         });
         continue;
       }
 
-      if (!motivoBajaRaw && !ultimoEstadoRaw) {
-        invalidRows += 1;
-        errors.push({
-          row: rowNumber,
-          documento,
-          motivo_baja: motivoBajaRaw,
-          ultimo_estado: ultimoEstadoRaw,
-          code: "MISSING_FIELD",
-          message: "Motivo o ultimo estado requerido"
-        });
-        continue;
-      }
+      const motivoBaja = normalizeMotivoBaja(estadoRaw);
 
-      let ultimoEstadoNorm = null;
-      if (ultimoEstadoRaw) {
-        ultimoEstadoNorm = normalizeRecuperoEstado(ultimoEstadoRaw);
-        if (!ultimoEstadoNorm) {
-          invalidRows += 1;
-          errors.push({
-            row: rowNumber,
-            documento,
-            motivo_baja: motivoBajaRaw,
-            ultimo_estado: ultimoEstadoRaw,
-            code: "INVALID_VALUE",
-            message: "Ultimo estado invalido"
-          });
-          continue;
-        }
-      }
-
-      if (entriesByDocumento.has(documento)) {
+      if (documento && seenDocumentos.has(documento)) {
         duplicateRows += 1;
+        continue;
       }
-      entriesByDocumento.set(documento, {
-        documento,
-        motivo_baja: motivoBajaNorm,
-        motivo_baja_raw: motivoBajaRaw || null,
-        ultimo_estado_raw: ultimoEstadoRaw || null,
-        ultimo_estado_norm: ultimoEstadoNorm,
+      if (documento) seenDocumentos.add(documento);
+
+      entries.push({
+        nombre,
+        apellido,
+        documento: documento || null,
+        telefono: telefono || null,
+        celular: celular || null,
+        vendedor_origen: vendedor || null,
+        medio_pago: medioPago || null,
+        motivo_baja: motivoBaja,
+        motivo_baja_detalle: estadoRaw || null,
+        fecha_baja: fechaBaja,
+        observacion: observacion || null,
+        fecha_nacimiento: fechaNac,
+        departamento: departamento || null,
+        direccion: direccion || null,
+        producto_anterior: plan || null,
+        precio_anterior: precio,
+        fecha_venta: fechaVenta,
         row: rowNumber
       });
     }
 
-    const documentos = Array.from(entriesByDocumento.keys());
-    if (!documentos.length) {
+    if (!entries.length) {
       await client.query(
-        `
-        UPDATE recupero_import_jobs
-        SET status = 'done',
-            total_rows = $1,
-            processed_rows = $2,
-            updated_rows = 0,
-            error_rows = $3,
-            duplicate_rows = $4,
-            invalid_rows = $5,
-            not_found_rows = $6,
-          error_rows_detail = $7,
-          error_report_csv = $8,
-          finished_at = now(),
-          updated_at = now()
-        WHERE id = $9
-        `,
+        `UPDATE recupero_import_jobs SET status = 'done',
+         total_rows = $1, processed_rows = $1, updated_rows = 0,
+         error_rows = $2, duplicate_rows = $3, invalid_rows = $4,
+         not_found_rows = 0, error_rows_detail = $5, error_report_csv = $6,
+         finished_at = now(), updated_at = now() WHERE id = $7`,
         [
-          totalRows,
           totalRows,
           errors.length,
           duplicateRows,
           invalidRows,
-          notFoundRows,
           errors.length ? JSON.stringify(errors.slice(0, 200)) : null,
           errors.length ? buildRecuperoErrorCsv(errors) : null,
           jobId
@@ -4553,147 +4538,132 @@ export async function processRecuperoImportJob(jobId) {
       return;
     }
 
-    const contactsRes = await client.query(
-      `
-      SELECT id, documento
-      FROM contacts
-      WHERE documento = ANY($1)
-        AND organization_id = $2
-      `,
-      [documentos, organizationId]
-    );
-    const contactMap = new Map();
-    for (const row of contactsRes.rows) {
-      contactMap.set(row.documento, row.id);
-    }
+    const documentosValidos = entries.map((e) => e.documento).filter(Boolean);
+    const telefonosValidos = entries.map((e) => e.telefono).filter(Boolean);
 
-    const validRows = [];
-    for (const entry of entriesByDocumento.values()) {
-      const contactId = contactMap.get(entry.documento);
-      if (!contactId) {
-        notFoundRows += 1;
+    const activosRes = await client.query(
+      `SELECT DISTINCT c.documento, c.telefono
+       FROM contacts c
+       JOIN contact_products cp ON cp.contact_id = c.id
+       WHERE cp.estado = 'alta'
+         AND cp.organization_id = $1
+         AND (
+           (c.documento = ANY($2) AND c.documento IS NOT NULL)
+           OR (c.telefono = ANY($3) AND c.telefono IS NOT NULL)
+         )`,
+      [organizationId, documentosValidos, telefonosValidos]
+    );
+    const activosDocumentos = new Set(activosRes.rows.map((r) => r.documento).filter(Boolean));
+    const activosTelefonos = new Set(activosRes.rows.map((r) => r.telefono).filter(Boolean));
+
+    const existentesRes = await client.query(
+      `SELECT documento FROM recupero_candidatos
+       WHERE organization_id = $1
+         AND documento = ANY($2)
+         AND estado != 'recuperado'`,
+      [organizationId, documentosValidos]
+    );
+    const existentesDocumentos = new Set(existentesRes.rows.map((r) => r.documento));
+
+    const toInsert = [];
+    for (const entry of entries) {
+      if (activosDocumentos.has(entry.documento) || activosTelefonos.has(entry.telefono)) {
+        activosRows += 1;
         errors.push({
           row: entry.row,
           documento: entry.documento,
-          motivo_baja: entry.motivo_baja_raw,
-          ultimo_estado: entry.ultimo_estado_raw,
-          code: "NOT_FOUND",
-          message: "Documento no encontrado"
+          code: "CLIENTE_ACTIVO",
+          message: "Es cliente activo - excluido"
         });
         continue;
       }
-      validRows.push({
-        contact_id: contactId,
-        documento: entry.documento,
-        motivo_baja: entry.motivo_baja,
-        motivo_baja_raw: entry.motivo_baja_raw,
-        ultimo_estado_raw: entry.ultimo_estado_raw,
-        ultimo_estado_norm: entry.ultimo_estado_norm
-      });
+      if (existentesDocumentos.has(entry.documento)) {
+        duplicateRows += 1;
+        errors.push({
+          row: entry.row,
+          documento: entry.documento,
+          code: "YA_EN_RECUPERO",
+          message: "Ya existe en recupero"
+        });
+        continue;
+      }
+      toInsert.push(entry);
     }
 
     const chunkSize = 500;
-    for (let i = 0; i < validRows.length; i += chunkSize) {
-      const chunk = validRows.slice(i, i + chunkSize);
-      const contactIds = chunk.map((row) => row.contact_id);
-      const documentosChunk = chunk.map((row) => row.documento);
-      const motivos = chunk.map((row) => row.motivo_baja);
-      const estadosRaw = chunk.map((row) => row.ultimo_estado_raw);
-      const estadosNorm = chunk.map((row) => row.ultimo_estado_norm);
-
+    let insertedRows = 0;
+    for (let i = 0; i < toInsert.length; i += chunkSize) {
+      const chunk = toInsert.slice(i, i + chunkSize);
       await client.query(
-        `
-        WITH src AS (
-          SELECT * FROM UNNEST(
-            $1::uuid[],
-            $2::text[],
-            $3::text[],
-            $4::text[],
-            $5::text[],
-            $6::text[]
-          ) AS t(contact_id, documento, motivo_baja, motivo_baja_raw, estado_raw, estado_norm)
-        )
-        UPDATE contact_products cp
-        SET motivo_baja = src.motivo_baja,
-            updated_at = now()
-        FROM src
-        WHERE cp.contact_id = src.contact_id
-          AND cp.estado = 'baja'
-        `,
-        [contactIds, documentosChunk, motivos, chunk.map((row) => row.motivo_baja_raw), estadosRaw, estadosNorm]
-      );
-
-      await client.query(
-        `
-        WITH src AS (
-          SELECT * FROM UNNEST(
-            $1::uuid[],
-            $2::text[],
-            $3::text[],
-            $4::text[],
-            $5::text[],
-            $6::text[]
-          ) AS t(contact_id, documento, motivo_baja, motivo_baja_raw, estado_raw, estado_norm)
-        )
-        INSERT INTO external_management_status (
-          contact_id,
-          documento,
-          estado_raw,
-          estado_normalizado,
-          motivo_baja,
-          fuente,
-          updated_at
+        `INSERT INTO recupero_candidatos (
+          organization_id, nombre, apellido, documento, telefono, celular,
+          vendedor_origen, medio_pago, motivo_baja, motivo_baja_detalle,
+          fecha_baja, observacion, fecha_nacimiento, departamento, direccion,
+          producto_anterior, precio_anterior, fecha_venta,
+          estado, importado_por, importado_at
         )
         SELECT
-          contact_id,
-          documento,
-          estado_raw,
-          estado_norm,
-          motivo_baja_raw,
-          'csv',
-          now()
-        FROM src
-        ON CONFLICT (documento) DO UPDATE
-        SET
-          contact_id = EXCLUDED.contact_id,
-          estado_raw = EXCLUDED.estado_raw,
-          estado_normalizado = EXCLUDED.estado_normalizado,
-          motivo_baja = EXCLUDED.motivo_baja,
-          fuente = 'csv',
-          updated_at = now()
-        `,
-        [contactIds, documentosChunk, motivos, chunk.map((row) => row.motivo_baja_raw), estadosRaw, estadosNorm]
+          $1, t.nombre, t.apellido, t.documento, t.telefono, t.celular,
+          t.vendedor_origen, t.medio_pago, t.motivo_baja, t.motivo_baja_detalle,
+          t.fecha_baja::date, t.observacion, t.fecha_nacimiento::date,
+          t.departamento, t.direccion, t.producto_anterior, t.precio_anterior::numeric,
+          t.fecha_venta::date, 'disponible', $2, now()
+        FROM UNNEST(
+          $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[],
+          $9::text[], $10::text[], $11::text[], $12::text[],
+          $13::text[], $14::text[], $15::text[], $16::text[], $17::text[],
+          $18::text[], $19::text[], $20::text[]
+        ) AS t(
+          nombre, apellido, documento, telefono, celular,
+          vendedor_origen, medio_pago, motivo_baja, motivo_baja_detalle,
+          fecha_baja, observacion, fecha_nacimiento,
+          departamento, direccion, producto_anterior, precio_anterior,
+          fecha_venta, _dummy
+        )
+        ON CONFLICT (organization_id, documento)
+        WHERE documento IS NOT NULL AND estado != 'recuperado'
+        DO NOTHING`,
+        [
+          organizationId,
+          createdBy,
+          chunk.map((r) => r.nombre),
+          chunk.map((r) => r.apellido),
+          chunk.map((r) => r.documento),
+          chunk.map((r) => r.telefono),
+          chunk.map((r) => r.celular),
+          chunk.map((r) => r.vendedor_origen),
+          chunk.map((r) => r.medio_pago),
+          chunk.map((r) => r.motivo_baja),
+          chunk.map((r) => r.motivo_baja_detalle),
+          chunk.map((r) => r.fecha_baja),
+          chunk.map((r) => r.observacion),
+          chunk.map((r) => r.fecha_nacimiento),
+          chunk.map((r) => r.departamento),
+          chunk.map((r) => r.direccion),
+          chunk.map((r) => r.producto_anterior),
+          chunk.map((r) => r.precio_anterior?.toString()),
+          chunk.map((r) => r.fecha_venta),
+          chunk.map(() => null)
+        ]
       );
-
-      // Nota: el flujo recupero usa contacts, no datos_para_trabajar.
-      // El estado importado queda en external_management_status.
+      insertedRows += chunk.length;
     }
 
     await client.query(
-      `
-      UPDATE recupero_import_jobs
-      SET status = 'done',
-          total_rows = $1,
-          processed_rows = $2,
-          updated_rows = $3,
-          error_rows = $4,
-          duplicate_rows = $5,
-          invalid_rows = $6,
-          not_found_rows = $7,
-          error_rows_detail = $8,
-          error_report_csv = $9,
-          finished_at = now(),
-          updated_at = now()
-      WHERE id = $10
-      `,
+      `UPDATE recupero_import_jobs
+       SET status = 'done', total_rows = $1, processed_rows = $1,
+           updated_rows = $2, error_rows = $3, duplicate_rows = $4,
+           invalid_rows = $5, not_found_rows = $6,
+           error_rows_detail = $7, error_report_csv = $8,
+           finished_at = now(), updated_at = now()
+       WHERE id = $9`,
       [
         totalRows,
-        totalRows,
-        validRows.length,
+        insertedRows,
         errors.length,
         duplicateRows,
         invalidRows,
-        notFoundRows,
+        activosRows,
         errors.length ? JSON.stringify(errors.slice(0, 200)) : null,
         errors.length ? buildRecuperoErrorCsv(errors) : null,
         jobId
@@ -4701,14 +4671,9 @@ export async function processRecuperoImportJob(jobId) {
     );
   } catch (error) {
     await client.query(
-      `
-      UPDATE recupero_import_jobs
-      SET status = 'failed',
-          error_message = $1,
-          finished_at = now(),
-          updated_at = now()
-      WHERE id = $2
-      `,
+      `UPDATE recupero_import_jobs SET status = 'failed',
+       error_message = $1, finished_at = now(), updated_at = now()
+       WHERE id = $2`,
       [error.message, jobId]
     );
     throw error;
@@ -22217,15 +22182,15 @@ async function getNewContactsDistribution(client, batchId) {
       const headers = parseCsvLine(headerLine, headerDelimiter).map((h) =>
         normalizeImportValue(h)
       );
-      const hasDocumento = headers.includes("documento");
-      const hasMotivo = headers.some(
-        (h) => h === "motivo de la baja" || h === "motivo de baja"
-      );
-      const hasEstado = headers.some(
-        (h) => h === "ultimo estado" || h === "Ãºltimo estado"
-      );
-      if (!hasDocumento || !hasMotivo || !hasEstado) {
-        return json(400, { ok: false, message: "Headers invalidos" });
+      const hasNombre = headers.some((h) => h === "nombres" || h === "nombre");
+      const hasApellido = headers.some((h) => h === "apellidos" || h === "apellido");
+      const hasIdentificador =
+        headers.includes("documento") || headers.some((h) => h === "telefono" || h === "celular");
+      if (!hasNombre || !hasApellido || !hasIdentificador) {
+        return json(400, {
+          ok: false,
+          message: "El CSV debe tener columnas: Nombres, Apellidos y al menos Documento o Telefono"
+        });
       }
 
       const fileHash = crypto.createHash("sha256").update(csvText).digest("hex");
