@@ -1086,38 +1086,12 @@ async function fetchRecuperoContactos({
 
   const total = countRes.rows[0]?.total || 0;
 
-  const baseConditions = [`rc.organization_id = $1`];
-  const baseValues = [organizationId];
-  if (sellerId) {
-    baseConditions.push(`rc.seller_id = $2::uuid`);
-    baseValues.push(sellerId);
-  }
-  const baseWhere = baseConditions.join(' AND ');
-
-  const tabCountsRes = await client.query(
-    `SELECT
-      COUNT(*) FILTER (WHERE rc.estado = 'disponible')::int AS disponibles,
-      COUNT(*) FILTER (WHERE rc.estado = 'en_gestion')::int AS en_gestion,
-      COUNT(*) FILTER (WHERE rc.estado = 'recuperado')::int AS recuperados,
-      COUNT(*) FILTER (WHERE rc.estado = 'rechazado')::int AS rechazados,
-      COUNT(*) FILTER (WHERE rc.motivo_baja = 'fallecimiento')::int AS fallecidos
-     FROM recupero_candidatos rc
-     WHERE ${baseWhere}`,
-    baseValues
-  );
-
-  const tabCounts = tabCountsRes.rows[0] || {};
-
   return {
-    items: itemsRes.rows,
-    total,
-    tab_counts: {
-      disponibles: tabCounts.disponibles || 0,
-      en_gestion: tabCounts.en_gestion || 0,
-      recuperados: tabCounts.recuperados || 0,
-      rechazados: tabCounts.rechazados || 0,
-      fallecidos: tabCounts.fallecidos || 0
-    }
+    data: {
+      items: itemsRes.rows,
+      total
+    },
+    emptyCondition: false
   };
 }
 
