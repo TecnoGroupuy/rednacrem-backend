@@ -21557,7 +21557,7 @@ async function getNewContactsDistribution(client, batchId) {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
-      const multipart = parseMultipartFormData(event);
+      const multipart = parseMultipartFormData(event, { encoding: "latin1" });
       if (!multipart) {
         return json(400, { ok: false, message: "Archivo invalido" });
       }
