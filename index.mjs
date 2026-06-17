@@ -3916,8 +3916,13 @@ export async function processRecuperoImportJob(jobId) {
       const apellido = get(idxApellido);
       const documentoRaw = get(idxDocumento);
       const documento = normalizeDocumento(documentoRaw);
-      const telefono = get(idxTelefono).replace(/\D/g, "");
-      const celular = get(idxCelular).replace(/\D/g, "");
+      const normalizarCelularUy = (value) => {
+        const digits = String(value || "").replace(/\D/g, "");
+        if (/^9\d{7}$/.test(digits)) return `0${digits}`;
+        return digits;
+      };
+      const telefono = normalizarCelularUy(get(idxTelefono));
+      const celular = normalizarCelularUy(get(idxCelular));
       const vendedor = get(idxVendedor);
       const medioPago = get(idxMedioPago);
       const estadoRaw = get(idxEstado);
