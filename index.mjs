@@ -14871,6 +14871,115 @@ export const handler = async (event) => {
       return json(500, { ok: false, message: "Failed to register recupero management", error: error.message });
     }
   }
+  if (method === "GET" && path.endsWith("/api/recupero/daily-stats")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const fechaRaw = getQueryParam(event, "fecha");
+      const fecha = fechaRaw || new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
+      const sellerId = dbUser.id;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const lotesResult = await client.query(
+          `
+          SELECT
+            COUNT(*) AS total_asignados,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'nuevo') AS nuevos
+          FROM recupero_candidatos rc
+          WHERE rc.seller_id = $1
+            AND rc.organization_id = $2
+            AND rc.estado_administrativo = 'activo'
+          `,
+          [sellerId, organizationId]
+        );
+
+        const statsResult = await client.query(
+          `
+          SELECT
+            COUNT(*) FILTER (WHERE estado_nuevo <> 'dato_erroneo')::int AS tocados,
+            COUNT(*) FILTER (WHERE estado_nuevo = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE estado_nuevo = 'rellamar')::int AS rellamar,
+            COUNT(*) FILTER (WHERE estado_nuevo = 'seguimiento')::int AS seguimiento,
+            COUNT(*) FILTER (WHERE estado_nuevo = 'rechazo')::int AS rechazos,
+            COUNT(*) FILTER (WHERE estado_nuevo = 'venta')::int AS ventas,
+            COUNT(*) FILTER (WHERE estado_nuevo = 'dato_erroneo')::int AS dato_erroneo,
+            ROUND(
+              100.0
+              * COUNT(*) FILTER (WHERE estado_nuevo = 'venta')
+              / NULLIF(COUNT(*) FILTER (WHERE estado_nuevo <> 'dato_erroneo'), 0),
+              1
+            ) AS efectividad_pct
+          FROM (
+            SELECT DISTINCT ON (rch.candidato_id)
+              rch.candidato_id,
+              rch.estado_nuevo
+            FROM recupero_candidatos_historial rch
+            JOIN recupero_candidatos rc ON rc.id = rch.candidato_id
+            WHERE rch.seller_id = $1
+              AND rc.organization_id = $2
+              AND (rch.created_at AT TIME ZONE 'America/Montevideo')::date = $3::date
+            ORDER BY rch.candidato_id, rch.created_at DESC
+          ) last_gestiones
+          `,
+          [sellerId, organizationId, fecha]
+        );
+
+        const lotes = lotesResult.rows[0] || {};
+        const stats = statsResult.rows[0] || {};
+        const totalAsignados = Number(lotes.total_asignados || 0);
+        const tocados = Number(stats.tocados || 0);
+        const pctContacto = totalAsignados ? Math.round((tocados / totalAsignados) * 1000) / 10 : 0;
+
+        return json(200, {
+          ok: true,
+          success: true,
+          data: {
+            total_asignados: totalAsignados,
+            nuevos: Number(lotes.nuevos || 0),
+            no_contesta: Number(stats.no_contesta || 0),
+            seguimiento: Number(stats.seguimiento || 0),
+            rechazos: Number(stats.rechazos || 0),
+            ventas: Number(stats.ventas || 0),
+            rellamar: Number(stats.rellamar || 0),
+            gestiones_hoy: tocados,
+            ventas_hoy: Number(stats.ventas || 0),
+            no_contesta_hoy: Number(stats.no_contesta || 0),
+            tipificados_seguimiento_hoy: Number(stats.seguimiento || 0),
+            rechazos_hoy: Number(stats.rechazos || 0),
+            rellamar_hoy: Number(stats.rellamar || 0),
+            pct_contacto_hoy: pctContacto,
+            pct_efectividad_hoy: Number(stats.efectividad_pct || 0)
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recupero daily stats", error: error.message });
+    }
+  }
   if (method === "GET" && path.endsWith("/api/recupero/mis-candidatos")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
