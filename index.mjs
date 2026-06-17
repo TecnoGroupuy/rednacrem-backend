@@ -14906,11 +14906,13 @@ export const handler = async (event) => {
       const limit = Math.min(100, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const offset = (page - 1) * limit;
 
-      let estadoFilter = "rc.estado = 'en_gestion'";
-      if (tab === "recuperados") estadoFilter = "rc.estado = 'recuperado'";
-      else if (tab === "rechazados") estadoFilter = "rc.estado = 'rechazado'";
-      else if (tab === "fallecidos") estadoFilter = "rc.motivo_baja = 'fallecimiento'";
-      else if (tab === "todos") estadoFilter = "rc.estado IN ('en_gestion','recuperado','rechazado')";
+      let estadoFilter = "rc.resultado_gestion = 'nuevo'";
+      if (tab === "no_contesta") estadoFilter = "rc.resultado_gestion = 'no_contesta'";
+      else if (tab === "rellamar") estadoFilter = "rc.resultado_gestion = 'rellamar'";
+      else if (tab === "seguimiento") estadoFilter = "rc.resultado_gestion = 'seguimiento'";
+      else if (tab === "recuperados") estadoFilter = "rc.resultado_gestion = 'venta'";
+      else if (tab === "rechazados") estadoFilter = "rc.resultado_gestion = 'rechazo'";
+      else if (tab === "todos") estadoFilter = "rc.resultado_gestion IN ('nuevo','no_contesta','rellamar','seguimiento','venta','rechazo','dato_erroneo')";
 
       const client = createDbClient();
       await client.connect();
@@ -14937,6 +14939,8 @@ export const handler = async (event) => {
             rc.motivo_baja_detalle,
             rc.observacion,
             rc.estado,
+            rc.estado_administrativo,
+            rc.resultado_gestion,
             rc.seller_id,
             rc.fecha_asignacion,
             rc.fecha_ultimo_contacto,
@@ -14945,8 +14949,9 @@ export const handler = async (event) => {
           FROM recupero_candidatos rc
           WHERE rc.organization_id = $1
             AND rc.seller_id = $2
+            AND rc.estado_administrativo = 'activo'
             AND ${estadoFilter}
-          ORDER BY rc.fecha_asignacion DESC NULLS LAST
+          ORDER BY rc.fecha_baja ASC NULLS LAST
           LIMIT $3 OFFSET $4
           `,
           [organizationId, dbUser.id, limit, offset]
@@ -14966,13 +14971,16 @@ export const handler = async (event) => {
         const tabCountsRes = await client.query(
           `
           SELECT
-            COUNT(*) FILTER (WHERE rc.estado = 'en_gestion')::int AS en_gestion,
-            COUNT(*) FILTER (WHERE rc.estado = 'recuperado')::int AS recuperados,
-            COUNT(*) FILTER (WHERE rc.estado = 'rechazado')::int AS rechazados,
-            COUNT(*) FILTER (WHERE rc.motivo_baja = 'fallecimiento')::int AS fallecidos
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'nuevo')::int AS nuevos,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rellamar')::int AS rellamar,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'seguimiento')::int AS seguimiento,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recuperados,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rechazados
           FROM recupero_candidatos rc
           WHERE rc.organization_id = $1
             AND rc.seller_id = $2
+            AND rc.estado_administrativo = 'activo'
           `,
           [organizationId, dbUser.id]
         );
@@ -14994,8 +15002,9 @@ export const handler = async (event) => {
           motivo_normalizado: row.motivo_normalizado,
           motivo_baja_detalle: row.motivo_baja_detalle,
           observacion: row.observacion,
-          status: row.estado,
-          estado_venta: row.estado,
+          status: row.resultado_gestion,
+          estado_venta: row.resultado_gestion,
+          estado_administrativo: row.estado_administrativo,
           seller_id: row.seller_id,
           fecha_asignacion: row.fecha_asignacion,
           fecha_ultimo_contacto: row.fecha_ultimo_contacto,
@@ -15008,10 +15017,12 @@ export const handler = async (event) => {
           items,
           total: countRes.rows[0]?.total || 0,
           tab_counts: {
-            en_gestion: tabCountsRes.rows[0]?.en_gestion || 0,
+            nuevos: tabCountsRes.rows[0]?.nuevos || 0,
+            no_contesta: tabCountsRes.rows[0]?.no_contesta || 0,
+            rellamar: tabCountsRes.rows[0]?.rellamar || 0,
+            seguimiento: tabCountsRes.rows[0]?.seguimiento || 0,
             recuperados: tabCountsRes.rows[0]?.recuperados || 0,
-            rechazados: tabCountsRes.rows[0]?.rechazados || 0,
-            fallecidos: tabCountsRes.rows[0]?.fallecidos || 0
+            rechazados: tabCountsRes.rows[0]?.rechazados || 0
           }
         });
       } finally {
