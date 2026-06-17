@@ -14005,62 +14005,24 @@ export const handler = async (event) => {
         const client = createDbClient();
         await client.connect();
         try {
-          const [gestionRes, recuperadosRes, rechazadosRes, fallecidosRes] = await Promise.all([
-            client.query(
-              `
-              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
-              FROM lead_contact_status lcs
-              JOIN lead_batches lb ON lb.id = lcs.batch_id
-              WHERE lb.tipo = 'recupero'
-                AND lb.estado IN ('activo', 'asignado')
-                AND lcs.estado_venta IN ('nuevo', 'no_contesta', 'rellamar', 'seguimiento')
-                AND lb.organization_id = $1
-              `,
-              [organizationId]
-            ),
-            client.query(
-              `
-              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
-              FROM lead_contact_status lcs
-              JOIN lead_batches lb ON lb.id = lcs.batch_id
-              WHERE lb.tipo = 'recupero'
-                AND lcs.estado_venta = 'venta'
-                AND lb.organization_id = $1
-              `,
-              [organizationId]
-            ),
-            client.query(
-              `
-              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
-              FROM lead_contact_status lcs
-              JOIN lead_batches lb ON lb.id = lcs.batch_id
-              WHERE lb.tipo = 'recupero'
-                AND lcs.estado_venta = 'rechazo'
-                AND lb.organization_id = $1
-              `,
-              [organizationId]
-            ),
-            client.query(
-              `
-              SELECT COUNT(DISTINCT
-                COALESCE(NULLIF(c.documento,''), NULLIF(c.telefono,''), NULLIF(c.celular,''), c.id::text)
-              )::int AS total
-              FROM contacts c
-              JOIN contact_products cp ON cp.contact_id = c.id
-              WHERE cp.estado = 'baja'
-                AND UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
-                AND c.organization_id = $1
-              `,
-              [organizationId]
-            )
-          ]);
-          const metricsTotal = Number(result?.data?.metrics?.total ?? result?.data?.total ?? 0);
+          const tabCountsRes = await client.query(
+            `SELECT
+              COUNT(*) FILTER (WHERE rc.estado = 'disponible')::int AS disponibles,
+              COUNT(*) FILTER (WHERE rc.estado = 'en_gestion')::int  AS en_gestion,
+              COUNT(*) FILTER (WHERE rc.estado = 'recuperado')::int  AS recuperados,
+              COUNT(*) FILTER (WHERE rc.estado = 'rechazado')::int   AS rechazados,
+              COUNT(*) FILTER (WHERE rc.motivo_baja = 'fallecimiento')::int AS fallecidos
+             FROM recupero_candidatos rc
+             WHERE rc.organization_id = $1`,
+            [organizationId]
+          );
+          const tc = tabCountsRes.rows[0] || {};
           tabCounts = {
-            disponibles: metricsTotal,
-            en_gestion: Number(gestionRes.rows[0]?.total || 0),
-            recuperados: Number(recuperadosRes.rows[0]?.total || 0),
-            rechazados: Number(rechazadosRes.rows[0]?.total || 0),
-            fallecidos: Number(fallecidosRes.rows[0]?.total || 0)
+            disponibles: Number(tc.disponibles || 0),
+            en_gestion: Number(tc.en_gestion || 0),
+            recuperados: Number(tc.recuperados || 0),
+            rechazados: Number(tc.rechazados || 0),
+            fallecidos: Number(tc.fallecidos || 0)
           };
         } finally {
           await client.end();
