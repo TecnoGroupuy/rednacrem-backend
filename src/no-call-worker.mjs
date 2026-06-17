@@ -1,4 +1,4 @@
-import { processNoCallJob, processDatosTrabajarJob } from "../index.mjs";
+import { processNoCallJob, processDatosTrabajarJob, processRecuperoImportJob } from "../index.mjs";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
@@ -36,6 +36,8 @@ export const handler = async (event) => {
         requeue: async (nextIndex) =>
           requeue(jobId, nextIndex, "datos_para_trabajar")
       });
+    } else if (type === "recupero_import") {
+      await processRecuperoImportJob(jobId);
     } else {
       await processNoCallJob(jobId, {
         startAt,
