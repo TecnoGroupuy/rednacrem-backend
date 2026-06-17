@@ -14439,6 +14439,160 @@ export const handler = async (event) => {
       });
     }
   }
+  if (method === "GET" && path.endsWith("/api/recupero/mis-candidatos")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["vendedor", "atencion_cliente"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const tabRaw = getQueryParam(event, "tab");
+      const tab = tabRaw ? String(tabRaw).trim().toLowerCase() : "en_gestion";
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(100, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const offset = (page - 1) * limit;
+
+      let estadoFilter = "rc.estado = 'en_gestion'";
+      if (tab === "recuperados") estadoFilter = "rc.estado = 'recuperado'";
+      else if (tab === "rechazados") estadoFilter = "rc.estado = 'rechazado'";
+      else if (tab === "fallecidos") estadoFilter = "rc.motivo_baja = 'fallecimiento'";
+      else if (tab === "todos") estadoFilter = "rc.estado IN ('en_gestion','recuperado','rechazado')";
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const itemsRes = await client.query(
+          `
+          SELECT
+            rc.id,
+            rc.nombre,
+            rc.apellido,
+            rc.documento,
+            rc.telefono,
+            rc.celular,
+            rc.fecha_nacimiento,
+            rc.departamento,
+            rc.direccion,
+            rc.producto_anterior AS nombre_producto,
+            rc.precio_anterior AS precio,
+            rc.fecha_venta,
+            rc.medio_pago,
+            rc.vendedor_origen,
+            rc.fecha_baja,
+            rc.motivo_baja AS motivo_normalizado,
+            rc.motivo_baja_detalle,
+            rc.observacion,
+            rc.estado,
+            rc.seller_id,
+            rc.fecha_asignacion,
+            rc.fecha_ultimo_contacto,
+            rc.intentos_contacto,
+            rc.contact_id
+          FROM recupero_candidatos rc
+          WHERE rc.organization_id = $1
+            AND rc.seller_id = $2
+            AND ${estadoFilter}
+          ORDER BY rc.fecha_asignacion DESC NULLS LAST
+          LIMIT $3 OFFSET $4
+          `,
+          [organizationId, dbUser.id, limit, offset]
+        );
+
+        const countRes = await client.query(
+          `
+          SELECT COUNT(*)::int AS total
+          FROM recupero_candidatos rc
+          WHERE rc.organization_id = $1
+            AND rc.seller_id = $2
+            AND ${estadoFilter}
+          `,
+          [organizationId, dbUser.id]
+        );
+
+        const tabCountsRes = await client.query(
+          `
+          SELECT
+            COUNT(*) FILTER (WHERE rc.estado = 'en_gestion')::int AS en_gestion,
+            COUNT(*) FILTER (WHERE rc.estado = 'recuperado')::int AS recuperados,
+            COUNT(*) FILTER (WHERE rc.estado = 'rechazado')::int AS rechazados,
+            COUNT(*) FILTER (WHERE rc.motivo_baja = 'fallecimiento')::int AS fallecidos
+          FROM recupero_candidatos rc
+          WHERE rc.organization_id = $1
+            AND rc.seller_id = $2
+          `,
+          [organizationId, dbUser.id]
+        );
+
+        const items = itemsRes.rows.map((row) => ({
+          id: row.id,
+          nombre: row.nombre,
+          apellido: row.apellido,
+          name: [row.nombre, row.apellido].filter(Boolean).join(" "),
+          documento: row.documento,
+          telefono: row.telefono,
+          celular: row.celular,
+          fecha_nacimiento: row.fecha_nacimiento,
+          departamento: row.departamento,
+          direccion: row.direccion,
+          nombre_producto: row.nombre_producto,
+          precio: row.precio,
+          fecha_baja: row.fecha_baja,
+          motivo_normalizado: row.motivo_normalizado,
+          motivo_baja_detalle: row.motivo_baja_detalle,
+          observacion: row.observacion,
+          status: row.estado,
+          estado_venta: row.estado,
+          seller_id: row.seller_id,
+          fecha_asignacion: row.fecha_asignacion,
+          fecha_ultimo_contacto: row.fecha_ultimo_contacto,
+          intentos_contacto: row.intentos_contacto,
+          contact_id: row.contact_id
+        }));
+
+        return json(200, {
+          ok: true,
+          items,
+          total: countRes.rows[0]?.total || 0,
+          tab_counts: {
+            en_gestion: tabCountsRes.rows[0]?.en_gestion || 0,
+            recuperados: tabCountsRes.rows[0]?.recuperados || 0,
+            rechazados: tabCountsRes.rows[0]?.rechazados || 0,
+            fallecidos: tabCountsRes.rows[0]?.fallecidos || 0
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load mis-candidatos",
+        error: error.message
+      });
+    }
+  }
   if (method === "GET" && path.endsWith("/api/recupero/filtros")) {
     const requestId = getRequestId(event);
     try {
