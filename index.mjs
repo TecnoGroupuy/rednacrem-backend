@@ -15047,6 +15047,9 @@ export const handler = async (event) => {
       else if (tab === "recuperados") estadoFilter = "rc.resultado_gestion = 'venta'";
       else if (tab === "rechazados") estadoFilter = "rc.resultado_gestion = 'rechazo'";
       else if (tab === "todos") estadoFilter = "rc.resultado_gestion IN ('nuevo','no_contesta','rellamar','seguimiento','venta','rechazo','dato_erroneo')";
+      if (searchRaw) {
+        estadoFilter = "rc.resultado_gestion IN ('nuevo','no_contesta','rellamar','seguimiento','venta','rechazo','dato_erroneo')";
+      }
 
       const client = createDbClient();
       await client.connect();
