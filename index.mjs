@@ -14277,8 +14277,8 @@ export const handler = async (event) => {
           await client.query(
             `
             INSERT INTO recupero_candidatos_historial
-              (candidato_id, estado_anterior, estado_nuevo, seller_id, nota, created_at)
-            SELECT id, 'disponible', 'en_gestion', $1, $2, NOW()
+              (candidato_id, estado_anterior, estado_nuevo, tipo_evento, seller_id, nota, created_at)
+            SELECT id, 'disponible', 'en_gestion', 'asignacion', $1, $2, NOW()
             FROM recupero_candidatos
             WHERE id = ANY($3::uuid[])
             `,
