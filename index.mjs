@@ -14940,6 +14940,7 @@ export const handler = async (event) => {
             WHERE rch.seller_id = $1
               AND rc.organization_id = $2
               AND (rch.created_at AT TIME ZONE 'America/Montevideo')::date = $3::date
+              AND rch.tipo_evento = 'gestion'
             ORDER BY rch.candidato_id, rch.created_at DESC
           ) last_gestiones
           `,
