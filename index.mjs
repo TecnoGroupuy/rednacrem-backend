@@ -18406,10 +18406,59 @@ export const handler = async (event) => {
           values
         );
 
+        const itemsCaptacion = res.rows.map((row) => ({ ...row, origen: "captacion" }));
+
+        let itemsRecupero = [];
+        try {
+          const recuperoRes = await client.query(
+            `
+            SELECT
+              ra.id,
+              ra.candidato_id AS contact_id,
+              ra.seller_id,
+              NULL::uuid AS batch_id,
+              ra.fecha_agenda,
+              ra.nota,
+              ra.cumplida,
+              rc.nombre,
+              rc.apellido,
+              rc.telefono,
+              rc.celular,
+              rc.documento,
+              rc.fecha_nacimiento,
+              DATE_PART('year', AGE(rc.fecha_nacimiento))::int AS edad,
+              rc.departamento,
+              NULL AS localidad,
+              NULL AS correo_electronico,
+              NULL AS origen_dato,
+              rc.fecha_baja AS fecha_ingreso,
+              rc.intentos,
+              rc.resultado_gestion AS estado_venta,
+              NULL AS reasignado_desde,
+              rc.fecha_ultimo_contacto AS ultima_fecha_gestion,
+              rc.resultado_gestion AS tipo_agenda,
+              NULL AS historial
+            FROM recupero_agenda ra
+            JOIN recupero_candidatos rc ON rc.id = ra.candidato_id
+            WHERE ra.seller_id = $1
+              ${incluirCumplidas ? "" : "AND ra.cumplida = false"}
+            ORDER BY ra.fecha_agenda DESC
+            `,
+            [sellerId]
+          );
+          itemsRecupero = recuperoRes.rows.map((row) => ({ ...row, origen: "recupero" }));
+        } catch (recuperoErr) {
+          console.error("[agenda] error loading recupero items:", recuperoErr.message);
+        }
+
+        const allItems = [...itemsCaptacion, ...itemsRecupero].sort(
+          (a, b) => new Date(a.fecha_agenda) - new Date(b.fecha_agenda)
+        );
+
         return json(200, {
           ok: true,
           success: true,
-          data: { items: res.rows },
+          data: { items: allItems },
           error: null
         });
       } finally {
