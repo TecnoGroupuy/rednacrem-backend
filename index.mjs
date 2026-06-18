@@ -18329,6 +18329,18 @@ export const handler = async (event) => {
           "lead_management_history",
           "es_correccion_supervisor"
         );
+        const formatFechaAgendaMontevideo = (value) => {
+          if (!value) return null;
+          const date = value instanceof Date ? value : new Date(value);
+          if (Number.isNaN(date.getTime())) return null;
+          const pad = (n) => String(n).padStart(2, "0");
+          const y = date.getUTCFullYear();
+          const m = pad(date.getUTCMonth() + 1);
+          const d = pad(date.getUTCDate());
+          const h = pad(date.getUTCHours());
+          const min = pad(date.getUTCMinutes());
+          return `${y}-${m}-${d}T${h}:${min}:00-03:00`;
+        };
 
         const res = await client.query(
           `
@@ -18406,7 +18418,11 @@ export const handler = async (event) => {
           values
         );
 
-        const itemsCaptacion = res.rows.map((row) => ({ ...row, origen: "captacion" }));
+        const itemsCaptacion = res.rows.map((row) => ({
+          ...row,
+          fecha_agenda: formatFechaAgendaMontevideo(row.fecha_agenda),
+          origen: "captacion"
+        }));
 
         let itemsRecupero = [];
         try {
@@ -18446,7 +18462,11 @@ export const handler = async (event) => {
             `,
             [sellerId]
           );
-          itemsRecupero = recuperoRes.rows.map((row) => ({ ...row, origen: "recupero" }));
+          itemsRecupero = recuperoRes.rows.map((row) => ({
+            ...row,
+            fecha_agenda: formatFechaAgendaMontevideo(row.fecha_agenda),
+            origen: "recupero"
+          }));
         } catch (recuperoErr) {
           console.error("[agenda] error loading recupero items:", recuperoErr.message);
         }
