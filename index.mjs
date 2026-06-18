@@ -14720,7 +14720,7 @@ export const handler = async (event) => {
           `
           INSERT INTO recupero_candidatos_historial
             (candidato_id, estado_anterior, estado_nuevo, seller_id, nota, created_at)
-          VALUES ($1, 'en_gestion', 'recuperado', $2, $3, NOW())
+          VALUES ($1, 'en_gestion', 'venta', $2, $3, NOW())
           `,
           [candidatoId, dbUser?.id || candidato.seller_id, body?.nota || null]
         );
