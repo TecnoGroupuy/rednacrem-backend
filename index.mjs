@@ -14950,7 +14950,13 @@ export const handler = async (event) => {
         const stats = statsResult.rows[0] || {};
         const totalAsignados = Number(lotes.total_asignados || 0);
         const tocados = Number(stats.tocados || 0);
-        const pctContacto = totalAsignados ? Math.round((tocados / totalAsignados) * 1000) / 10 : 0;
+        const ventas = Number(stats.ventas || 0);
+        const rechazos = Number(stats.rechazos || 0);
+        const seguimiento = Number(stats.seguimiento || 0);
+        const datosUtiles = ventas + rechazos + seguimiento;
+
+        const pctContacto = tocados ? Math.round((datosUtiles / tocados) * 1000) / 10 : 0;
+        const pctEfectividad = datosUtiles ? Math.round((ventas / datosUtiles) * 1000) / 10 : 0;
 
         return json(200, {
           ok: true,
@@ -14959,18 +14965,18 @@ export const handler = async (event) => {
             total_asignados: totalAsignados,
             nuevos: Number(lotes.nuevos || 0),
             no_contesta: Number(stats.no_contesta || 0),
-            seguimiento: Number(stats.seguimiento || 0),
-            rechazos: Number(stats.rechazos || 0),
-            ventas: Number(stats.ventas || 0),
+            seguimiento,
+            rechazos,
+            ventas,
             rellamar: Number(stats.rellamar || 0),
             gestiones_hoy: tocados,
-            ventas_hoy: Number(stats.ventas || 0),
+            ventas_hoy: ventas,
             no_contesta_hoy: Number(stats.no_contesta || 0),
-            tipificados_seguimiento_hoy: Number(stats.seguimiento || 0),
-            rechazos_hoy: Number(stats.rechazos || 0),
+            tipificados_seguimiento_hoy: seguimiento,
+            rechazos_hoy: rechazos,
             rellamar_hoy: Number(stats.rellamar || 0),
             pct_contacto_hoy: pctContacto,
-            pct_efectividad_hoy: Number(stats.efectividad_pct || 0)
+            pct_efectividad_hoy: pctEfectividad
           }
         });
       } finally {
