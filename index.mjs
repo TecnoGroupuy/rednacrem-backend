@@ -18452,7 +18452,7 @@ export const handler = async (event) => {
         }
 
         const allItems = [...itemsCaptacion, ...itemsRecupero].sort(
-          (a, b) => new Date(a.fecha_agenda) - new Date(b.fecha_agenda)
+          (a, b) => new Date(b.fecha_agenda) - new Date(a.fecha_agenda)
         );
 
         return json(200, {
