@@ -1085,18 +1085,10 @@ async function fetchRecuperoContactos({
   );
 
   const total = countRes.rows[0]?.total || 0;
-  const items = itemsRes.rows.map((row) => {
-    const phones = normalizeContactPhones(row.telefono, row.celular);
-    return {
-      ...row,
-      telefono: phones.telefono,
-      celular: phones.celular
-    };
-  });
 
   return {
     data: {
-      items,
+      items: itemsRes.rows,
       total
     },
     emptyCondition: false
@@ -3924,9 +3916,13 @@ export async function processRecuperoImportJob(jobId) {
       const apellido = get(idxApellido);
       const documentoRaw = get(idxDocumento);
       const documento = normalizeDocumento(documentoRaw);
-      const phones = normalizeContactPhones(get(idxTelefono), get(idxCelular));
-      const telefono = phones.telefono || "";
-      const celular = phones.celular || "";
+      const normalizarCelularUy = (value) => {
+        const digits = String(value || "").replace(/\D/g, "");
+        if (/^9\d{7}$/.test(digits)) return `0${digits}`;
+        return digits;
+      };
+      const telefono = normalizarCelularUy(get(idxTelefono));
+      const celular = normalizarCelularUy(get(idxCelular));
       const vendedor = get(idxVendedor);
       const medioPago = get(idxMedioPago);
       const estadoRaw = get(idxEstado);
@@ -15142,16 +15138,14 @@ export const handler = async (event) => {
           [organizationId, dbUser.id]
         );
 
-        const items = itemsRes.rows.map((row) => {
-          const phones = normalizeContactPhones(row.telefono, row.celular);
-          return ({
+        const items = itemsRes.rows.map((row) => ({
           id: row.id,
           nombre: row.nombre,
           apellido: row.apellido,
           name: [row.nombre, row.apellido].filter(Boolean).join(" "),
           documento: row.documento,
-          telefono: phones.telefono,
-          celular: phones.celular,
+          telefono: row.telefono,
+          celular: row.celular,
           fecha_nacimiento: row.fecha_nacimiento,
           departamento: row.departamento,
           direccion: row.direccion,
@@ -15169,8 +15163,7 @@ export const handler = async (event) => {
           fecha_ultimo_contacto: row.fecha_ultimo_contacto,
           intentos_contacto: row.intentos_contacto,
           contact_id: row.contact_id
-          });
-        });
+        }));
 
         return json(200, {
           ok: true,
