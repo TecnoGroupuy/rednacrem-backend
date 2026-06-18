@@ -15021,6 +15021,24 @@ export const handler = async (event) => {
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const limit = Math.min(100, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const offset = (page - 1) * limit;
+      const searchRaw = normalizeText(getQueryParam(event, "search") || "");
+      const searchDigits = searchRaw.replace(/\D/g, "");
+
+      const buildSearchFilter = (raw, digits, startIndex) => {
+        if (!raw) return { clause: "", params: [] };
+        const p1 = startIndex;
+        const p2 = startIndex + 1;
+        return {
+          clause: `AND (
+            rc.nombre ILIKE $${p1}
+            OR rc.apellido ILIKE $${p1}
+            OR rc.documento ILIKE $${p1}
+            OR regexp_replace(coalesce(rc.telefono,''), '\\D', '', 'g') LIKE $${p2}
+            OR regexp_replace(coalesce(rc.celular,''), '\\D', '', 'g') LIKE $${p2}
+          )`,
+          params: [`%${raw}%`, `%${digits}%`]
+        };
+      };
 
       let estadoFilter = "rc.resultado_gestion = 'nuevo'";
       if (tab === "no_contesta") estadoFilter = "rc.resultado_gestion = 'no_contesta'";
@@ -15033,6 +15051,7 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const itemsSearch = buildSearchFilter(searchRaw, searchDigits, 5);
         const itemsRes = await client.query(
           `
           SELECT
@@ -15067,21 +15086,25 @@ export const handler = async (event) => {
             AND rc.seller_id = $2
             AND rc.estado_administrativo = 'activo'
             AND ${estadoFilter}
+            ${itemsSearch.clause}
           ORDER BY rc.fecha_baja ASC NULLS LAST
           LIMIT $3 OFFSET $4
           `,
-          [organizationId, dbUser.id, limit, offset]
+          [organizationId, dbUser.id, limit, offset, ...itemsSearch.params]
         );
 
+        const countSearch = buildSearchFilter(searchRaw, searchDigits, 3);
         const countRes = await client.query(
           `
           SELECT COUNT(*)::int AS total
           FROM recupero_candidatos rc
           WHERE rc.organization_id = $1
             AND rc.seller_id = $2
+            AND rc.estado_administrativo = 'activo'
             AND ${estadoFilter}
+            ${countSearch.clause}
           `,
-          [organizationId, dbUser.id]
+          [organizationId, dbUser.id, ...countSearch.params]
         );
 
         const tabCountsRes = await client.query(
