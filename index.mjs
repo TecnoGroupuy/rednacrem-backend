@@ -15450,6 +15450,55 @@ export const handler = async (event) => {
       });
     }
   }
+  if (method === "GET" && path.endsWith("/api/recupero/motivos-baja")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const res = await client.query(
+          `
+          SELECT DISTINCT motivo_baja
+          FROM recupero_candidatos
+          WHERE organization_id = $1
+            AND motivo_baja IS NOT NULL
+          ORDER BY motivo_baja
+          `,
+          [organizationId]
+        );
+        return json(200, {
+          ok: true,
+          success: true,
+          data: res.rows.map((r) => r.motivo_baja)
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load motivos de baja", error: error.message });
+    }
+  }
   if (method === "GET" && path.endsWith("/leads/assigned")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
