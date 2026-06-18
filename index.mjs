@@ -14821,7 +14821,7 @@ export const handler = async (event) => {
           return json(403, { ok: false, message: "No tenés asignado este candidato" });
         }
 
-        const estadosFinalesPermanentes = ["dato_erroneo", "rechazo"];
+        const estadosFinalesPermanentes = ["dato_erroneo", "rechazo", "venta"];
         if (estadosFinalesPermanentes.includes(candidato.resultado_gestion)) {
           await client.query("ROLLBACK");
           return json(409, { ok: false, message: "El candidato ya está en estado final" });
