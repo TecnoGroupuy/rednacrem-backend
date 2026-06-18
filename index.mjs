@@ -14854,6 +14854,17 @@ export const handler = async (event) => {
         );
         const gestionId = historialRes.rows[0]?.id || null;
 
+        if ((resultadoInput === "seguimiento" || resultadoInput === "rellamar") && proximaAccion) {
+          await client.query(
+            `
+            INSERT INTO recupero_agenda
+              (candidato_id, seller_id, fecha_agenda, nota)
+            VALUES ($1, $2, $3, $4)
+            `,
+            [candidatoId, dbUser.id, proximaAccion, nota]
+          );
+        }
+
         await client.query("COMMIT");
         return json(200, {
           ok: true,
