@@ -1377,7 +1377,13 @@ function parseMultipartFormData(event, options = {}) {
     const filenameMatch = disposition.match(/filename=\"([^\"]*)\"/i);
     const value = body.replace(/\r\n$/, "");
     if (filenameMatch) {
-      files[name] = { filename: filenameMatch[1], content: value };
+      let fixedContent = value;
+      try {
+        fixedContent = Buffer.from(value, "latin1").toString("utf8");
+      } catch {
+        fixedContent = value;
+      }
+      files[name] = { filename: filenameMatch[1], content: fixedContent };
     } else {
       fields[name] = value;
     }
