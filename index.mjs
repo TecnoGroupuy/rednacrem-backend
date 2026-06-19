@@ -938,14 +938,20 @@ async function fetchRecuperoContactos({
   const tabKey = String(tab || '').trim().toLowerCase();
   if (tabKey === 'disponibles' || !tabKey) {
     conditions.push(`rc.estado = 'disponible'`);
-  } else if (tabKey === 'asignados') {
-    conditions.push(`rc.estado = 'en_gestion'`);
-  } else if (tabKey === 'recuperados') {
-    conditions.push(`rc.estado = 'recuperado'`);
+  } else if (tabKey === 'nuevo') {
+    conditions.push(`rc.estado <> 'disponible' AND rc.resultado_gestion = 'nuevo'`);
+  } else if (tabKey === 'no_contesta') {
+    conditions.push(`rc.resultado_gestion = 'no_contesta'`);
+  } else if (tabKey === 'rellamar') {
+    conditions.push(`rc.resultado_gestion = 'rellamar'`);
+  } else if (tabKey === 'seguimiento') {
+    conditions.push(`rc.resultado_gestion = 'seguimiento'`);
   } else if (tabKey === 'rechazados') {
-    conditions.push(`rc.estado = 'rechazado'`);
-  } else if (tabKey === 'fallecidos') {
-    conditions.push(`rc.motivo_baja = 'fallecimiento'`);
+    conditions.push(`rc.resultado_gestion = 'rechazo'`);
+  } else if (tabKey === 'dato_erroneo') {
+    conditions.push(`rc.resultado_gestion = 'dato_erroneo'`);
+  } else if (tabKey === 'recuperados') {
+    conditions.push(`rc.resultado_gestion = 'venta'`);
   }
 
   if (sellerId) {
@@ -13747,68 +13753,41 @@ export const handler = async (event) => {
 
         let tabCounts = {
           disponibles: 0,
-          en_gestion: 0,
-          recuperados: 0,
+          nuevo: 0,
+          no_contesta: 0,
+          rellamar: 0,
+          seguimiento: 0,
           rechazados: 0,
-          fallecidos: 0
+          dato_erroneo: 0,
+          recuperados: 0
         };
         if (organizationId) {
-          const [gestionRes, recuperadosRes, rechazadosRes, fallecidosRes] = await Promise.all([
-            client.query(
-              `
-              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
-              FROM lead_contact_status lcs
-              JOIN lead_batches lb ON lb.id = lcs.batch_id
-              WHERE lb.tipo = 'recupero'
-                AND lb.estado IN ('activo', 'asignado')
-                AND lcs.estado_venta IN ('nuevo', 'no_contesta', 'rellamar', 'seguimiento')
-                AND lb.organization_id = $1
-              `,
-              [organizationId]
-            ),
-            client.query(
-              `
-              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
-              FROM lead_contact_status lcs
-              JOIN lead_batches lb ON lb.id = lcs.batch_id
-              WHERE lb.tipo = 'recupero'
-                AND lcs.estado_venta = 'venta'
-                AND lb.organization_id = $1
-              `,
-              [organizationId]
-            ),
-            client.query(
-              `
-              SELECT COUNT(DISTINCT lcs.contact_id)::int AS total
-              FROM lead_contact_status lcs
-              JOIN lead_batches lb ON lb.id = lcs.batch_id
-              WHERE lb.tipo = 'recupero'
-                AND lcs.estado_venta = 'rechazo'
-                AND lb.organization_id = $1
-              `,
-              [organizationId]
-            ),
-            client.query(
-              `
-              SELECT COUNT(DISTINCT
-                COALESCE(NULLIF(c.documento,''), NULLIF(c.telefono,''), NULLIF(c.celular,''), c.id::text)
-              )::int AS total
-              FROM contacts c
-              JOIN contact_products cp ON cp.contact_id = c.id
-              WHERE cp.estado = 'baja'
-                AND UPPER(TRIM(cp.motivo_baja_detalle)) LIKE '%FALLECIMIENTO%'
-                AND c.organization_id = $1
-              `,
-              [organizationId]
-            )
-          ]);
-          const metricsTotal = Number(data?.metrics?.total ?? data?.total ?? 0);
+          const countsRes = await client.query(
+            `
+            SELECT
+              COUNT(*) FILTER (WHERE rc.estado = 'disponible')::int AS disponibles,
+              COUNT(*) FILTER (WHERE rc.estado <> 'disponible' AND rc.resultado_gestion = 'nuevo')::int AS nuevo,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'no_contesta')::int AS no_contesta,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rellamar')::int AS rellamar,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'seguimiento')::int AS seguimiento,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rechazados,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'dato_erroneo')::int AS dato_erroneo,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recuperados
+            FROM recupero_candidatos rc
+            WHERE rc.organization_id = $1
+            `,
+            [organizationId]
+          );
+          const row = countsRes.rows[0] || {};
           tabCounts = {
-            disponibles: metricsTotal,
-            en_gestion: Number(gestionRes.rows[0]?.total || 0),
-            recuperados: Number(recuperadosRes.rows[0]?.total || 0),
-            rechazados: Number(rechazadosRes.rows[0]?.total || 0),
-            fallecidos: Number(fallecidosRes.rows[0]?.total || 0)
+            disponibles: Number(row.disponibles || 0),
+            nuevo: Number(row.nuevo || 0),
+            no_contesta: Number(row.no_contesta || 0),
+            rellamar: Number(row.rellamar || 0),
+            seguimiento: Number(row.seguimiento || 0),
+            rechazados: Number(row.rechazados || 0),
+            dato_erroneo: Number(row.dato_erroneo || 0),
+            recuperados: Number(row.recuperados || 0)
           };
         }
         return safeResponse({
@@ -14003,24 +13982,30 @@ export const handler = async (event) => {
 
       responseSource = emptyPayload ? "base-list-fallback" : "recupero-search";
 
-      let tabCounts = {
-        disponibles: 0,
-        en_gestion: 0,
-        recuperados: 0,
-        rechazados: 0,
-        fallecidos: 0
-      };
-      if (organizationId) {
-        const client = createDbClient();
-        await client.connect();
-        try {
+        let tabCounts = {
+          disponibles: 0,
+          nuevo: 0,
+          no_contesta: 0,
+          rellamar: 0,
+          seguimiento: 0,
+          rechazados: 0,
+          dato_erroneo: 0,
+          recuperados: 0
+        };
+        if (organizationId) {
+          const client = createDbClient();
+          await client.connect();
+          try {
           const tabCountsRes = await client.query(
             `SELECT
               COUNT(*) FILTER (WHERE rc.estado = 'disponible')::int AS disponibles,
-              COUNT(*) FILTER (WHERE rc.estado = 'en_gestion')::int  AS en_gestion,
-              COUNT(*) FILTER (WHERE rc.estado = 'recuperado')::int  AS recuperados,
-              COUNT(*) FILTER (WHERE rc.estado = 'rechazado')::int   AS rechazados,
-              COUNT(*) FILTER (WHERE rc.motivo_baja = 'fallecimiento')::int AS fallecidos
+              COUNT(*) FILTER (WHERE rc.estado <> 'disponible' AND rc.resultado_gestion = 'nuevo')::int AS nuevo,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'no_contesta')::int AS no_contesta,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rellamar')::int AS rellamar,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'seguimiento')::int AS seguimiento,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rechazados,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'dato_erroneo')::int AS dato_erroneo,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recuperados
              FROM recupero_candidatos rc
              WHERE rc.organization_id = $1`,
             [organizationId]
@@ -14028,10 +14013,13 @@ export const handler = async (event) => {
           const tc = tabCountsRes.rows[0] || {};
           tabCounts = {
             disponibles: Number(tc.disponibles || 0),
-            en_gestion: Number(tc.en_gestion || 0),
+            nuevo: Number(tc.nuevo || 0),
+            no_contesta: Number(tc.no_contesta || 0),
+            rellamar: Number(tc.rellamar || 0),
+            seguimiento: Number(tc.seguimiento || 0),
+            dato_erroneo: Number(tc.dato_erroneo || 0),
             recuperados: Number(tc.recuperados || 0),
-            rechazados: Number(tc.rechazados || 0),
-            fallecidos: Number(tc.fallecidos || 0)
+            rechazados: Number(tc.rechazados || 0)
           };
         } finally {
           await client.end();
