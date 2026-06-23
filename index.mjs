@@ -189,7 +189,31 @@ const VALID_ROLES = [
   "vendedor"
 ];
 
-const BAJA_MOTIVOS = ["Auditoría", "Medio de pago", "Voluntaria", "Antel", "BPS", "Fallecido", "Administrativa", "Deuda"];
+// Motivos de baja para gestión de contactos/clientes (endpoint
+// /clients/baja-motivos). Distinto del vocabulario de
+// CONTACT_PRODUCT_BAJA_MOTIVOS, que es específico de contact_products y
+// está atado al CHECK constraint de esa tabla. NO mezclar ambos.
+const CLIENT_BAJA_MOTIVOS = ["Auditoría", "Medio de pago", "Voluntaria", "Antel", "BPS", "Fallecido", "Administrativa", "Deuda"];
+
+// Única fuente de verdad para motivos de baja de contact_products.
+// slug = valor exacto aceptado por el CHECK constraint contact_products_motivo_baja_check en Postgres.
+// label = texto legible para mostrar en el frontend.
+// Si se agrega un slug nuevo acá, también hay que agregarlo al CHECK constraint con un ALTER TABLE.
+const CONTACT_PRODUCT_BAJA_MOTIVOS = [
+  { slug: "voluntaria", label: "Voluntaria" },
+  { slug: "baja_bps", label: "Baja BPS" },
+  { slug: "sin_pago_bps", label: "Sin pago BPS" },
+  { slug: "baja_antel", label: "Baja Antel" },
+  { slug: "sin_liquidez", label: "Sin liquidez" },
+  { slug: "fallecimiento", label: "Fallecimiento" },
+  { slug: "falta_de_pago", label: "Falta de pago" },
+  { slug: "auditoria", label: "Auditoría" },
+  { slug: "error_activacion", label: "Error de activación" },
+  { slug: "administrativa", label: "Administrativa" },
+  { slug: "no_llamar", label: "No llamar" },
+  { slug: "otro_servicio", label: "Cuenta con otro servicio" }
+];
+const CONTACT_PRODUCT_BAJA_SLUGS = CONTACT_PRODUCT_BAJA_MOTIVOS.map((m) => m.slug);
 
 const INTERNAL_CONTACT_ACCESS_ROLES = [
   "superadministrador",
@@ -8938,7 +8962,7 @@ export const handler = async (event) => {
   });
 
   if (method === "GET" && path.endsWith("/clients/baja-motivos")) {
-    return json(200, { ok: true, motivos: BAJA_MOTIVOS });
+    return json(200, { ok: true, motivos: CLIENT_BAJA_MOTIVOS });
   }
 
   if (method === "GET" && path.endsWith("/connections")) {
@@ -13121,8 +13145,12 @@ export const handler = async (event) => {
       const observacion = normalizeText(body?.observacion) || null;
       const fechaBaja = body.fecha_baja ? body.fecha_baja : null;
 
-      if (!motivoBaja || !BAJA_MOTIVOS.includes(motivoBaja)) {
-        return json(400, { ok: false, message: "motivo_baja inválido" });
+      if (!motivoBaja || !CONTACT_PRODUCT_BAJA_SLUGS.includes(motivoBaja)) {
+        return json(400, {
+          ok: false,
+          message: "motivo_baja inválido",
+          motivos_validos: CONTACT_PRODUCT_BAJA_MOTIVOS
+        });
       }
 
       const client = createDbClient();
@@ -15502,6 +15530,18 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to load motivos de baja", error: error.message });
+    }
+  }
+  if (method === "GET" && path.endsWith("/api/contacts/products/baja-motivos")) {
+    try {
+      const { authUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      return json(200, { ok: true, data: CONTACT_PRODUCT_BAJA_MOTIVOS });
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load contact product baja motivos", error: error.message });
     }
   }
   if (method === "GET" && path.endsWith("/leads/assigned")) {
