@@ -14730,7 +14730,9 @@ export const handler = async (event) => {
           `
           UPDATE recupero_candidatos
           SET estado = 'recuperado',
+              resultado_gestion = 'venta',
               contact_id = $1,
+              proxima_accion = NULL,
               fecha_ultimo_contacto = NOW(),
               updated_at = NOW()
           WHERE id = $2
