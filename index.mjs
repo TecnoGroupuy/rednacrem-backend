@@ -11806,6 +11806,19 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const contactId = (contactDetailMatch || clientDetailMatch)[1];
       const contactPayload = body?.contact && typeof body.contact === "object"
         ? body.contact
@@ -11888,9 +11901,10 @@ export const handler = async (event) => {
           UPDATE contacts
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
+            AND organization_id = $${idx + 1}
           RETURNING *
           `,
-          [...values, contactId]
+          [...values, contactId, organizationId]
         );
 
         const updated = contactRes.rows[0];
@@ -11932,6 +11946,12 @@ export const handler = async (event) => {
           } else if (documento) {
             dWhere = `documento = $${dIdx}`;
             dValues.push(documento);
+            dIdx += 1;
+          }
+
+          if (dWhere) {
+            dWhere += ` AND organization_id = $${dIdx}`;
+            dValues.push(organizationId);
             dIdx += 1;
           }
 
