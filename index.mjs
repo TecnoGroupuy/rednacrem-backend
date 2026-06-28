@@ -17164,6 +17164,17 @@ export const handler = async (event) => {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) return json(error.status, { ok: false, message: error.message });
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -17172,8 +17183,8 @@ export const handler = async (event) => {
         const hasContactIdCol = dCols.has("contact_id");
 
         const leadRes = await client.query(
-          `SELECT * FROM datos_para_trabajar WHERE id = $1 LIMIT 1`,
-          [leadId]
+          `SELECT * FROM datos_para_trabajar WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [leadId, organizationId]
         );
         const existing = leadRes.rows[0];
         if (!existing) {
@@ -17214,8 +17225,9 @@ export const handler = async (event) => {
           UPDATE datos_para_trabajar
           SET ${updates.join(", ")}, updated_at = now()
           WHERE id = $${idx}
+            AND organization_id = $${idx + 1}
           `,
-          [...values, leadId]
+          [...values, leadId, organizationId]
         );
 
         // Sync celular (and other contact fields if provided) to contacts when possible
@@ -17232,6 +17244,12 @@ export const handler = async (event) => {
           } else if ((hasField("documento") ? normTextOrNull(body?.documento) : existing.documento)) {
             contactWhere = `documento = $${cIdx}`;
             contactValues.push(hasField("documento") ? normTextOrNull(body?.documento) : existing.documento);
+            cIdx += 1;
+          }
+
+          if (contactWhere) {
+            contactWhere += ` AND organization_id = $${cIdx}`;
+            contactValues.push(organizationId);
             cIdx += 1;
           }
 
@@ -17264,8 +17282,8 @@ export const handler = async (event) => {
         }
 
         const refreshed = await client.query(
-          `SELECT * FROM datos_para_trabajar WHERE id = $1 LIMIT 1`,
-          [leadId]
+          `SELECT * FROM datos_para_trabajar WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [leadId, organizationId]
         );
         const updatedLead = refreshed.rows[0] || existing;
 
