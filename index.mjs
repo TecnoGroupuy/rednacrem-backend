@@ -18853,10 +18853,11 @@ export const handler = async (event) => {
           SELECT estado_venta, ola_actual, COUNT(*)::int AS total
           FROM lead_contact_status
           WHERE batch_id = $1
+            AND organization_id = $2
           GROUP BY estado_venta, ola_actual
           ORDER BY ola_actual, estado_venta
           `,
-          [batchId]
+          [batchId, organizationId]
         );
 
         const sellerIncontactableRes = await client.query(
@@ -18870,9 +18871,10 @@ export const handler = async (event) => {
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE lcs.batch_id = $1
             AND lcs.estado_venta = 'incontactable'
+            AND lcs.organization_id = $2
           GROUP BY lcs.assigned_to, u.nombre, u.apellido
           `,
-          [batchId]
+          [batchId, organizationId]
         );
 
         const totalValues = [batchId];
@@ -18893,8 +18895,9 @@ export const handler = async (event) => {
           SELECT COUNT(DISTINCT contact_id)::int AS total
           FROM lead_contact_status
           WHERE batch_id = $1
+            AND organization_id = $2
           `,
-          [batchId]
+          [batchId, organizationId]
         );
 
         const contactadosRes = await client.query(
