@@ -16550,7 +16550,16 @@ export const handler = async (event) => {
         let organizationId = null;
         try {
           organizationId = await resolveOrganizationIdForRequest(dbUser, event);
-        } catch {}
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+        if (!organizationId) {
+          await client.query("ROLLBACK");
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
 
         const evalRes = await evaluarEstadoLead(
           client,
@@ -16576,8 +16585,8 @@ export const handler = async (event) => {
         const resolveBatchId = async () => {
           if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
-              [principalContactId]
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 AND organization_id = $2 LIMIT 1`,
+              [principalContactId, organizationId]
             );
             const principalLeadId = leadRes.rows[0]?.lead_id || null;
             if (principalLeadId) {
@@ -16600,8 +16609,9 @@ export const handler = async (event) => {
             `SELECT id FROM lead_batches
              WHERE estado IN ('activo','asignado')
                AND (seller_id = $1 OR asignado_a = $1)
+               AND organization_id = $2
              ORDER BY created_at DESC LIMIT 1`,
-            [safeSellerId]
+            [safeSellerId, organizationId]
           );
           if (batchRes.rows[0]?.id) return batchRes.rows[0].id;
 
@@ -16612,8 +16622,9 @@ export const handler = async (event) => {
              JOIN lead_batches lb ON lb.id = lcs.batch_id
              WHERE lcs.assigned_to = $1
                AND lb.estado IN ('activo','asignado')
+               AND lb.organization_id = $2
              ORDER BY lcs.updated_at DESC LIMIT 1`,
-            [safeSellerId]
+            [safeSellerId, organizationId]
           );
           return lcsRes.rows[0]?.batch_id || null;
         };
@@ -16634,13 +16645,16 @@ export const handler = async (event) => {
             `
             SELECT ${leadIdColumn} AS lead_id
             FROM datos_para_trabajar
-            WHERE ($1::text IS NOT NULL AND documento = $1)
-               OR ($2::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $2)
-               OR ($3::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $3)
+            WHERE organization_id = $4
+              AND (
+                ($1::text IS NOT NULL AND documento = $1)
+                OR ($2::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $2)
+                OR ($3::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $3)
+              )
             ORDER BY updated_at DESC NULLS LAST, created_at DESC
             LIMIT 1
             `,
-            [docValue, telValue, celValue]
+            [docValue, telValue, celValue, organizationId]
           );
           existingLeadId = existingRes.rows[0]?.lead_id || null;
         }
@@ -16649,8 +16663,8 @@ export const handler = async (event) => {
         let validContactId = null;
         if (hasContactIdCol && principalContactId) {
           const checkRes = await client.query(
-            `SELECT id FROM contacts WHERE id = $1 LIMIT 1`,
-            [principalContactId]
+            `SELECT id FROM contacts WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+            [principalContactId, organizationId]
           );
           validContactId = checkRes.rows[0]?.id ?? null;
         }
