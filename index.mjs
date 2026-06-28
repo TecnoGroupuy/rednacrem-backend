@@ -18833,23 +18833,30 @@ export const handler = async (event) => {
         }
         throw error;
       }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
 
       const client = createDbClient();
       await client.connect();
       try {
-        const statusValues = [batchId];
-        const statusOrgClause = organizationId ? "AND organization_id = $2" : "";
-        if (organizationId) statusValues.push(organizationId);
+        const batchRes = await client.query(
+          `SELECT id FROM lead_batches WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [batchId, organizationId]
+        );
+        if (!batchRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
         const statusRes = await client.query(
           `
           SELECT estado_venta, ola_actual, COUNT(*)::int AS total
           FROM lead_contact_status
           WHERE batch_id = $1
-          ${statusOrgClause}
           GROUP BY estado_venta, ola_actual
           ORDER BY ola_actual, estado_venta
           `,
-          statusValues
+          [batchId]
         );
 
         const sellerIncontactableRes = await client.query(
@@ -18863,10 +18870,9 @@ export const handler = async (event) => {
           LEFT JOIN users u ON u.id = lcs.assigned_to
           WHERE lcs.batch_id = $1
             AND lcs.estado_venta = 'incontactable'
-            ${organizationId ? "AND lcs.organization_id = $2" : ""}
           GROUP BY lcs.assigned_to, u.nombre, u.apellido
           `,
-          organizationId ? [batchId, organizationId] : [batchId]
+          [batchId]
         );
 
         const totalValues = [batchId];
@@ -18887,9 +18893,8 @@ export const handler = async (event) => {
           SELECT COUNT(DISTINCT contact_id)::int AS total
           FROM lead_contact_status
           WHERE batch_id = $1
-          ${totalOrgClause}
           `,
-          totalValues
+          [batchId]
         );
 
         const contactadosRes = await client.query(
