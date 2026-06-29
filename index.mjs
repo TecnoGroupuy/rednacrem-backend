@@ -17437,6 +17437,21 @@ export const handler = async (event) => {
         throw error;
       }
 
+      const leadRes = await client.query(
+        `
+        SELECT id, organization_id, nombre, telefono, celular, documento
+        FROM datos_para_trabajar
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [leadId]
+      );
+      const lead = leadRes.rows[0] || null;
+      if (!lead) {
+        return json(404, { ok: false, message: "Lead no encontrado" });
+      }
+      const leadOrgId = lead?.organization_id || requestOrganizationId || null;
+
       const resultadoInput = normalizeLeadResultado(body?.status || body?.resultado);
       const nota = normalizeText(body?.note || body?.nota || "");
       const proximaAccion = normalizeNextAction(body?.nextAction || body?.proxima_accion);
@@ -17449,31 +17464,36 @@ export const handler = async (event) => {
 
         const requireAssignedLead = dbUser?.role_key === "vendedor";
         const currentStatusValues = requireAssignedLead
-          ? [leadId, dbUser.id]
-          : [leadId];
+          ? [leadId, dbUser.id, leadOrgId]
+          : [leadId, leadOrgId];
         const currentAssignedClause = requireAssignedLead ? "AND assigned_to = $2" : "";
+        const currentOrgClause = requireAssignedLead ? "AND organization_id = $3" : "AND organization_id = $2";
         let currentStatusRes = await client.query(
           `
           SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
           FROM lead_contact_status
           WHERE contact_id = $1
             ${currentAssignedClause}
+            ${currentOrgClause}
           LIMIT 1
           `,
           currentStatusValues
         );
 
         if (!currentStatusRes.rows.length) {
-          const agendaValues = requireAssignedLead ? [leadId, dbUser.id] : [leadId];
-          const agendaSellerClause = requireAssignedLead ? "AND seller_id = $2" : "";
+          const agendaValues = requireAssignedLead ? [leadId, dbUser.id, leadOrgId] : [leadId, leadOrgId];
+          const agendaSellerClause = requireAssignedLead ? "AND la.seller_id = $2" : "";
+          const agendaOrgClause = requireAssignedLead ? "AND d.organization_id = $3" : "AND d.organization_id = $2";
           const agendaRes = await client.query(
             `
-            SELECT contact_id, batch_id, seller_id
-            FROM lead_agenda
-            WHERE contact_id = $1
+            SELECT la.contact_id, la.batch_id, la.seller_id
+            FROM lead_agenda la
+            JOIN datos_para_trabajar d ON d.id = la.contact_id
+            WHERE la.contact_id = $1
               ${agendaSellerClause}
-              AND cumplida = false
-            ORDER BY fecha_agenda DESC
+              AND la.cumplida = false
+              ${agendaOrgClause}
+            ORDER BY la.fecha_agenda DESC
             LIMIT 1
             `,
             agendaValues
@@ -17510,6 +17530,7 @@ export const handler = async (event) => {
               FROM lead_contact_status
               WHERE contact_id = $1
                 ${currentAssignedClause}
+                ${currentOrgClause}
               LIMIT 1
               `,
               currentStatusValues
