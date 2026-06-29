@@ -18270,23 +18270,31 @@ export const handler = async (event) => {
             WHERE contact_id = $1
               AND batch_id = $2
               AND cumplida = false
+              AND EXISTS (
+                SELECT 1
+                FROM datos_para_trabajar d
+                WHERE d.id = lead_agenda.contact_id
+                  AND d.organization_id = $3
+              )
             `,
-            [leadId, batchId]
+            [leadId, batchId, leadOrgId]
           );
         }
 
         if ((effectiveResultado === "seguimiento" || effectiveResultado === "rellamar") && fechaAgenda) {
           const agendaRes = await client.query(
             `
-            SELECT id
-            FROM lead_agenda
-            WHERE contact_id = $1
-              AND batch_id = $2
-              AND cumplida = false
-            ORDER BY created_at DESC
+            SELECT la.id
+            FROM lead_agenda la
+            JOIN datos_para_trabajar d ON d.id = la.contact_id
+            WHERE la.contact_id = $1
+              AND la.batch_id = $2
+              AND la.cumplida = false
+              AND d.organization_id = $3
+            ORDER BY la.created_at DESC
             LIMIT 1
             `,
-            [leadId, batchId]
+            [leadId, batchId, leadOrgId]
           );
 
           if (agendaRes.rows.length) {
@@ -18322,9 +18330,11 @@ export const handler = async (event) => {
           `
           UPDATE datos_para_trabajar
           SET estado = 'trabajado', updated_at = now()
-          WHERE id = $1 AND estado <> 'bloqueado'
+          WHERE id = $1
+            AND organization_id = $2
+            AND estado <> 'bloqueado'
           `,
-          [leadId]
+          [leadId, leadOrgId]
         );
 
         let externalConnectionTarget = null;
