@@ -18584,10 +18584,11 @@ export const handler = async (event) => {
             FROM recupero_agenda ra
             JOIN recupero_candidatos rc ON rc.id = ra.candidato_id
             WHERE ra.seller_id = $1
+              AND rc.organization_id = $2
               ${incluirCumplidas ? "" : "AND ra.cumplida = false"}
             ORDER BY ra.fecha_agenda DESC
             `,
-            [sellerId]
+            [sellerId, organizationId]
           );
           itemsRecupero = recuperoRes.rows.map((row) => ({
             ...row,
