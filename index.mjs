@@ -17971,7 +17971,7 @@ export const handler = async (event) => {
               normalizeText(contactData.pais) || null
             ];
             console.log('[venta-contact-update] updating existing contact:', ventaContactId, JSON.stringify(updateValues.slice(1)));
-            await client.query(
+            const contactUpdateRes = await client.query(
               `
               UPDATE contacts SET
                 nombre = COALESCE($2, nombre),
@@ -17986,9 +17986,17 @@ export const handler = async (event) => {
                 pais = COALESCE($11, pais),
                 updated_at = now()
               WHERE id = $1
+                AND organization_id = $12
               `,
-              updateValues
+              [...updateValues, ventaOrganizationId]
             );
+            if (!contactUpdateRes.rowCount) {
+              await client.query("ROLLBACK");
+              return json(404, {
+                ok: false,
+                message: "Contacto no encontrado en esta organización"
+              });
+            }
           }
 
           // Product data mapping from the frontend venta payload.
