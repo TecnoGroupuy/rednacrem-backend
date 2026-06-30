@@ -17437,21 +17437,6 @@ export const handler = async (event) => {
         throw error;
       }
 
-      const leadRes = await client.query(
-        `
-        SELECT id, organization_id, nombre, telefono, celular, documento
-        FROM datos_para_trabajar
-        WHERE id = $1
-        LIMIT 1
-        `,
-        [leadId]
-      );
-      const lead = leadRes.rows[0] || null;
-      if (!lead) {
-        return json(404, { ok: false, message: "Lead no encontrado" });
-      }
-      const leadOrgId = lead?.organization_id || requestOrganizationId || null;
-
       const resultadoInput = normalizeLeadResultado(body?.status || body?.resultado);
       const nota = normalizeText(body?.note || body?.nota || "");
       const proximaAccion = normalizeNextAction(body?.nextAction || body?.proxima_accion);
@@ -17461,6 +17446,22 @@ export const handler = async (event) => {
       await client.connect();
       try {
         await client.query("BEGIN");
+
+        const leadRes = await client.query(
+          `
+          SELECT id, organization_id, nombre, telefono, celular, documento
+          FROM datos_para_trabajar
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [leadId]
+        );
+        const lead = leadRes.rows[0] || null;
+        if (!lead) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Lead no encontrado" });
+        }
+        const leadOrgId = lead?.organization_id || requestOrganizationId || null;
 
         const requireAssignedLead = dbUser?.role_key === "vendedor";
         const currentStatusValues = requireAssignedLead
