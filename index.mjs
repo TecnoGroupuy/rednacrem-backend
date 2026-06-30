@@ -19185,6 +19185,29 @@ export const handler = async (event) => {
           [batchId, desdeRaw, hastaRaw]
         );
 
+        const porVendedorGestionesRes = await client.query(
+          `
+          SELECT
+            lmh.user_id AS vendedor_id,
+            COALESCE(u.nombre || ' ' || u.apellido, 'Sin asignar') AS vendedor,
+            COUNT(*)::int AS total_gestiones,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'venta')::int AS venta,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'seguimiento')::int AS seguimiento,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'rechazo')::int AS rechazo,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'rellamar')::int AS rellamar,
+            COUNT(*) FILTER (WHERE lmh.resultado = 'dato_erroneo')::int AS dato_erroneo
+          FROM lead_management_history lmh
+          LEFT JOIN users u ON u.id = lmh.user_id
+          WHERE lmh.batch_id = $1
+            AND lmh.fecha_gestion >= $2
+            AND lmh.fecha_gestion < $3
+          GROUP BY lmh.user_id, vendedor
+          ORDER BY total_gestiones DESC
+          `,
+          [batchId, desdeRaw, hastaRaw]
+        );
+
         const resumenMap = {
           A: { cantidad: 0, ventas: 0 },
           B: { cantidad: 0, ventas: 0 },
@@ -19234,6 +19257,17 @@ export const handler = async (event) => {
             ventas_b: Number(row.ventas_b || 0),
             ventas_c: Number(row.ventas_c || 0),
             pct_clase_a: row.pct_clase_a === null ? null : Number(row.pct_clase_a)
+          })),
+          por_vendedor_gestiones: (porVendedorGestionesRes.rows || []).map((row) => ({
+            vendedor_id: row.vendedor_id,
+            vendedor: row.vendedor,
+            total_gestiones: Number(row.total_gestiones || 0),
+            venta: Number(row.venta || 0),
+            seguimiento: Number(row.seguimiento || 0),
+            rechazo: Number(row.rechazo || 0),
+            no_contesta: Number(row.no_contesta || 0),
+            rellamar: Number(row.rellamar || 0),
+            dato_erroneo: Number(row.dato_erroneo || 0)
           })),
           error: null
         });
