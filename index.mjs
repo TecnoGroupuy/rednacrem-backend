@@ -19122,11 +19122,14 @@ export const handler = async (event) => {
             WHERE lcs.batch_id = $1
           ),
           primera_gestion_util AS (
-            SELECT contact_id, MIN(fecha_gestion) AS fecha_primera_util
+            SELECT DISTINCT ON (contact_id)
+              contact_id,
+              fecha_gestion AS fecha_primera_util,
+              resultado AS resultado_primera_util
             FROM lead_management_history
             WHERE batch_id = $1
               AND resultado IN ('venta', 'seguimiento', 'rechazo')
-            GROUP BY contact_id
+            ORDER BY contact_id, fecha_gestion ASC
           ),
           clasificado AS (
             SELECT
@@ -19137,7 +19140,8 @@ export const handler = async (event) => {
                 WHEN pgu.fecha_primera_util::date = b.fecha_ingreso::date THEN 'A'
                 WHEN pgu.fecha_primera_util::date <= b.fecha_ingreso::date + INTERVAL '7 days' THEN 'B'
                 ELSE 'C'
-              END AS clase
+              END AS clase,
+              (pgu.resultado_primera_util = 'venta') AS es_venta
             FROM base b
             LEFT JOIN primera_gestion_util pgu ON pgu.contact_id = b.contact_id
             WHERE b.fecha_ingreso >= $2 AND b.fecha_ingreso < $3
@@ -19146,7 +19150,10 @@ export const handler = async (event) => {
 
         const resumenRes = await client.query(
           `${baseQuery}
-           SELECT clase, COUNT(*)::int AS cantidad
+           SELECT
+             clase,
+             COUNT(*)::int AS cantidad,
+             COUNT(*) FILTER (WHERE es_venta)::int AS ventas
            FROM clasificado
            GROUP BY clase`,
           [batchId, desdeRaw, hastaRaw]
@@ -19162,6 +19169,9 @@ export const handler = async (event) => {
              COUNT(*) FILTER (WHERE clase = 'B')::int AS clase_b,
              COUNT(*) FILTER (WHERE clase = 'C')::int AS clase_c,
              COUNT(*) FILTER (WHERE clase = 'pendiente')::int AS pendientes,
+             COUNT(*) FILTER (WHERE clase = 'A' AND es_venta)::int AS ventas_a,
+             COUNT(*) FILTER (WHERE clase = 'B' AND es_venta)::int AS ventas_b,
+             COUNT(*) FILTER (WHERE clase = 'C' AND es_venta)::int AS ventas_c,
              ROUND(
                100.0 * COUNT(*) FILTER (WHERE clase = 'A')
                / NULLIF(COUNT(*) FILTER (WHERE clase IN ('A', 'B', 'C')), 0),
@@ -19174,15 +19184,33 @@ export const handler = async (event) => {
           [batchId, desdeRaw, hastaRaw]
         );
 
-        const resumenMap = { A: 0, B: 0, C: 0, pendiente: 0 };
+        const resumenMap = {
+          A: { cantidad: 0, ventas: 0 },
+          B: { cantidad: 0, ventas: 0 },
+          C: { cantidad: 0, ventas: 0 },
+          pendiente: { cantidad: 0, ventas: 0 }
+        };
         for (const row of resumenRes.rows || []) {
           const clase = String(row.clase || "").toLowerCase();
-          if (clase === "a") resumenMap.A = Number(row.cantidad || 0);
-          else if (clase === "b") resumenMap.B = Number(row.cantidad || 0);
-          else if (clase === "c") resumenMap.C = Number(row.cantidad || 0);
-          else if (clase === "pendiente") resumenMap.pendiente = Number(row.cantidad || 0);
+          if (clase === "a") {
+            resumenMap.A.cantidad = Number(row.cantidad || 0);
+            resumenMap.A.ventas = Number(row.ventas || 0);
+          } else if (clase === "b") {
+            resumenMap.B.cantidad = Number(row.cantidad || 0);
+            resumenMap.B.ventas = Number(row.ventas || 0);
+          } else if (clase === "c") {
+            resumenMap.C.cantidad = Number(row.cantidad || 0);
+            resumenMap.C.ventas = Number(row.ventas || 0);
+          } else if (clase === "pendiente") {
+            resumenMap.pendiente.cantidad = Number(row.cantidad || 0);
+            resumenMap.pendiente.ventas = Number(row.ventas || 0);
+          }
         }
-        const totalIngresados = resumenMap.A + resumenMap.B + resumenMap.C + resumenMap.pendiente;
+        const totalIngresados =
+          resumenMap.A.cantidad +
+          resumenMap.B.cantidad +
+          resumenMap.C.cantidad +
+          resumenMap.pendiente.cantidad;
 
         await client.query("COMMIT");
         return json(200, {
@@ -19201,6 +19229,9 @@ export const handler = async (event) => {
             clase_b: Number(row.clase_b || 0),
             clase_c: Number(row.clase_c || 0),
             pendientes: Number(row.pendientes || 0),
+            ventas_a: Number(row.ventas_a || 0),
+            ventas_b: Number(row.ventas_b || 0),
+            ventas_c: Number(row.ventas_c || 0),
             pct_clase_a: row.pct_clase_a === null ? null : Number(row.pct_clase_a)
           })),
           error: null
