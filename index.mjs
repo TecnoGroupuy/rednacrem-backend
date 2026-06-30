@@ -19044,6 +19044,182 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "GET" && path.match(/\/lead-batches\/([^/]+)\/informe-clasificacion$/)) {
+    const match = path.match(/\/lead-batches\/([^/]+)\/informe-clasificacion$/);
+    const batchId = match?.[1];
+    if (!batchId || !isValidUuid(batchId)) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const desdeRaw = getQueryParam(event, "desde");
+    const hastaRaw = getQueryParam(event, "hasta");
+    const dateLike = /^\d{4}-\d{2}-\d{2}$/;
+    if (!desdeRaw || !hastaRaw || !dateLike.test(desdeRaw) || !dateLike.test(hastaRaw)) {
+      return json(400, { ok: false, message: "Rango de fechas inválido" });
+    }
+    const desdeDate = new Date(`${desdeRaw}T00:00:00Z`);
+    const hastaDate = new Date(`${hastaRaw}T00:00:00Z`);
+    if (Number.isNaN(desdeDate.getTime()) || Number.isNaN(hastaDate.getTime())) {
+      return json(400, { ok: false, message: "Rango de fechas inválido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const batchRes = await client.query(
+          `
+          SELECT id
+          FROM lead_batches
+          WHERE id = $1
+            AND organization_id = $2
+          LIMIT 1
+          `,
+          [batchId, organizationId]
+        );
+        if (!batchRes.rows.length) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
+        const baseQuery = `
+          WITH base AS (
+            SELECT
+              dpt.id AS contact_id,
+              COALESCE(dpt.fecha_lead, dpt.created_at) AS fecha_ingreso,
+              lcs.assigned_to
+            FROM lead_contact_status lcs
+            JOIN datos_para_trabajar dpt ON dpt.id = lcs.contact_id
+            WHERE lcs.batch_id = $1
+          ),
+          primera_gestion_util AS (
+            SELECT contact_id, MIN(fecha_gestion) AS fecha_primera_util
+            FROM lead_management_history
+            WHERE batch_id = $1
+              AND resultado IN ('venta', 'seguimiento', 'rechazo')
+            GROUP BY contact_id
+          ),
+          clasificado AS (
+            SELECT
+              b.contact_id,
+              b.assigned_to,
+              CASE
+                WHEN pgu.fecha_primera_util IS NULL THEN 'pendiente'
+                WHEN pgu.fecha_primera_util::date = b.fecha_ingreso::date THEN 'A'
+                WHEN pgu.fecha_primera_util::date <= b.fecha_ingreso::date + INTERVAL '7 days' THEN 'B'
+                ELSE 'C'
+              END AS clase
+            FROM base b
+            LEFT JOIN primera_gestion_util pgu ON pgu.contact_id = b.contact_id
+            WHERE b.fecha_ingreso >= $2 AND b.fecha_ingreso < $3
+          )
+        `;
+
+        const resumenRes = await client.query(
+          `${baseQuery}
+           SELECT clase, COUNT(*)::int AS cantidad
+           FROM clasificado
+           GROUP BY clase`,
+          [batchId, desdeRaw, hastaRaw]
+        );
+
+        const porVendedorRes = await client.query(
+          `${baseQuery}
+           SELECT
+             c.assigned_to,
+             COALESCE(u.nombre || ' ' || u.apellido, 'Sin asignar') AS vendedor,
+             COUNT(*)::int AS total,
+             COUNT(*) FILTER (WHERE clase = 'A')::int AS clase_a,
+             COUNT(*) FILTER (WHERE clase = 'B')::int AS clase_b,
+             COUNT(*) FILTER (WHERE clase = 'C')::int AS clase_c,
+             COUNT(*) FILTER (WHERE clase = 'pendiente')::int AS pendientes,
+             ROUND(
+               100.0 * COUNT(*) FILTER (WHERE clase = 'A')
+               / NULLIF(COUNT(*) FILTER (WHERE clase IN ('A', 'B', 'C')), 0),
+               1
+             ) AS pct_clase_a
+           FROM clasificado c
+           LEFT JOIN users u ON u.id = c.assigned_to
+           GROUP BY c.assigned_to, vendedor
+           ORDER BY (c.assigned_to IS NULL), pct_clase_a DESC NULLS LAST`,
+          [batchId, desdeRaw, hastaRaw]
+        );
+
+        const resumenMap = { A: 0, B: 0, C: 0, pendiente: 0 };
+        for (const row of resumenRes.rows || []) {
+          const clase = String(row.clase || "").toLowerCase();
+          if (clase === "a") resumenMap.A = Number(row.cantidad || 0);
+          else if (clase === "b") resumenMap.B = Number(row.cantidad || 0);
+          else if (clase === "c") resumenMap.C = Number(row.cantidad || 0);
+          else if (clase === "pendiente") resumenMap.pendiente = Number(row.cantidad || 0);
+        }
+        const totalIngresados = resumenMap.A + resumenMap.B + resumenMap.C + resumenMap.pendiente;
+
+        await client.query("COMMIT");
+        return json(200, {
+          ok: true,
+          success: true,
+          batch_id: batchId,
+          desde: desdeRaw,
+          hasta: hastaRaw,
+          total_ingresados: totalIngresados,
+          resumen: resumenMap,
+          por_vendedor: (porVendedorRes.rows || []).map((row) => ({
+            assigned_to: row.assigned_to,
+            vendedor: row.vendedor,
+            total: Number(row.total || 0),
+            clase_a: Number(row.clase_a || 0),
+            clase_b: Number(row.clase_b || 0),
+            clase_c: Number(row.clase_c || 0),
+            pendientes: Number(row.pendientes || 0),
+            pct_clase_a: row.pct_clase_a === null ? null : Number(row.pct_clase_a)
+          })),
+          error: null
+        });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load lead batch classification report",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "GET" && path === "/sellers") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
