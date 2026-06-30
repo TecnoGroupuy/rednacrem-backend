@@ -247,12 +247,13 @@ function json(statusCode, payload) {
 }
 
 function getPath(event) {
-  return (
+  const rawPath = (
     event.rawPath ||
     event.path ||
     event.requestContext?.http?.path ||
     ""
   );
+  return rawPath.replace(/^\/prod\/api(?=\/|$)/, "").replace(/^\/api(?=\/|$)/, "");
 }
 
 function getMethod(event) {
