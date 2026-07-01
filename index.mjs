@@ -19057,15 +19057,26 @@ export const handler = async (event) => {
 
     const desdeRaw = getQueryParam(event, "desde");
     const hastaRaw = getQueryParam(event, "hasta");
+    const vendedorRaw = getQueryParam(event, "vendedor_id");
     const dateLike = /^\d{4}-\d{2}-\d{2}$/;
-    if (!desdeRaw || !hastaRaw || !dateLike.test(desdeRaw) || !dateLike.test(hastaRaw)) {
+    const sinFiltroFecha = !desdeRaw && !hastaRaw;
+    if ((desdeRaw && !hastaRaw) || (!desdeRaw && hastaRaw)) {
       return json(400, { ok: false, message: "Rango de fechas inválido" });
     }
-    const desdeDate = new Date(`${desdeRaw}T00:00:00Z`);
-    const hastaDate = new Date(`${hastaRaw}T00:00:00Z`);
-    if (Number.isNaN(desdeDate.getTime()) || Number.isNaN(hastaDate.getTime())) {
+    if (!sinFiltroFecha && (!dateLike.test(desdeRaw) || !dateLike.test(hastaRaw))) {
       return json(400, { ok: false, message: "Rango de fechas inválido" });
     }
+    if (!sinFiltroFecha) {
+      const desdeDate = new Date(`${desdeRaw}T00:00:00Z`);
+      const hastaDate = new Date(`${hastaRaw}T00:00:00Z`);
+      if (Number.isNaN(desdeDate.getTime()) || Number.isNaN(hastaDate.getTime())) {
+        return json(400, { ok: false, message: "Rango de fechas inválido" });
+      }
+    }
+    if (vendedorRaw && !isValidUuid(vendedorRaw)) {
+      return json(400, { ok: false, message: "vendedor_id inválido" });
+    }
+    const vendedorId = vendedorRaw || null;
 
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -19115,6 +19126,25 @@ export const handler = async (event) => {
           return json(404, { ok: false, message: "Lote no encontrado" });
         }
 
+        const queryParams = [batchId];
+        let assignedToClause = "";
+        let gestionVendedorClause = "";
+        let filtroFechaIngreso = "";
+        let exprEdad = `EXTRACT(EPOCH FROM (NOW() - b.fecha_ingreso)) / 3600`;
+        if (vendedorId) {
+          queryParams.push(vendedorId);
+          const pVendedor = `$${queryParams.length}`;
+          assignedToClause = `AND b.assigned_to = ${pVendedor}`;
+          gestionVendedorClause = `AND lmh.user_id = ${pVendedor}`;
+        }
+        if (!sinFiltroFecha) {
+          queryParams.push(desdeRaw, hastaRaw);
+          const pDesde = `$${queryParams.length - 1}`;
+          const pHasta = `$${queryParams.length}`;
+          filtroFechaIngreso = `WHERE b.fecha_ingreso >= ${pDesde} AND b.fecha_ingreso < ${pHasta}`;
+          exprEdad = `EXTRACT(EPOCH FROM (${pHasta}::timestamptz - b.fecha_ingreso)) / 3600`;
+        }
+
         const baseQuery = `
           WITH base AS (
             SELECT
@@ -19124,6 +19154,7 @@ export const handler = async (event) => {
             FROM lead_contact_status lcs
             JOIN datos_para_trabajar dpt ON dpt.id = lcs.contact_id
             WHERE lcs.batch_id = $1
+              ${assignedToClause}
           ),
           gestion_info AS (
             SELECT
@@ -19143,6 +19174,7 @@ export const handler = async (event) => {
               , COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS cnt_dato_erroneo
             FROM lead_management_history
             WHERE batch_id = $1
+              ${gestionVendedorClause}
             GROUP BY contact_id
           ),
           clasificado AS (
@@ -19150,8 +19182,8 @@ export const handler = async (event) => {
               b.contact_id,
               b.assigned_to,
               CASE
-                WHEN EXTRACT(EPOCH FROM ($3::timestamptz - b.fecha_ingreso)) / 3600 < 36 THEN 'A'
-                WHEN EXTRACT(EPOCH FROM ($3::timestamptz - b.fecha_ingreso)) / 3600 < 168 THEN 'B'
+                WHEN ${exprEdad} < 36 THEN 'A'
+                WHEN ${exprEdad} < 168 THEN 'B'
                 ELSE 'C'
               END AS clase,
               (gi.total_gestiones IS NULL OR gi.total_gestiones = 0) AS sin_gestionar,
@@ -19164,7 +19196,7 @@ export const handler = async (event) => {
               COALESCE(gi.cnt_dato_erroneo, 0) AS cnt_dato_erroneo
             FROM base b
             LEFT JOIN gestion_info gi ON gi.contact_id = b.contact_id
-            WHERE b.fecha_ingreso >= $2 AND b.fecha_ingreso < $3
+            ${filtroFechaIngreso}
           )
         `;
 
@@ -19177,20 +19209,20 @@ export const handler = async (event) => {
              COUNT(*) FILTER (WHERE sin_gestionar)::int AS nuevos,
              SUM(cnt_venta)::int AS total_ventas,
              SUM(cnt_seguimiento)::int AS total_seguimientos,
-             SUM(cnt_rellamar)::int AS total_rellamar,
-             SUM(cnt_rechazo)::int AS total_rechazos,
-             SUM(cnt_no_contesta)::int AS total_no_contesta,
-             SUM(cnt_dato_erroneo)::int AS total_dato_erroneo
-           FROM clasificado
-           GROUP BY clase`,
-          [batchId, desdeRaw, hastaRaw]
+            SUM(cnt_rellamar)::int AS total_rellamar,
+            SUM(cnt_rechazo)::int AS total_rechazos,
+            SUM(cnt_no_contesta)::int AS total_no_contesta,
+            SUM(cnt_dato_erroneo)::int AS total_dato_erroneo
+          FROM clasificado
+          GROUP BY clase`,
+          queryParams
         );
 
         const pendientesRes = await client.query(
           `${baseQuery}
            SELECT COUNT(*) FILTER (WHERE sin_gestionar)::int AS pendientes
            FROM clasificado`,
-          [batchId, desdeRaw, hastaRaw]
+          queryParams
         );
 
         const porVendedorRes = await client.query(
@@ -19215,31 +19247,34 @@ export const handler = async (event) => {
            LEFT JOIN users u ON u.id = c.assigned_to
            GROUP BY c.assigned_to, vendedor
            ORDER BY (c.assigned_to IS NULL), pct_clase_a DESC NULLS LAST`,
-          [batchId, desdeRaw, hastaRaw]
+          queryParams
         );
 
-        const porVendedorGestionesRes = await client.query(
-          `
-          SELECT
-            lmh.user_id AS vendedor_id,
-            COALESCE(u.nombre || ' ' || u.apellido, 'Sin asignar') AS vendedor,
-            COUNT(*)::int AS total_gestiones,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'venta')::int AS venta,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'seguimiento')::int AS seguimiento,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'rechazo')::int AS rechazo,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'no_contesta')::int AS no_contesta,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'rellamar')::int AS rellamar,
-            COUNT(*) FILTER (WHERE lmh.resultado = 'dato_erroneo')::int AS dato_erroneo
-          FROM lead_management_history lmh
-          LEFT JOIN users u ON u.id = lmh.user_id
-          WHERE lmh.batch_id = $1
-            AND lmh.fecha_gestion >= $2
-            AND lmh.fecha_gestion < $3
-          GROUP BY lmh.user_id, vendedor
-          ORDER BY total_gestiones DESC
-          `,
-          [batchId, desdeRaw, hastaRaw]
-        );
+        const porVendedorGestionesRes = sinFiltroFecha
+          ? { rows: [] }
+          : await client.query(
+            `
+            SELECT
+              lmh.user_id AS vendedor_id,
+              COALESCE(u.nombre || ' ' || u.apellido, 'Sin asignar') AS vendedor,
+              COUNT(*)::int AS total_gestiones,
+              COUNT(*) FILTER (WHERE lmh.resultado = 'venta')::int AS venta,
+              COUNT(*) FILTER (WHERE lmh.resultado = 'seguimiento')::int AS seguimiento,
+              COUNT(*) FILTER (WHERE lmh.resultado = 'rechazo')::int AS rechazo,
+              COUNT(*) FILTER (WHERE lmh.resultado = 'no_contesta')::int AS no_contesta,
+              COUNT(*) FILTER (WHERE lmh.resultado = 'rellamar')::int AS rellamar,
+              COUNT(*) FILTER (WHERE lmh.resultado = 'dato_erroneo')::int AS dato_erroneo
+            FROM lead_management_history lmh
+            LEFT JOIN users u ON u.id = lmh.user_id
+            WHERE lmh.batch_id = $1
+              ${gestionVendedorClause}
+              AND lmh.fecha_gestion >= $${queryParams.length - 1}
+              AND lmh.fecha_gestion < $${queryParams.length}
+            GROUP BY lmh.user_id, vendedor
+            ORDER BY total_gestiones DESC
+            `,
+            queryParams
+          );
 
         const resumenMap = {
           A: { cantidad: 0, ventas: 0, nuevos: 0, total_ventas: 0, total_seguimientos: 0, total_rellamar: 0, total_rechazos: 0, total_no_contesta: 0, total_dato_erroneo: 0 },
@@ -19288,6 +19323,7 @@ export const handler = async (event) => {
           ok: true,
           success: true,
           batch_id: batchId,
+          vendedor_id: vendedorId,
           desde: desdeRaw,
           hasta: hastaRaw,
           total_ingresados: totalIngresados,
