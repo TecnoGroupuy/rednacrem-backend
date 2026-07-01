@@ -19144,15 +19144,14 @@ export const handler = async (event) => {
               b.contact_id,
               b.assigned_to,
               CASE
-                WHEN (CURRENT_DATE - b.fecha_ingreso::date) = 0 THEN 'A'
-                WHEN (CURRENT_DATE - b.fecha_ingreso::date) BETWEEN 1 AND 7 THEN 'B'
+                WHEN EXTRACT(EPOCH FROM (NOW() - b.fecha_ingreso)) / 3600 < 36 THEN 'A'
+                WHEN EXTRACT(EPOCH FROM (NOW() - b.fecha_ingreso)) / 3600 < 168 THEN 'B'
                 ELSE 'C'
               END AS clase,
               (gi.total_gestiones IS NULL OR gi.total_gestiones = 0) AS sin_gestionar,
               (gi.resultado_primera_util = 'venta') AS es_venta
             FROM base b
             LEFT JOIN gestion_info gi ON gi.contact_id = b.contact_id
-            WHERE b.fecha_ingreso >= $2 AND b.fecha_ingreso < $3
           )
         `;
 
@@ -19164,14 +19163,14 @@ export const handler = async (event) => {
              COUNT(*) FILTER (WHERE es_venta)::int AS ventas
            FROM clasificado
            GROUP BY clase`,
-          [batchId, desdeRaw, hastaRaw]
+          [batchId]
         );
 
         const pendientesRes = await client.query(
           `${baseQuery}
            SELECT COUNT(*) FILTER (WHERE sin_gestionar)::int AS pendientes
            FROM clasificado`,
-          [batchId, desdeRaw, hastaRaw]
+          [batchId]
         );
 
         const porVendedorRes = await client.query(
@@ -19196,7 +19195,7 @@ export const handler = async (event) => {
            LEFT JOIN users u ON u.id = c.assigned_to
            GROUP BY c.assigned_to, vendedor
            ORDER BY (c.assigned_to IS NULL), pct_clase_a DESC NULLS LAST`,
-          [batchId, desdeRaw, hastaRaw]
+          [batchId]
         );
 
         const porVendedorGestionesRes = await client.query(
