@@ -19135,6 +19135,12 @@ export const handler = async (event) => {
               (ARRAY_AGG(resultado ORDER BY fecha_gestion ASC)
                 FILTER (WHERE resultado IN ('venta', 'seguimiento', 'rechazo'))
               )[1] AS resultado_primera_util
+              , COUNT(*) FILTER (WHERE resultado = 'venta')::int AS cnt_venta
+              , COUNT(*) FILTER (WHERE resultado = 'seguimiento')::int AS cnt_seguimiento
+              , COUNT(*) FILTER (WHERE resultado = 'rellamar')::int AS cnt_rellamar
+              , COUNT(*) FILTER (WHERE resultado = 'rechazo')::int AS cnt_rechazo
+              , COUNT(*) FILTER (WHERE resultado = 'no_contesta')::int AS cnt_no_contesta
+              , COUNT(*) FILTER (WHERE resultado = 'dato_erroneo')::int AS cnt_dato_erroneo
             FROM lead_management_history
             WHERE batch_id = $1
             GROUP BY contact_id
@@ -19149,7 +19155,13 @@ export const handler = async (event) => {
                 ELSE 'C'
               END AS clase,
               (gi.total_gestiones IS NULL OR gi.total_gestiones = 0) AS sin_gestionar,
-              (gi.resultado_primera_util = 'venta') AS es_venta
+              (gi.resultado_primera_util = 'venta') AS es_venta,
+              COALESCE(gi.cnt_venta, 0) AS cnt_venta,
+              COALESCE(gi.cnt_seguimiento, 0) AS cnt_seguimiento,
+              COALESCE(gi.cnt_rellamar, 0) AS cnt_rellamar,
+              COALESCE(gi.cnt_rechazo, 0) AS cnt_rechazo,
+              COALESCE(gi.cnt_no_contesta, 0) AS cnt_no_contesta,
+              COALESCE(gi.cnt_dato_erroneo, 0) AS cnt_dato_erroneo
             FROM base b
             LEFT JOIN gestion_info gi ON gi.contact_id = b.contact_id
           )
@@ -19160,7 +19172,14 @@ export const handler = async (event) => {
            SELECT
              clase,
              COUNT(*)::int AS cantidad,
-             COUNT(*) FILTER (WHERE es_venta)::int AS ventas
+             COUNT(*) FILTER (WHERE es_venta)::int AS ventas,
+             COUNT(*) FILTER (WHERE sin_gestionar)::int AS nuevos,
+             SUM(cnt_venta)::int AS total_ventas,
+             SUM(cnt_seguimiento)::int AS total_seguimientos,
+             SUM(cnt_rellamar)::int AS total_rellamar,
+             SUM(cnt_rechazo)::int AS total_rechazos,
+             SUM(cnt_no_contesta)::int AS total_no_contesta,
+             SUM(cnt_dato_erroneo)::int AS total_dato_erroneo
            FROM clasificado
            GROUP BY clase`,
           [batchId]
@@ -19222,21 +19241,42 @@ export const handler = async (event) => {
         );
 
         const resumenMap = {
-          A: { cantidad: 0, ventas: 0 },
-          B: { cantidad: 0, ventas: 0 },
-          C: { cantidad: 0, ventas: 0 }
+          A: { cantidad: 0, ventas: 0, nuevos: 0, total_ventas: 0, total_seguimientos: 0, total_rellamar: 0, total_rechazos: 0, total_no_contesta: 0, total_dato_erroneo: 0 },
+          B: { cantidad: 0, ventas: 0, nuevos: 0, total_ventas: 0, total_seguimientos: 0, total_rellamar: 0, total_rechazos: 0, total_no_contesta: 0, total_dato_erroneo: 0 },
+          C: { cantidad: 0, ventas: 0, nuevos: 0, total_ventas: 0, total_seguimientos: 0, total_rellamar: 0, total_rechazos: 0, total_no_contesta: 0, total_dato_erroneo: 0 }
         };
         for (const row of resumenRes.rows || []) {
           const clase = String(row.clase || "").toLowerCase();
           if (clase === "a") {
             resumenMap.A.cantidad = Number(row.cantidad || 0);
             resumenMap.A.ventas = Number(row.ventas || 0);
+            resumenMap.A.nuevos = Number(row.nuevos || 0);
+            resumenMap.A.total_ventas = Number(row.total_ventas || 0);
+            resumenMap.A.total_seguimientos = Number(row.total_seguimientos || 0);
+            resumenMap.A.total_rellamar = Number(row.total_rellamar || 0);
+            resumenMap.A.total_rechazos = Number(row.total_rechazos || 0);
+            resumenMap.A.total_no_contesta = Number(row.total_no_contesta || 0);
+            resumenMap.A.total_dato_erroneo = Number(row.total_dato_erroneo || 0);
           } else if (clase === "b") {
             resumenMap.B.cantidad = Number(row.cantidad || 0);
             resumenMap.B.ventas = Number(row.ventas || 0);
+            resumenMap.B.nuevos = Number(row.nuevos || 0);
+            resumenMap.B.total_ventas = Number(row.total_ventas || 0);
+            resumenMap.B.total_seguimientos = Number(row.total_seguimientos || 0);
+            resumenMap.B.total_rellamar = Number(row.total_rellamar || 0);
+            resumenMap.B.total_rechazos = Number(row.total_rechazos || 0);
+            resumenMap.B.total_no_contesta = Number(row.total_no_contesta || 0);
+            resumenMap.B.total_dato_erroneo = Number(row.total_dato_erroneo || 0);
           } else if (clase === "c") {
             resumenMap.C.cantidad = Number(row.cantidad || 0);
             resumenMap.C.ventas = Number(row.ventas || 0);
+            resumenMap.C.nuevos = Number(row.nuevos || 0);
+            resumenMap.C.total_ventas = Number(row.total_ventas || 0);
+            resumenMap.C.total_seguimientos = Number(row.total_seguimientos || 0);
+            resumenMap.C.total_rellamar = Number(row.total_rellamar || 0);
+            resumenMap.C.total_rechazos = Number(row.total_rechazos || 0);
+            resumenMap.C.total_no_contesta = Number(row.total_no_contesta || 0);
+            resumenMap.C.total_dato_erroneo = Number(row.total_dato_erroneo || 0);
           }
         }
         const pendientesTotal = Number(pendientesRes.rows[0]?.pendientes || 0);
