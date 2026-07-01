@@ -11186,18 +11186,19 @@ export const handler = async (event) => {
             };
           }
 
-          await client.query(
-            `
-            UPDATE lead_contact_status
-            SET estado_venta = 'venta',
-                intentos = COALESCE(intentos, 0) + 1,
-                proxima_accion = NULL,
-                ultimo_intento_at = now(),
-                updated_at = now()
-            WHERE contact_id = $1 AND batch_id = $2
-            `,
-            [leadId, batchId]
-          );
+        await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = 'venta',
+              intentos = COALESCE(intentos, 0) + 1,
+              proxima_accion = NULL,
+              organization_id = $3,
+              ultimo_intento_at = now(),
+              updated_at = now()
+          WHERE contact_id = $1 AND batch_id = $2
+          `,
+          [leadId, batchId, organizationId]
+        );
 
           if (hasLeadEstadoCol && leadIdColumn) {
             await client.query(
@@ -16768,9 +16769,10 @@ export const handler = async (event) => {
                 batch_id,
                 assigned_to,
                 ola_actual,
-                ultimo_intento_at
+                ultimo_intento_at,
+                organization_id
               )
-              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now())
+              VALUES ($1, 'nuevo', 0, NULL, $2, $3, 1, now(), $4)
               ON CONFLICT (contact_id) DO UPDATE
               SET
                 estado_venta = 'nuevo',
@@ -16780,9 +16782,10 @@ export const handler = async (event) => {
                 assigned_to = EXCLUDED.assigned_to,
                 ola_actual = COALESCE(lead_contact_status.ola_actual, 1),
                 ultimo_intento_at = now(),
+                organization_id = EXCLUDED.organization_id,
                 updated_at = now()
               `,
-              [leadId, batchId, dbUser?.id || null]
+              [leadId, batchId, dbUser?.id || null, organizationId]
             );
           }
         }
@@ -19122,29 +19125,33 @@ export const handler = async (event) => {
             JOIN datos_para_trabajar dpt ON dpt.id = lcs.contact_id
             WHERE lcs.batch_id = $1
           ),
-          primera_gestion_util AS (
-            SELECT DISTINCT ON (contact_id)
+          gestion_info AS (
+            SELECT
               contact_id,
-              fecha_gestion AS fecha_primera_util,
-              resultado AS resultado_primera_util
+              COUNT(*) AS total_gestiones,
+              MIN(fecha_gestion) FILTER (
+                WHERE resultado IN ('venta', 'seguimiento', 'rechazo')
+              ) AS fecha_primera_util,
+              (ARRAY_AGG(resultado ORDER BY fecha_gestion ASC)
+                FILTER (WHERE resultado IN ('venta', 'seguimiento', 'rechazo'))
+              )[1] AS resultado_primera_util
             FROM lead_management_history
             WHERE batch_id = $1
-              AND resultado IN ('venta', 'seguimiento', 'rechazo')
-            ORDER BY contact_id, fecha_gestion ASC
+            GROUP BY contact_id
           ),
           clasificado AS (
             SELECT
               b.contact_id,
               b.assigned_to,
               CASE
-                WHEN pgu.fecha_primera_util IS NULL THEN 'pendiente'
-                WHEN pgu.fecha_primera_util::date = b.fecha_ingreso::date THEN 'A'
-                WHEN pgu.fecha_primera_util::date <= b.fecha_ingreso::date + INTERVAL '7 days' THEN 'B'
+                WHEN (CURRENT_DATE - b.fecha_ingreso::date) = 0 THEN 'A'
+                WHEN (CURRENT_DATE - b.fecha_ingreso::date) BETWEEN 1 AND 7 THEN 'B'
                 ELSE 'C'
               END AS clase,
-              (pgu.resultado_primera_util = 'venta') AS es_venta
+              (gi.total_gestiones IS NULL OR gi.total_gestiones = 0) AS sin_gestionar,
+              (gi.resultado_primera_util = 'venta') AS es_venta
             FROM base b
-            LEFT JOIN primera_gestion_util pgu ON pgu.contact_id = b.contact_id
+            LEFT JOIN gestion_info gi ON gi.contact_id = b.contact_id
             WHERE b.fecha_ingreso >= $2 AND b.fecha_ingreso < $3
           )
         `;
@@ -19160,6 +19167,13 @@ export const handler = async (event) => {
           [batchId, desdeRaw, hastaRaw]
         );
 
+        const pendientesRes = await client.query(
+          `${baseQuery}
+           SELECT COUNT(*) FILTER (WHERE sin_gestionar)::int AS pendientes
+           FROM clasificado`,
+          [batchId, desdeRaw, hastaRaw]
+        );
+
         const porVendedorRes = await client.query(
           `${baseQuery}
            SELECT
@@ -19169,13 +19183,13 @@ export const handler = async (event) => {
              COUNT(*) FILTER (WHERE clase = 'A')::int AS clase_a,
              COUNT(*) FILTER (WHERE clase = 'B')::int AS clase_b,
              COUNT(*) FILTER (WHERE clase = 'C')::int AS clase_c,
-             COUNT(*) FILTER (WHERE clase = 'pendiente')::int AS pendientes,
+             COUNT(*) FILTER (WHERE sin_gestionar)::int AS pendientes,
              COUNT(*) FILTER (WHERE clase = 'A' AND es_venta)::int AS ventas_a,
              COUNT(*) FILTER (WHERE clase = 'B' AND es_venta)::int AS ventas_b,
              COUNT(*) FILTER (WHERE clase = 'C' AND es_venta)::int AS ventas_c,
              ROUND(
                100.0 * COUNT(*) FILTER (WHERE clase = 'A')
-               / NULLIF(COUNT(*) FILTER (WHERE clase IN ('A', 'B', 'C')), 0),
+               / NULLIF(COUNT(*), 0),
                1
              ) AS pct_clase_a
            FROM clasificado c
@@ -19211,8 +19225,7 @@ export const handler = async (event) => {
         const resumenMap = {
           A: { cantidad: 0, ventas: 0 },
           B: { cantidad: 0, ventas: 0 },
-          C: { cantidad: 0, ventas: 0 },
-          pendiente: { cantidad: 0, ventas: 0 }
+          C: { cantidad: 0, ventas: 0 }
         };
         for (const row of resumenRes.rows || []) {
           const clase = String(row.clase || "").toLowerCase();
@@ -19225,16 +19238,10 @@ export const handler = async (event) => {
           } else if (clase === "c") {
             resumenMap.C.cantidad = Number(row.cantidad || 0);
             resumenMap.C.ventas = Number(row.ventas || 0);
-          } else if (clase === "pendiente") {
-            resumenMap.pendiente.cantidad = Number(row.cantidad || 0);
-            resumenMap.pendiente.ventas = Number(row.ventas || 0);
           }
         }
-        const totalIngresados =
-          resumenMap.A.cantidad +
-          resumenMap.B.cantidad +
-          resumenMap.C.cantidad +
-          resumenMap.pendiente.cantidad;
+        const pendientesTotal = Number(pendientesRes.rows[0]?.pendientes || 0);
+        const totalIngresados = resumenMap.A.cantidad + resumenMap.B.cantidad + resumenMap.C.cantidad;
 
         await client.query("COMMIT");
         return json(200, {
@@ -19244,6 +19251,7 @@ export const handler = async (event) => {
           desde: desdeRaw,
           hasta: hastaRaw,
           total_ingresados: totalIngresados,
+          pendientes_total: pendientesTotal,
           resumen: resumenMap,
           por_vendedor: (porVendedorRes.rows || []).map((row) => ({
             assigned_to: row.assigned_to,
@@ -23809,12 +23817,15 @@ async function getNewContactsDistribution(client, batchId) {
 
         if (isResultadoChange) {
           await client.query(
-            `UPDATE lead_contact_status
-             SET estado_venta = $1,
-                 updated_at = now()
-             WHERE contact_id = $2
-               AND batch_id = $3`,
-            [resultadoInput, management.contact_id, management.batch_id]
+            `
+            UPDATE lead_contact_status
+            SET estado_venta = $1,
+                organization_id = $4,
+                updated_at = now()
+            WHERE contact_id = $2
+              AND batch_id = $3
+            `,
+            [resultadoInput, management.contact_id, management.batch_id, organizationId]
           );
 
           const assignedRes = await client.query(
@@ -27755,8 +27766,9 @@ async function getNewContactsDistribution(client, batchId) {
            FROM lead_contact_status lcs
            JOIN lead_batch_contacts lbc ON lbc.contact_id = lcs.contact_id
            WHERE lcs.assigned_to = $1
-           AND lcs.estado_venta IN ('no_contesta', 'seguimiento', 'nuevo', 'rellamar')`,
-          [userId]
+           AND lcs.estado_venta IN ('no_contesta', 'seguimiento', 'nuevo', 'rellamar')
+           AND lcs.organization_id = $2`,
+          [userId, organizationId]
         );
 
         if (leadsToReassign.rows.length > 0) {
@@ -27784,8 +27796,12 @@ async function getNewContactsDistribution(client, batchId) {
             for (let i = 0; i < batchLeads.length; i++) {
               const newVendor = vendors[i % vendors.length];
               await client.query(
-                `UPDATE lead_contact_status SET assigned_to = $1, updated_at = NOW() WHERE contact_id = $2`,
-                [newVendor, batchLeads[i].contact_id]
+                `UPDATE lead_contact_status
+                 SET assigned_to = $1,
+                     organization_id = $3,
+                     updated_at = NOW()
+                 WHERE contact_id = $2`,
+                [newVendor, batchLeads[i].contact_id, organizationId]
               );
             }
           }
