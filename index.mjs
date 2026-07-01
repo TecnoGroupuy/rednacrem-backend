@@ -19225,6 +19225,14 @@ export const handler = async (event) => {
           queryParams
         );
 
+        const bloqueadosRes = await client.query(
+          `SELECT COUNT(*)::int AS bloqueados
+           FROM lead_contact_status
+           WHERE batch_id = $1
+             AND estado_venta = 'bloqueado'`,
+          [batchId]
+        );
+
         const porVendedorRes = await client.query(
           `${baseQuery}
            SELECT
@@ -19330,6 +19338,7 @@ export const handler = async (event) => {
           desde: desdeRaw,
           hasta: hastaRaw,
           total_ingresados: totalIngresados,
+          bloqueados_total: Number(bloqueadosRes.rows[0]?.bloqueados || 0),
           pendientes_total: pendientesTotal,
           resumen: resumenMap,
           por_vendedor: (porVendedorRes.rows || []).map((row) => ({
