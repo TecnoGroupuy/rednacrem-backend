@@ -19134,8 +19134,8 @@ export const handler = async (event) => {
         if (vendedorId) {
           queryParams.push(vendedorId);
           const pVendedor = `$${queryParams.length}`;
-          assignedToClause = `AND b.assigned_to = ${pVendedor}`;
-          gestionVendedorClause = `AND lmh.user_id = ${pVendedor}`;
+          assignedToClause = `AND lcs.assigned_to = ${pVendedor}`;
+          gestionVendedorClause = `AND user_id = ${pVendedor}`;
         }
         if (!sinFiltroFecha) {
           queryParams.push(desdeRaw, hastaRaw);
