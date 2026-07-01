@@ -19243,11 +19243,14 @@ export const handler = async (event) => {
                / NULLIF(COUNT(*), 0),
                1
              ) AS pct_clase_a
-           FROM clasificado c
-           LEFT JOIN users u ON u.id = c.assigned_to
-           GROUP BY c.assigned_to, vendedor
-           ORDER BY (c.assigned_to IS NULL), pct_clase_a DESC NULLS LAST`,
-          queryParams
+          FROM clasificado c
+          LEFT JOIN users u ON u.id = c.assigned_to
+          LEFT JOIN organization_users ou ON ou.user_id = c.assigned_to
+            AND ou.organization_id = $${queryParams.length + 1}
+          WHERE c.assigned_to IS NULL OR ou.activo = true
+          GROUP BY c.assigned_to, vendedor
+          ORDER BY (c.assigned_to IS NULL), pct_clase_a DESC NULLS LAST`,
+          [...queryParams, organizationId]
         );
 
         const porVendedorGestionesRes = sinFiltroFecha
