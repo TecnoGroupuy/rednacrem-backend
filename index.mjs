@@ -19150,8 +19150,8 @@ export const handler = async (event) => {
               b.contact_id,
               b.assigned_to,
               CASE
-                WHEN EXTRACT(EPOCH FROM (NOW() - b.fecha_ingreso)) / 3600 < 36 THEN 'A'
-                WHEN EXTRACT(EPOCH FROM (NOW() - b.fecha_ingreso)) / 3600 < 168 THEN 'B'
+                WHEN EXTRACT(EPOCH FROM ($3::timestamptz - b.fecha_ingreso)) / 3600 < 36 THEN 'A'
+                WHEN EXTRACT(EPOCH FROM ($3::timestamptz - b.fecha_ingreso)) / 3600 < 168 THEN 'B'
                 ELSE 'C'
               END AS clase,
               (gi.total_gestiones IS NULL OR gi.total_gestiones = 0) AS sin_gestionar,
@@ -19164,6 +19164,7 @@ export const handler = async (event) => {
               COALESCE(gi.cnt_dato_erroneo, 0) AS cnt_dato_erroneo
             FROM base b
             LEFT JOIN gestion_info gi ON gi.contact_id = b.contact_id
+            WHERE b.fecha_ingreso >= $2 AND b.fecha_ingreso < $3
           )
         `;
 
@@ -19182,14 +19183,14 @@ export const handler = async (event) => {
              SUM(cnt_dato_erroneo)::int AS total_dato_erroneo
            FROM clasificado
            GROUP BY clase`,
-          [batchId]
+          [batchId, desdeRaw, hastaRaw]
         );
 
         const pendientesRes = await client.query(
           `${baseQuery}
            SELECT COUNT(*) FILTER (WHERE sin_gestionar)::int AS pendientes
            FROM clasificado`,
-          [batchId]
+          [batchId, desdeRaw, hastaRaw]
         );
 
         const porVendedorRes = await client.query(
@@ -19214,7 +19215,7 @@ export const handler = async (event) => {
            LEFT JOIN users u ON u.id = c.assigned_to
            GROUP BY c.assigned_to, vendedor
            ORDER BY (c.assigned_to IS NULL), pct_clase_a DESC NULLS LAST`,
-          [batchId]
+          [batchId, desdeRaw, hastaRaw]
         );
 
         const porVendedorGestionesRes = await client.query(
