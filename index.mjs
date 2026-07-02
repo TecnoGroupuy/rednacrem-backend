@@ -18342,7 +18342,7 @@ export const handler = async (event) => {
         );
 
         let externalConnectionTarget = null;
-        const externalConnectionOrganizationId = batchOrganizationId || requestOrganizationId || null;
+        const externalConnectionOrganizationId = ventaOrganizationId || batchOrganizationId || requestOrganizationId || null;
         if (effectiveResultado === "venta" && externalConnectionOrganizationId) {
           try {
             externalConnectionTarget = await resolveExternalConnectionTargetForLead(
