@@ -17742,6 +17742,7 @@ export const handler = async (event) => {
         }
 
         let batchOrganizationId = null;
+        let ventaOrganizationId = null;
         try {
           const orgRes = await client.query(
             `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
@@ -17887,7 +17888,7 @@ export const handler = async (event) => {
             [leadId]
           );
           const leadData = leadDataRes.rows[0] || null;
-          const ventaOrganizationId = leadData?.organization_id || batchOrganizationId || requestOrganizationId || null;
+          ventaOrganizationId = leadData?.organization_id || batchOrganizationId || requestOrganizationId || null;
           const leadTelefonoDigits = normalizePhoneDigits(leadData?.telefono || "");
           const leadCelularDigits = normalizePhoneDigits(leadData?.celular || "");
           let ventaContactId = null;
