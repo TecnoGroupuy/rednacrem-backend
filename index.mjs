@@ -5792,6 +5792,7 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
         ec.id,
         ec.url,
         ec.api_key,
+        ec.payment_method_override,
         c.documento,
         c.nombre,
         c.apellido,
@@ -5856,7 +5857,7 @@ async function sendToExternalConnections(contactId, productId, organizationId) {
         birthDate: connection.fecha_nacimiento,
         address: connection.direccion,
         department: connection.departamento,
-        paymentMethod: medioPagoResult.rows[0]?.medio_pago || null,
+        paymentMethod: connection.payment_method_override || medioPagoResult.rows[0]?.medio_pago || null,
         state: "Activo",
         situation: "Normal"
       };
