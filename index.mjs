@@ -20000,12 +20000,13 @@ export const handler = async (event) => {
       }
 
       conditions.push(`
-        id NOT IN (
-          SELECT lbc.contact_id
+        NOT EXISTS (
+          SELECT 1
           FROM lead_batch_contacts lbc
           JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lb.estado IN ('activo', 'asignado')
-          ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+          WHERE lbc.contact_id = id
+            AND lb.estado IN ('activo', 'asignado')
+            ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
         )
       `);
 
@@ -20015,11 +20016,12 @@ export const handler = async (event) => {
           return json(400, { ok: false, message: "excludeBatchId inválido" });
         }
         conditions.push(`
-          id NOT IN (
-            SELECT lbc.contact_id
+          NOT EXISTS (
+            SELECT 1
             FROM lead_batch_contacts lbc
-            WHERE lbc.batch_id = $${i}
-            ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+            WHERE lbc.contact_id = id
+              AND lbc.batch_id = $${i}
+              ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
           )
         `);
         params.push(excludeBatchId);
@@ -20174,12 +20176,13 @@ export const handler = async (event) => {
       }
 
       conditions.push(`
-        id NOT IN (
-          SELECT lbc.contact_id
+        NOT EXISTS (
+          SELECT 1
           FROM lead_batch_contacts lbc
           JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lb.estado IN ('activo', 'asignado')
-          ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+          WHERE lbc.contact_id = id
+            AND lb.estado IN ('activo', 'asignado')
+            ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
         )
       `);
 
@@ -20189,11 +20192,12 @@ export const handler = async (event) => {
           return json(400, { ok: false, message: "excludeBatchId inválido" });
         }
         conditions.push(`
-          id NOT IN (
-            SELECT lbc.contact_id
+          NOT EXISTS (
+            SELECT 1
             FROM lead_batch_contacts lbc
-            WHERE lbc.batch_id = $${i}
-            ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
+            WHERE lbc.contact_id = id
+              AND lbc.batch_id = $${i}
+              ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
           )
         `);
         params.push(excludeBatchId);
