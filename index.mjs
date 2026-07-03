@@ -20004,7 +20004,7 @@ export const handler = async (event) => {
           SELECT 1
           FROM lead_batch_contacts lbc
           JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.contact_id = id
+          WHERE lbc.contact_id = datos_para_trabajar.id
             AND lb.estado IN ('activo', 'asignado')
             ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
         )
@@ -20019,7 +20019,7 @@ export const handler = async (event) => {
           NOT EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
-            WHERE lbc.contact_id = id
+            WHERE lbc.contact_id = datos_para_trabajar.id
               AND lbc.batch_id = $${i}
               ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
           )
@@ -20180,7 +20180,7 @@ export const handler = async (event) => {
           SELECT 1
           FROM lead_batch_contacts lbc
           JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.contact_id = id
+          WHERE lbc.contact_id = datos_para_trabajar.id
             AND lb.estado IN ('activo', 'asignado')
             ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
         )
@@ -20195,7 +20195,7 @@ export const handler = async (event) => {
           NOT EXISTS (
             SELECT 1
             FROM lead_batch_contacts lbc
-            WHERE lbc.contact_id = id
+            WHERE lbc.contact_id = datos_para_trabajar.id
               AND lbc.batch_id = $${i}
               ${orgParamIndex ? `AND lbc.organization_id = $${orgParamIndex}` : ""}
           )
