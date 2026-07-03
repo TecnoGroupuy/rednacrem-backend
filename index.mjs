@@ -26171,6 +26171,8 @@ async function getNewContactsDistribution(client, batchId) {
         idx += 1;
       }
 
+      whereParts.push(`LOWER(COALESCE(d.origen_dato, '')) <> 'recupero'`);
+
       whereParts.push(`
         NOT EXISTS (
           SELECT 1
