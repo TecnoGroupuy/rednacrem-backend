@@ -481,6 +481,47 @@ function safeParseBody(event) {
   }
 }
 
+function hasCsvDecodeArtifacts(text) {
+  if (!text) return false;
+  return text.includes("\uFFFD") || /(?:Ã.|Â.|â.|ï¿½)/.test(text);
+}
+
+function decodeCsvBuffer(buffer) {
+  const utf8Text = Buffer.from(buffer || []).toString("utf8").replace(/^\uFEFF/, "");
+  if (!hasCsvDecodeArtifacts(utf8Text)) {
+    return utf8Text;
+  }
+  return Buffer.from(buffer || []).toString("latin1").replace(/^\uFEFF/, "");
+}
+
+function extractDatosTrabajarCsvPayload(event) {
+  const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
+  const rawBody = event?.body || "";
+  const bodyText = event?.isBase64Encoded
+    ? decodeCsvBuffer(Buffer.from(String(rawBody || ""), "base64"))
+    : typeof rawBody === "string"
+    ? rawBody
+    : JSON.stringify(rawBody);
+
+  let csvText = bodyText;
+  let origenDato = null;
+
+  if (contentType.includes("application/json")) {
+    const parsed = safeParseBody(event);
+    if (parsed === null) {
+      return { csvText: "", origenDato: null, error: "Invalid JSON body" };
+    }
+    origenDato = normalizeText(parsed?.origenDato || parsed?.origen_dato || "") || null;
+    if (parsed?.csvBase64) {
+      csvText = decodeCsvBuffer(Buffer.from(String(parsed.csvBase64 || ""), "base64"));
+    } else if (typeof parsed?.csv === "string") {
+      csvText = parsed.csv;
+    }
+  }
+
+  return { csvText, origenDato, error: null };
+}
+
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -3269,10 +3310,11 @@ function splitNombreCompleto(nombreCompleto) {
   return { nombre, apellido };
 }
 
-function mapDatosParaTrabajarCsv(csvText) {
+function mapDatosParaTrabajarCsv(csvText, { origenDatoFallback = null } = {}) {
   const { headers, rows } = parseCsvWithHeaders(csvText);
-  if (!headers.length) return { rows: [], ignoredEmptyRows: 0 };
+  if (!headers.length) return { rows: [], ignoredEmptyRows: 0, columnasDetectadas: [] };
   const headerKeys = headers.map((header) => DATOS_TRABAJAR_HEADER_MAP[normalizeCsvHeader(header)] || null);
+  const columnasDetectadas = Array.from(new Set(headerKeys.filter(Boolean)));
   const mapped = [];
   let ignoredEmptyRows = 0;
 
@@ -3324,6 +3366,9 @@ function mapDatosParaTrabajarCsv(csvText) {
     if (!item.localidad && telefono) {
       item.localidad = getLocalidadFromFixed(telefono);
     }
+    if (!item.origen_dato && origenDatoFallback) {
+      item.origen_dato = origenDatoFallback;
+    }
     const hasValues = Object.values(item).some(
       (value) => value !== null && value !== undefined && String(value).trim() !== ""
     );
@@ -3334,7 +3379,7 @@ function mapDatosParaTrabajarCsv(csvText) {
     mapped.push(item);
   }
 
-  return { rows: mapped, ignoredEmptyRows };
+  return { rows: mapped, ignoredEmptyRows, columnasDetectadas };
 }
 
 function mapCsvRowsToImport(rows) {
@@ -3507,6 +3552,10 @@ async function ensureDatosTrabajarJobTable(client) {
     )
     `
   );
+  await client.query(`
+    ALTER TABLE datos_para_trabajar_import_jobs
+    ADD COLUMN IF NOT EXISTS origen_dato_fallback text
+  `);
 }
 
 function buildDatosTrabajarInsertBatch(
@@ -3552,11 +3601,23 @@ function buildDatosTrabajarInsertBatch(
 }
 
 async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId, extra = {}) {
+  const readOnly = extra?.readOnly === true;
+  const isDuplicateInImport = extra?.isDuplicateInImport === true;
+
   if (!orgId) {
     return { estado: "nuevo", motivoBloqueo: null, prevContactId: null, prevAssignedTo: null };
   }
 
   // 1. Duplicado dentro del mismo import
+  if (isDuplicateInImport) {
+    return {
+      estado: "bloqueado",
+      motivoBloqueo: "duplicado",
+      prevContactId: null,
+      prevAssignedTo: null
+    };
+  }
+
   if (importJobId && (tel || cel)) {
     const dup = await client.query(
       `
@@ -3607,6 +3668,15 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
 
     if (prev.rows.length) {
       const { id: prevId, estado_venta, assigned_to, vendedor_status } = prev.rows[0];
+
+      if (readOnly) {
+        return {
+          estado: "bloqueado",
+          motivoBloqueo: "duplicado",
+          prevContactId: prevId,
+          prevAssignedTo: vendedor_status === "approved" ? assigned_to : null
+        };
+      }
 
       const fechaNacimientoExtra = extra?.fechaNacimiento || null;
       const direccionExtra = extra?.direccion || null;
@@ -4183,7 +4253,8 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
   try {
     const jobRes = await client.query(
       `
-      SELECT id, batch_id, csv_text, processed_rows, inserted_rows, blocked_rows, skipped_rows, organization_id
+      SELECT id, batch_id, csv_text, processed_rows, inserted_rows, blocked_rows, skipped_rows, organization_id,
+             origen_dato_fallback
       FROM datos_para_trabajar_import_jobs
       WHERE id = $1
       LIMIT 1
@@ -4196,7 +4267,8 @@ export async function processDatosTrabajarJob(jobId, options = {}) {
     const orgId = job.organization_id || null;
     const importJobId = job.id || null;
     const csvText = job.csv_text || "";
-    const { rows } = mapDatosParaTrabajarCsv(csvText);
+    const origenDatoFallback = normalizarOrigenDato(job.origen_dato_fallback || null);
+    const { rows } = mapDatosParaTrabajarCsv(csvText, { origenDatoFallback });
     const totalRows = rows.length;
 
     let index = options.startAt ?? job.processed_rows ?? 0;
@@ -25609,21 +25681,12 @@ async function getNewContactsDistribution(client, batchId) {
       event?.headers?.["x-filename"] ||
       event?.headers?.["X-Filename"] ||
       "datos_para_trabajar.csv";
-    const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
-    const rawBody = event?.body || "";
-    const bodyText = event?.isBase64Encoded
-      ? Buffer.from(rawBody, "base64").toString("utf8")
-      : typeof rawBody === "string"
-      ? rawBody
-      : JSON.stringify(rawBody);
-
-    let csvText = bodyText;
-    if (contentType.includes("application/json")) {
-      const parsed = safeParseBody(event);
-      if (parsed && parsed.csv) {
-        csvText = parsed.csv;
-      }
+    const payload = extractDatosTrabajarCsvPayload(event);
+    if (payload.error) {
+      return json(400, { ok: false, message: payload.error });
     }
+    const csvText = payload.csvText;
+    const origenDatoFallback = normalizarOrigenDato(payload.origenDato || null);
 
     if (!csvText || !csvText.trim()) {
       return json(400, { ok: false, message: "CSV vacio" });
@@ -25654,7 +25717,15 @@ async function getNewContactsDistribution(client, batchId) {
         throw error;
       }
 
-      const { rows, ignoredEmptyRows } = mapDatosParaTrabajarCsv(csvText);
+      const { rows, ignoredEmptyRows, columnasDetectadas } = mapDatosParaTrabajarCsv(csvText, {
+        origenDatoFallback
+      });
+      if (!columnasDetectadas.length) {
+        return json(400, {
+          ok: false,
+          message: "No se reconocio ninguna columna del archivo. Verifica que tenga encabezados como Nombre, Telefono, Departamento, etc."
+        });
+      }
       const client = createDbClient();
       await client.connect();
 
@@ -25795,12 +25866,13 @@ async function getNewContactsDistribution(client, batchId) {
             skipped_rows,
             csv_text,
             created_by,
-            organization_id
+            organization_id,
+            origen_dato_fallback
           )
-          VALUES ($1, $2, 'queued', $3, 0, 0, 0, 0, $4, $5, $6)
+          VALUES ($1, $2, 'queued', $3, 0, 0, 0, 0, $4, $5, $6, $7)
           RETURNING id
           `,
-          [batchId, fileName, rows.length, csvText, dbUser?.id || null, organizationId]
+          [batchId, fileName, rows.length, csvText, dbUser?.id || null, organizationId, origenDatoFallback]
         );
 
         const jobId = jobRes.rows[0]?.id || null;
@@ -25840,6 +25912,142 @@ async function getNewContactsDistribution(client, batchId) {
       return json(500, {
         ok: false,
         message: "Failed to import datos para trabajar",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/imports/datos-para-trabajar/preview")) {
+    const payload = extractDatosTrabajarCsvPayload(event);
+    if (payload.error) {
+      return json(400, { ok: false, message: payload.error });
+    }
+    const csvText = payload.csvText;
+    const origenDatoFallback = normalizarOrigenDato(payload.origenDato || null);
+
+    if (!csvText || !csvText.trim()) {
+      return json(400, { ok: false, message: "CSV vacio" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const { rows, ignoredEmptyRows, columnasDetectadas } = mapDatosParaTrabajarCsv(csvText, {
+        origenDatoFallback
+      });
+      if (!columnasDetectadas.length) {
+        return json(400, {
+          ok: false,
+          message: "No se reconocio ninguna columna del archivo. Verifica que tenga encabezados como Nombre, Telefono, Departamento, etc."
+        });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+
+      try {
+        const seenNumbers = new Set();
+        const resumen = {
+          validos: 0,
+          cliente_activo: 0,
+          no_llamar: 0,
+          duplicados: 0
+        };
+        const muestra = [];
+
+        for (const row of rows) {
+          const tel = cleanPhone(row.telefono) || null;
+          const cel = cleanPhone(row.celular) || null;
+          const currentNumbers = [tel, cel].filter(Boolean);
+          const isDuplicateInImport = currentNumbers.some((numero) => seenNumbers.has(numero));
+
+          const evalRes = await evaluarEstadoLead(
+            client,
+            tel,
+            cel,
+            row.origen_dato || null,
+            organizationId,
+            null,
+            {
+              nombre: row.nombre || null,
+              apellido: row.apellido || null,
+              fechaNacimiento: row.fecha_nacimiento || null,
+              direccion: row.direccion || null,
+              email: row.correo_electronico || row.email || null,
+              localidad: row.localidad || null,
+              departamento: row.departamento || null,
+              readOnly: true,
+              isDuplicateInImport
+            }
+          );
+
+          for (const numero of currentNumbers) {
+            seenNumbers.add(numero);
+          }
+
+          let resultado = "valido";
+          if (evalRes.motivoBloqueo === "cliente_existente") {
+            resultado = "cliente_activo";
+            resumen.cliente_activo += 1;
+          } else if (evalRes.motivoBloqueo === "no_llamar") {
+            resultado = "no_llamar";
+            resumen.no_llamar += 1;
+          } else if (evalRes.motivoBloqueo === "duplicado") {
+            resultado = "duplicado";
+            resumen.duplicados += 1;
+          } else {
+            resumen.validos += 1;
+          }
+
+          if (muestra.length < 10) {
+            muestra.push({
+              nombre: row.nombre || null,
+              apellido: row.apellido || null,
+              telefono: tel,
+              celular: cel,
+              departamento: row.departamento || null,
+              origen_dato: row.origen_dato || null,
+              resultado
+            });
+          }
+        }
+
+        return json(200, {
+          total: rows.length,
+          ignoredEmptyRows,
+          columnasDetectadas,
+          resumen,
+          muestra
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to preview datos para trabajar import",
         error: error.message
       });
     }
