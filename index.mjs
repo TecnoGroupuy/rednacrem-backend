@@ -1188,15 +1188,15 @@ function getDepartamentoFromFixed(numero) {
   if (n.startsWith("444")) return "Lavalleja";
   if (n.startsWith("477")) return "Artigas";
   if (n.startsWith("473")) return "Salto";
-  if (n.startsWith("472")) return "Paysandï¿½";
-  if (n.startsWith("456")) return "Rï¿½o Negro";
+  if (n.startsWith("472")) return "Paysandú";
+  if (n.startsWith("456")) return "Río Negro";
   if (n.startsWith("453")) return "Soriano";
-  if (n.startsWith("434")) return "San Josï¿½";
+  if (n.startsWith("434")) return "San José";
   if (n.startsWith("447")) return "Rocha";
   if (n.startsWith("445")) return "Treinta y Tres";
   if (n.startsWith("464")) return "Cerro Largo";
   if (n.startsWith("462")) return "Rivera";
-  if (n.startsWith("463")) return "Tacuarembï¿½";
+  if (n.startsWith("463")) return "Tacuarembó";
   return null;
 }
 
@@ -1368,7 +1368,7 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "4587": "Playa Fomento",
   "4588": "Santa Ana",
   "4622": "Rivera",
-  "4632": "Tacuarembï¿½",
+  "4632": "Tacuarembó",
   "4640": "Aceguï¿½",
   "4642": "Melo",
   "4654": "Vichadero",
@@ -1420,9 +1420,9 @@ const DEPARTAMENTO_BY_PREFIX = {
   "4311": "Florida", "4318": "Florida", "4319": "Florida", "4339": "Florida",
   "4352": "Florida", "4354": "Florida",
   "4466": "Florida",
-  // San Jose
-  "4342": "San Jose", "4345": "San Jose", "4346": "San Jose", "4348": "San Jose",
-  "4349": "San Jose",
+  // San José
+  "4342": "San José", "4345": "San José", "4346": "San José", "4348": "San José",
+  "4349": "San José",
   // Durazno
   "4360": "Durazno", "4362": "Durazno", "4365": "Durazno", "4367": "Durazno",
   "4368": "Durazno", "4369": "Durazno",
@@ -1444,17 +1444,17 @@ const DEPARTAMENTO_BY_PREFIX = {
   "4530": "Colonia", "4542": "Colonia", "4574": "Colonia",
   // Soriano
   "4534": "Soriano", "4536": "Soriano", "4537": "Soriano", "4538": "Soriano", "5432": "Soriano",
-  // Rio Negro
-  "4562": "Rio Negro", "4567": "Rio Negro", "4568": "Rio Negro", "4569": "Rio Negro",
+  // Río Negro
+  "4562": "Río Negro", "4567": "Río Negro", "4568": "Río Negro", "4569": "Río Negro",
   // Rivera
   "4622": "Rivera", "4654": "Rivera", "4656": "Rivera", "4658": "Rivera",
-  // Tacuarembo
-  "4632": "Tacuarembo", "4664": "Tacuarembo",
+  // Tacuarembó
+  "4632": "Tacuarembó", "4633": "Tacuarembó", "4664": "Tacuarembó",
   // Cerro Largo
   "4640": "Cerro Largo", "4642": "Cerro Largo", "4675": "Cerro Largo",
   "4679": "Cerro Largo", "4888": "Cerro Largo",
-  // Paysandu
-  "4722": "Paysandu", "4742": "Paysandu", "4747": "Paysandu", "4754": "Paysandu",
+  // Paysandú
+  "4722": "Paysandú", "4742": "Paysandú", "4747": "Paysandú", "4754": "Paysandú",
   // Salto
   "4730": "Salto", "4732": "Salto", "4733": "Salto", "4764": "Salto", "4766": "Salto",
   // Artigas
