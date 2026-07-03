@@ -1395,10 +1395,82 @@ const NO_CALL_LOCALIDAD_BY_PREFIX = {
   "5432": "Mercedes"
 };
 
+const DEPARTAMENTO_BY_PREFIX = {
+  // Montevideo
+  "2000": "Montevideo", "2203": "Montevideo", "2222": "Montevideo", "2314": "Montevideo",
+  "2320": "Montevideo", "2322": "Montevideo", "2347": "Montevideo", "2355": "Montevideo",
+  "2401": "Montevideo", "2409": "Montevideo", "2487": "Montevideo", "2506": "Montevideo",
+  "2601": "Montevideo", "2712": "Montevideo", "2902": "Montevideo", "2916": "Montevideo",
+  "2312": "Montevideo",
+  // Canelones
+  "2292": "Canelones", "2294": "Canelones", "2295": "Canelones", "2296": "Canelones",
+  "2362": "Canelones", "2364": "Canelones", "2369": "Canelones", "2372": "Canelones",
+  "2682": "Canelones", "2696": "Canelones", "4332": "Canelones", "4373": "Canelones",
+  "4374": "Canelones", "4375": "Canelones", "4376": "Canelones", "4377": "Canelones",
+  "4378": "Canelones", "4399": "Canelones", "4335": "Canelones", "4336": "Canelones",
+  "4338": "Canelones", "4312": "Canelones", "4313": "Canelones", "4315": "Canelones",
+  "4317": "Canelones", "4334": "Canelones",
+  // Maldonado
+  "4222": "Maldonado", "4223": "Maldonado", "4224": "Maldonado", "4225": "Maldonado",
+  "4244": "Maldonado", "4248": "Maldonado", "4249": "Maldonado", "4255": "Maldonado",
+  "4257": "Maldonado", "4266": "Maldonado", "4277": "Maldonado", "4430": "Maldonado",
+  "4432": "Maldonado", "4434": "Maldonado", "4438": "Maldonado", "4446": "Maldonado",
+  "4486": "Maldonado",
+  // Florida
+  "4311": "Florida", "4318": "Florida", "4319": "Florida", "4339": "Florida",
+  "4352": "Florida", "4354": "Florida",
+  "4466": "Florida",
+  // San Jose
+  "4342": "San Jose", "4345": "San Jose", "4346": "San Jose", "4348": "San Jose",
+  "4349": "San Jose",
+  // Durazno
+  "4360": "Durazno", "4362": "Durazno", "4365": "Durazno", "4367": "Durazno",
+  "4368": "Durazno", "4369": "Durazno",
+  // Flores
+  "4364": "Flores",
+  "4539": "Flores",
+  // Lavalleja
+  "4442": "Lavalleja", "4447": "Lavalleja", "4448": "Lavalleja", "4449": "Lavalleja",
+  "4455": "Lavalleja", "4463": "Lavalleja", "4469": "Lavalleja",
+  // Treinta y Tres
+  "4452": "Treinta y Tres", "4458": "Treinta y Tres", "4464": "Treinta y Tres",
+  // Rocha
+  "4456": "Rocha", "4457": "Rocha", "4459": "Rocha", "4472": "Rocha",
+  "4474": "Rocha", "4475": "Rocha", "4476": "Rocha", "4477": "Rocha", "4479": "Rocha",
+  // Colonia
+  "4522": "Colonia", "4544": "Colonia", "4552": "Colonia", "4554": "Colonia",
+  "4558": "Colonia", "4575": "Colonia", "4576": "Colonia", "4577": "Colonia",
+  "4586": "Colonia", "4587": "Colonia", "4588": "Colonia",
+  "4530": "Colonia", "4542": "Colonia", "4574": "Colonia",
+  // Soriano
+  "4534": "Soriano", "4536": "Soriano", "4537": "Soriano", "4538": "Soriano", "5432": "Soriano",
+  // Rio Negro
+  "4562": "Rio Negro", "4567": "Rio Negro", "4568": "Rio Negro", "4569": "Rio Negro",
+  // Rivera
+  "4622": "Rivera", "4654": "Rivera", "4656": "Rivera", "4658": "Rivera",
+  // Tacuarembo
+  "4632": "Tacuarembo", "4664": "Tacuarembo",
+  // Cerro Largo
+  "4640": "Cerro Largo", "4642": "Cerro Largo", "4675": "Cerro Largo",
+  "4679": "Cerro Largo", "4888": "Cerro Largo",
+  // Paysandu
+  "4722": "Paysandu", "4742": "Paysandu", "4747": "Paysandu", "4754": "Paysandu",
+  // Salto
+  "4730": "Salto", "4732": "Salto", "4733": "Salto", "4764": "Salto", "4766": "Salto",
+  // Artigas
+  "4772": "Artigas", "4776": "Artigas", "4777": "Artigas", "4778": "Artigas", "4779": "Artigas"
+};
+
 function getLocalidadFromFixed(numero) {
   if (!numero || numero.length < 4) return null;
   const prefix = numero.slice(0, 4);
   return NO_CALL_LOCALIDAD_BY_PREFIX[prefix] || null;
+}
+
+function getDepartamentoFromFixedPrefix(numero) {
+  if (!numero || numero.length < 4) return null;
+  const prefix = numero.slice(0, 4);
+  return DEPARTAMENTO_BY_PREFIX[prefix] || null;
 }
 
 const NO_CALL_JOB_CHUNK_SIZE = 5000;
@@ -3360,11 +3432,11 @@ function mapDatosParaTrabajarCsv(csvText, { origenDatoFallback = null } = {}) {
     item.telefono = telefono;
     item.celular = celular;
 
-    if (!item.departamento && telefono) {
-      item.departamento = getDepartamentoFromFixed(telefono);
-    }
     if (!item.localidad && telefono) {
       item.localidad = getLocalidadFromFixed(telefono);
+    }
+    if (!item.departamento && telefono) {
+      item.departamento = getDepartamentoFromFixedPrefix(telefono) || getDepartamentoFromFixed(telefono);
     }
     if (!item.origen_dato && origenDatoFallback) {
       item.origen_dato = origenDatoFallback;
