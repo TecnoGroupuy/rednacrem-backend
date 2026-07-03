@@ -25865,6 +25865,8 @@ async function getNewContactsDistribution(client, batchId) {
 
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const pageSize = Math.max(1, Number(getQueryParam(event, "pageSize") || 20));
+      const departamento = normalizeText(getQueryParam(event, "departamento") || "");
+      const origenDato = normalizeText(getQueryParam(event, "origen_dato") || "");
       const search = normalizeText(getQueryParam(event, "search") || "");
       const blockedFilterRaw = getQueryParam(event, "bloqueado_no_llamar");
       const blockedFilter =
@@ -25915,8 +25917,8 @@ async function getNewContactsDistribution(client, batchId) {
         idx += 1;
       }
 
-      if (search) {
-        whereParts.push(`(
+        if (search) {
+          whereParts.push(`(
           d.nombre ILIKE $${idx}
             OR d.apellido ILIKE $${idx}
             OR d.documento ILIKE $${idx}
@@ -25927,6 +25929,18 @@ async function getNewContactsDistribution(client, batchId) {
             OR d.localidad ILIKE $${idx}
           )`);
           values.push(`%${search}%`);
+          idx += 1;
+        }
+
+        if (departamento) {
+          whereParts.push(`d.departamento ILIKE $${idx}`);
+          values.push(`%${departamento}%`);
+          idx += 1;
+        }
+
+        if (origenDato) {
+          whereParts.push(`d.origen_dato ILIKE $${idx}`);
+          values.push(`%${origenDato}%`);
           idx += 1;
         }
 
@@ -25988,9 +26002,15 @@ async function getNewContactsDistribution(client, batchId) {
             d.localidad,
             d.origen_dato,
             d.estado,
+            d.motivo_bloqueo,
+            lbc.batch_id,
+            lb.nombre AS batch_nombre,
             d.created_at,
             ${blockedExistsSql} AS bloqueado_no_llamar
           FROM datos_para_trabajar d
+          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
+          LEFT JOIN lead_batches lb ON lb.id = lbc.batch_id
+            AND lb.estado IN ('activo', 'asignado')
           ${whereClause}
           ORDER BY created_at DESC
           LIMIT $${idx} OFFSET $${idx + 1}
@@ -26011,6 +26031,9 @@ async function getNewContactsDistribution(client, batchId) {
           return {
             ...row,
             bloqueado_no_llamar: Boolean(row.bloqueado_no_llamar),
+            motivo_bloqueo: row.motivo_bloqueo || null,
+            batch_nombre: row.batch_nombre || null,
+            disponibilidad: row.batch_id ? "en_lote" : "disponible",
             estado,
             estado_label: estadoLabel
           };
