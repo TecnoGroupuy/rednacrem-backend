@@ -25886,7 +25886,7 @@ async function getNewContactsDistribution(client, batchId) {
         let idx = 1;
 
       if (organizationId) {
-        whereParts.push(`organization_id = $${idx}`);
+        whereParts.push(`d.organization_id = $${idx}`);
         values.push(organizationId);
         idx += 1;
       }
@@ -26024,7 +26024,7 @@ async function getNewContactsDistribution(client, batchId) {
           LEFT JOIN lead_batches lb ON lb.id = lbc.batch_id
             AND lb.estado IN ('activo', 'asignado')
           ${whereClause}
-          ORDER BY created_at DESC
+          ORDER BY d.created_at DESC
           LIMIT $${idx} OFFSET $${idx + 1}
           `,
           [...values, pageSize, offset]
