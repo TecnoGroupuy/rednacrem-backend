@@ -26172,12 +26172,13 @@ async function getNewContactsDistribution(client, batchId) {
       }
 
       whereParts.push(`
-        d.id NOT IN (
-          SELECT lbc.contact_id
+        NOT EXISTS (
+          SELECT 1
           FROM lead_batch_contacts lbc
           JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lb.estado IN ('activo', 'asignado')
-          ${organizationId ? `AND lbc.organization_id = $1` : ""}
+          WHERE lbc.contact_id = d.id
+            AND lb.estado IN ('activo', 'asignado')
+            ${organizationId ? `AND lbc.organization_id = $1` : ""}
         )
       `);
 
@@ -26187,11 +26188,12 @@ async function getNewContactsDistribution(client, batchId) {
           return json(400, { ok: false, message: "excludeBatchId inválido" });
         }
         whereParts.push(`
-          d.id NOT IN (
-            SELECT lbc.contact_id
+          NOT EXISTS (
+            SELECT 1
             FROM lead_batch_contacts lbc
-            WHERE lbc.batch_id = $${idx}
-            ${organizationId ? `AND lbc.organization_id = $1` : ""}
+            WHERE lbc.contact_id = d.id
+              AND lbc.batch_id = $${idx}
+              ${organizationId ? `AND lbc.organization_id = $1` : ""}
           )
         `);
         values.push(excludeBatchId);
@@ -26267,7 +26269,7 @@ async function getNewContactsDistribution(client, batchId) {
           `
           SELECT COUNT(*)::int AS total
           FROM datos_para_trabajar d
-          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
+          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id AND lbc.contact_id IS NOT NULL
           LEFT JOIN lead_batches lb ON lb.id = lbc.batch_id
             AND lb.estado IN ('activo', 'asignado')
           ${whereClause}
@@ -26300,7 +26302,7 @@ async function getNewContactsDistribution(client, batchId) {
             d.created_at,
             ${blockedExistsSql} AS bloqueado_no_llamar
           FROM datos_para_trabajar d
-          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
+          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id AND lbc.contact_id IS NOT NULL
           LEFT JOIN lead_batches lb ON lb.id = lbc.batch_id
             AND lb.estado IN ('activo', 'asignado')
           ${whereClause}
