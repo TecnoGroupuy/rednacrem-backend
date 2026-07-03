@@ -25868,6 +25868,7 @@ async function getNewContactsDistribution(client, batchId) {
       const departamento = normalizeText(getQueryParam(event, "departamento") || "");
       const origenDato = normalizeText(getQueryParam(event, "origen_dato") || "");
       const search = normalizeText(getQueryParam(event, "search") || "");
+      const disponibilidad = normalizeText(getQueryParam(event, "disponibilidad") || "");
       const blockedFilterRaw = getQueryParam(event, "bloqueado_no_llamar");
       const blockedFilter =
         blockedFilterRaw === undefined || blockedFilterRaw === null || blockedFilterRaw === ""
@@ -25944,6 +25945,14 @@ async function getNewContactsDistribution(client, batchId) {
           idx += 1;
         }
 
+        if (disponibilidad === "en_lote") {
+          whereParts.push(`lbc.batch_id IS NOT NULL`);
+        }
+
+        if (disponibilidad === "disponible") {
+          whereParts.push(`lbc.batch_id IS NULL`);
+        }
+
         const normalizedCelular = buildNormalizedPhoneSql("d.celular");
         const normalizedTelefono = buildNormalizedPhoneSql("d.telefono");
         const blockedExistsSql = `
@@ -25978,6 +25987,9 @@ async function getNewContactsDistribution(client, batchId) {
           `
           SELECT COUNT(*)::int AS total
           FROM datos_para_trabajar d
+          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id
+          LEFT JOIN lead_batches lb ON lb.id = lbc.batch_id
+            AND lb.estado IN ('activo', 'asignado')
           ${whereClause}
           `,
           values
