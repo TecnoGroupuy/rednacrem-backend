@@ -1,5 +1,18 @@
 import { AppError } from "./errors.js";
 
+export const ALLOWED_ORIGINS = [
+  "https://rednacrem.tri.uy",
+  "https://globalassist.tri.uy",
+  "https://callcenter.tri.uy",
+];
+
+// Pure helper: resolve a whitelisted CORS origin from the incoming request.
+export function resolveAllowedOrigin(event) {
+  const headers = event?.headers || {};
+  const origin = headers.origin || headers.Origin || "";
+  return ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+}
+
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "https://rednacrem.tri.uy",
   "Access-Control-Allow-Headers":

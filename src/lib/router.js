@@ -1,4 +1,4 @@
-import { getMethod, getPath, normalizeError } from "./http.js";
+import { getMethod, getPath, normalizeError, resolveAllowedOrigin } from "./http.js";
 import { notFound } from "./errors.js";
 
 function compileRoute(pathTemplate) {
@@ -11,6 +11,18 @@ function compileRoute(pathTemplate) {
   return {
     regex: new RegExp(`^${pattern}$`),
     paramNames,
+  };
+}
+
+function withCorsOrigin(response, event) {
+  const origin = resolveAllowedOrigin(event);
+  return {
+    ...response,
+    headers: {
+      ...response?.headers,
+      "Access-Control-Allow-Origin": origin,
+      Vary: "Origin",
+    },
   };
 }
 
@@ -40,12 +52,13 @@ export function createRouter(routes) {
           params[name] = decodeURIComponent(match[index + 1]);
         });
 
-        return await route.handler(event, { params });
+        const response = await route.handler(event, { params });
+        return withCorsOrigin(response, event);
       }
 
       throw notFound(`Route ${method} ${path} not found`);
     } catch (error) {
-      return normalizeError(error);
+      return withCorsOrigin(normalizeError(error), event);
     }
   };
 }
