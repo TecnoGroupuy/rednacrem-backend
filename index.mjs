@@ -27786,7 +27786,7 @@ async function getNewContactsDistribution(client, batchId) {
         });
       }
 
-      const DEFAULT_VENDOR_PASSWORD = 'Rednacrem@2026';
+      const DEFAULT_VENDOR_PASSWORD = 'Tri@2026';
 
       const payload = {
         nombre: validation.data.nombre,

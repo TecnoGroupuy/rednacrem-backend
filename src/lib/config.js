@@ -2,7 +2,7 @@ export const config = {
   awsRegion: process.env.AWS_REGION || process.env.COGNITO_REGION || "us-east-1",
   cognitoUserPoolId: process.env.COGNITO_USER_POOL_ID || "",
   cognitoClientId: process.env.COGNITO_CLIENT_ID || "",
-  cognitoDefaultPassword: process.env.COGNITO_TEMP_PASSWORD || "ChangeMe123!",
+  cognitoDefaultPassword: process.env.COGNITO_TEMP_PASSWORD || "Tri@2026",
   cognitoSellerGroup: process.env.COGNITO_SELLER_GROUP || "vendedor",
   db: {
     connectionString: process.env.DATABASE_URL || undefined,
