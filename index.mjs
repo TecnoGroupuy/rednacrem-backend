@@ -3672,6 +3672,93 @@ function buildDatosTrabajarInsertBatch(
   };
 }
 
+function addNormalizedPreviewNumbers(targetSet, ...values) {
+  for (const value of values) {
+    if (value) targetSet.add(value);
+  }
+}
+
+function addPreviewRowNumbersToSet(targetSet, row) {
+  addNormalizedPreviewNumbers(
+    targetSet,
+    cleanPhone(row?.telefono) || null,
+    cleanPhone(row?.celular) || null
+  );
+}
+
+async function fetchDatosTrabajarPreviewLookup(client, organizationId, numbers) {
+  const emptyLookup = {
+    existingDatosSet: new Set(),
+    activeClientSet: new Set(),
+    noCallSet: new Set()
+  };
+
+  if (!organizationId || !Array.isArray(numbers) || numbers.length === 0) {
+    return emptyLookup;
+  }
+
+  const existingDatosRes = await client.query(
+    `
+    SELECT telefono, celular
+    FROM datos_para_trabajar
+    WHERE organization_id = $1
+      AND NOT (
+        coalesce(estado, '') = 'bloqueado'
+        AND coalesce(motivo_bloqueo, '') = 'reemplazado'
+      )
+      AND (
+        telefono = ANY($2::text[])
+        OR celular = ANY($2::text[])
+      )
+    `,
+    [organizationId, numbers]
+  );
+
+  const activeClientsRes = await client.query(
+    `
+    SELECT DISTINCT c.telefono, c.celular
+    FROM contacts c
+    JOIN contact_products cp ON cp.contact_id = c.id
+    WHERE c.organization_id = $1
+      AND cp.estado = 'alta'
+      AND (
+        c.telefono = ANY($2::text[])
+        OR c.celular = ANY($2::text[])
+      )
+    `,
+    [organizationId, numbers]
+  );
+
+  const noCallRes = await client.query(
+    `
+    SELECT numero
+    FROM no_call_entries
+    WHERE numero = ANY($1::text[])
+    `,
+    [numbers]
+  );
+
+  const existingDatosSet = new Set();
+  for (const row of existingDatosRes.rows) {
+    addNormalizedPreviewNumbers(existingDatosSet, row.telefono || null, row.celular || null);
+  }
+
+  const activeClientSet = new Set();
+  for (const row of activeClientsRes.rows) {
+    addNormalizedPreviewNumbers(activeClientSet, row.telefono || null, row.celular || null);
+  }
+
+  const noCallSet = new Set(
+    noCallRes.rows.map((row) => row.numero || null).filter(Boolean)
+  );
+
+  return {
+    existingDatosSet,
+    activeClientSet,
+    noCallSet
+  };
+}
+
 async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId, extra = {}) {
   const readOnly = extra?.readOnly === true;
   const isDuplicateInImport = extra?.isDuplicateInImport === true;
@@ -26044,6 +26131,17 @@ async function getNewContactsDistribution(client, batchId) {
       await client.connect();
 
       try {
+        const numbersSet = new Set();
+        for (const row of rows) {
+          addPreviewRowNumbersToSet(numbersSet, row);
+        }
+
+        const {
+          existingDatosSet,
+          activeClientSet,
+          noCallSet
+        } = await fetchDatosTrabajarPreviewLookup(client, organizationId, Array.from(numbersSet));
+
         const seenNumbers = new Set();
         const resumen = {
           validos: 0,
@@ -26059,40 +26157,27 @@ async function getNewContactsDistribution(client, batchId) {
           const currentNumbers = [tel, cel].filter(Boolean);
           const isDuplicateInImport = currentNumbers.some((numero) => seenNumbers.has(numero));
 
-          const evalRes = await evaluarEstadoLead(
-            client,
-            tel,
-            cel,
-            row.origen_dato || null,
-            organizationId,
-            null,
-            {
-              nombre: row.nombre || null,
-              apellido: row.apellido || null,
-              fechaNacimiento: row.fecha_nacimiento || null,
-              direccion: row.direccion || null,
-              email: row.correo_electronico || row.email || null,
-              localidad: row.localidad || null,
-              departamento: row.departamento || null,
-              readOnly: true,
-              isDuplicateInImport
-            }
-          );
-
           for (const numero of currentNumbers) {
             seenNumbers.add(numero);
           }
 
           let resultado = "valido";
-          if (evalRes.motivoBloqueo === "cliente_existente") {
-            resultado = "cliente_activo";
-            resumen.cliente_activo += 1;
-          } else if (evalRes.motivoBloqueo === "no_llamar") {
-            resultado = "no_llamar";
-            resumen.no_llamar += 1;
-          } else if (evalRes.motivoBloqueo === "duplicado") {
+          const existsInDatos = currentNumbers.some((numero) => existingDatosSet.has(numero));
+          const isActiveClient = currentNumbers.some((numero) => activeClientSet.has(numero));
+          const isNoCall = currentNumbers.some((numero) => noCallSet.has(numero));
+          const esMeta =
+            row.origen_dato &&
+            String(row.origen_dato).toLowerCase().includes("facebook");
+
+          if (isDuplicateInImport || existsInDatos) {
             resultado = "duplicado";
             resumen.duplicados += 1;
+          } else if (isActiveClient) {
+            resultado = "cliente_activo";
+            resumen.cliente_activo += 1;
+          } else if (isNoCall && !esMeta) {
+            resultado = "no_llamar";
+            resumen.no_llamar += 1;
           } else {
             resumen.validos += 1;
           }
