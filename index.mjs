@@ -20919,6 +20919,129 @@ async function getNewContactsDistribution(client, batchId) {
   }));
 }
 
+function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
+  const {
+    search,
+    departamento,
+    origenDato,
+    excludeBatchId,
+    disponibilidad,
+    blockedFilter,
+    estadoFilter
+  } = params || {};
+
+  const whereParts = [];
+  const values = [];
+  let idx = startIdx;
+  let orgParamIdx = null;
+
+  if (organizationId) {
+    orgParamIdx = idx;
+    whereParts.push(`d.organization_id = $${idx}`);
+    values.push(organizationId);
+    idx += 1;
+  }
+
+  whereParts.push(`LOWER(COALESCE(d.origen_dato, '')) <> 'recupero'`);
+
+  whereParts.push(`
+    NOT EXISTS (
+      SELECT 1
+      FROM lead_batch_contacts lbc
+      JOIN lead_batches lb ON lb.id = lbc.batch_id
+      WHERE lbc.contact_id = d.id
+        AND lb.estado IN ('activo', 'asignado')
+        ${orgParamIdx ? `AND lbc.organization_id = $${orgParamIdx}` : ""}
+    )
+  `);
+
+  if (excludeBatchId) {
+    if (!isValidUuid(excludeBatchId)) {
+      const error = new Error("excludeBatchId inválido");
+      error.status = 400;
+      throw error;
+    }
+    whereParts.push(`
+      NOT EXISTS (
+        SELECT 1
+        FROM lead_batch_contacts lbc
+        WHERE lbc.contact_id = d.id
+          AND lbc.batch_id = $${idx}
+          ${orgParamIdx ? `AND lbc.organization_id = $${orgParamIdx}` : ""}
+      )
+    `);
+    values.push(excludeBatchId);
+    idx += 1;
+  }
+
+  if (search) {
+    whereParts.push(`(
+      d.nombre ILIKE $${idx}
+        OR d.apellido ILIKE $${idx}
+        OR d.documento ILIKE $${idx}
+        OR d.telefono ILIKE $${idx}
+        OR d.celular ILIKE $${idx}
+        OR d.email ILIKE $${idx}
+        OR d.departamento ILIKE $${idx}
+        OR d.localidad ILIKE $${idx}
+      )`);
+    values.push(`%${search}%`);
+    idx += 1;
+  }
+
+  if (departamento) {
+    whereParts.push(`d.departamento ILIKE $${idx}`);
+    values.push(`%${departamento}%`);
+    idx += 1;
+  }
+
+  if (origenDato) {
+    whereParts.push(`d.origen_dato ILIKE $${idx}`);
+    values.push(`%${origenDato}%`);
+    idx += 1;
+  }
+
+  if (disponibilidad === "en_lote") {
+    whereParts.push(`lbc.batch_id IS NOT NULL`);
+  }
+
+  if (disponibilidad === "disponible") {
+    whereParts.push(`lbc.batch_id IS NULL`);
+  }
+
+  const normalizedCelular = buildNormalizedPhoneSql("d.celular");
+  const normalizedTelefono = buildNormalizedPhoneSql("d.telefono");
+  const blockedExistsSql = `
+    EXISTS (
+      SELECT 1
+      FROM no_call_entries n
+      WHERE n.numero IN (${normalizedCelular}, ${normalizedTelefono})
+    )
+  `;
+
+  if (blockedFilter === "true") {
+    whereParts.push(blockedExistsSql);
+  } else if (blockedFilter === "false") {
+    whereParts.push(`NOT ${blockedExistsSql}`);
+  }
+
+  if (estadoFilter) {
+    if (estadoFilter === "bloqueado") {
+      whereParts.push(blockedExistsSql);
+    } else if (estadoFilter === "nuevo") {
+      whereParts.push(`(d.estado IS NULL OR d.estado = 'nuevo')`);
+      whereParts.push(`NOT ${blockedExistsSql}`);
+    } else if (estadoFilter === "trabajado") {
+      whereParts.push(`d.estado = 'trabajado'`);
+      whereParts.push(`NOT ${blockedExistsSql}`);
+    }
+  }
+
+  const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+  return { whereClause, values, nextIdx: idx, blockedExistsSql };
+}
+
   if (method === "POST" && path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/)) {
     const match = path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts$/);
     const batchId = match?.[1];
@@ -21090,6 +21213,235 @@ async function getNewContactsDistribution(client, batchId) {
       return json(500, {
         ok: false,
         message: "Failed to add contacts to batch",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts-by-filter$/)) {
+    const filterMatch = path.match(/\/api\/lead-batches\/([^/]+)\/add-contacts-by-filter$/);
+    const batchId = filterMatch?.[1];
+    if (!batchId || !isValidUuid(batchId)) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const filter = body?.filter && typeof body.filter === "object" ? body.filter : {};
+
+    const limitRaw = body?.limit;
+    let limit = null;
+    if (limitRaw !== undefined && limitRaw !== null && limitRaw !== "") {
+      limit = Number(limitRaw);
+      if (!Number.isFinite(limit) || limit <= 0) {
+        return json(400, { ok: false, message: "limit inválido" });
+      }
+      limit = Math.floor(limit);
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        // 1) Validar lote
+        const loteValues = [batchId];
+        let loteOrgClause = "";
+        if (organizationId) {
+          loteValues.push(organizationId);
+          loteOrgClause = "AND organization_id = $2";
+        }
+        const loteRes = await client.query(
+          `
+          SELECT id, estado
+          FROM lead_batches
+          WHERE id = $1
+          ${loteOrgClause}
+          LIMIT 1
+          `,
+          loteValues
+        );
+        if (!loteRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+        const estadoLote = String(loteRes.rows[0]?.estado || "");
+        if (!["activo", "asignado"].includes(estadoLote)) {
+          return json(400, { ok: false, message: "El lote no está activo" });
+        }
+
+        // 2) Armar el mismo WHERE que usa el listado GET /datos-para-trabajar
+        let whereBuild;
+        try {
+          whereBuild = buildDatosParaTrabajarWhere(
+            {
+              search: normalizeText(filter.search || ""),
+              departamento: normalizeText(filter.departamento || ""),
+              origenDato: normalizeText(filter.origen_dato || ""),
+              excludeBatchId: filter.excludeBatchId || null,
+              disponibilidad: normalizeText(filter.disponibilidad || ""),
+              blockedFilter:
+                filter.bloqueado_no_llamar === undefined ||
+                filter.bloqueado_no_llamar === null ||
+                filter.bloqueado_no_llamar === ""
+                  ? null
+                  : String(filter.bloqueado_no_llamar).toLowerCase(),
+              estadoFilter: filter.estado ? normalizeText(filter.estado) : null
+            },
+            organizationId
+          );
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
+        const { whereClause, values, nextIdx } = whereBuild;
+
+        // 3) Seleccionar ids candidatos (sin paginar, con límite opcional parametrizado)
+        const idsValues = [...values];
+        let limitClause = "";
+        if (limit) {
+          limitClause = `LIMIT $${nextIdx}`;
+          idsValues.push(limit);
+        }
+
+        const idsRes = await client.query(
+          `
+          SELECT d.id
+          FROM datos_para_trabajar d
+          LEFT JOIN lead_batch_contacts lbc ON lbc.contact_id = d.id AND lbc.contact_id IS NOT NULL
+          LEFT JOIN lead_batches lb ON lb.id = lbc.batch_id
+            AND lb.estado IN ('activo', 'asignado')
+          ${whereClause}
+          ORDER BY d.created_at DESC
+          ${limitClause}
+          `,
+          idsValues
+        );
+        const candidateIds = idsRes.rows.map((r) => r.id);
+
+        if (!candidateIds.length) {
+          const distribution = await getNewContactsDistribution(client, batchId);
+          return json(200, { ok: true, added: 0, distribution });
+        }
+
+        const insertChunkSize = 5000;
+        let added = 0;
+        let distribution = [];
+
+        await client.query("BEGIN");
+        try {
+          // 4a) lead_batch_contacts, en chunks con UNNEST
+          for (let i = 0; i < candidateIds.length; i += insertChunkSize) {
+            const chunk = candidateIds.slice(i, i + insertChunkSize);
+            const insertValues = [batchId, chunk];
+            let orgCols = "";
+            let orgSelect = "";
+            if (organizationId) {
+              insertValues.push(organizationId);
+              orgCols = ", organization_id";
+              orgSelect = ", $3";
+            }
+            const result = await client.query(
+              `
+              INSERT INTO lead_batch_contacts (batch_id, contact_id${orgCols})
+              SELECT $1, UNNEST($2::uuid[])${orgSelect}
+              ON CONFLICT DO NOTHING
+              `,
+              insertValues
+            );
+            added += result.rowCount;
+          }
+
+          // 4b) Detectar en una sola query cuáles ya están bloqueados (misma lógica que isLeadBlockedInDpt)
+          const blockedRes = await client.query(
+            `
+            SELECT id
+            FROM datos_para_trabajar
+            WHERE id = ANY($1::uuid[])
+              AND estado = 'bloqueado'
+            `,
+            [candidateIds]
+          );
+          const blockedIds = new Set(blockedRes.rows.map((r) => r.id));
+          const nonBlockedIds = candidateIds.filter((id) => !blockedIds.has(id));
+
+          for (let i = 0; i < nonBlockedIds.length; i += insertChunkSize) {
+            const chunk = nonBlockedIds.slice(i, i + insertChunkSize);
+            const statusValues = [chunk, batchId];
+            let orgCols = "";
+            let orgSelect = "";
+            let orgUpdate = "";
+            if (organizationId) {
+              statusValues.push(organizationId);
+              orgCols = ", organization_id";
+              orgSelect = ", $3";
+              orgUpdate = ", organization_id = $3";
+            }
+            await client.query(
+              `
+              INSERT INTO lead_contact_status (
+                contact_id, batch_id, assigned_to, estado_venta, intentos${orgCols}
+              )
+              SELECT UNNEST($1::uuid[]), $2, NULL, 'nuevo', 0${orgSelect}
+              ON CONFLICT (contact_id) DO UPDATE
+              SET
+                batch_id = EXCLUDED.batch_id,
+                assigned_to = NULL,
+                estado_venta = 'nuevo',
+                intentos = 0,
+                updated_at = now()
+                ${orgUpdate}
+              `,
+              statusValues
+            );
+          }
+
+          // 4c) Redistribuir y calcular distribución una sola vez
+          await redistributeNewContacts(client, batchId);
+          distribution = await getNewContactsDistribution(client, batchId);
+
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+
+        return json(200, { ok: true, added, distribution });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to add contacts to batch by filter",
         error: error.message
       });
     }
@@ -26317,111 +26669,29 @@ async function getNewContactsDistribution(client, batchId) {
       const client = createDbClient();
       await client.connect();
       try {
-        const whereParts = [];
-        const values = [];
-        let idx = 1;
-
-      if (organizationId) {
-        whereParts.push(`d.organization_id = $${idx}`);
-        values.push(organizationId);
-        idx += 1;
-      }
-
-      whereParts.push(`LOWER(COALESCE(d.origen_dato, '')) <> 'recupero'`);
-
-      whereParts.push(`
-        NOT EXISTS (
-          SELECT 1
-          FROM lead_batch_contacts lbc
-          JOIN lead_batches lb ON lb.id = lbc.batch_id
-          WHERE lbc.contact_id = d.id
-            AND lb.estado IN ('activo', 'asignado')
-            ${organizationId ? `AND lbc.organization_id = $1` : ""}
-        )
-      `);
-
-      const excludeBatchId = getQueryParam(event, "excludeBatchId");
-      if (excludeBatchId) {
-        if (!isValidUuid(excludeBatchId)) {
-          return json(400, { ok: false, message: "excludeBatchId inválido" });
-        }
-        whereParts.push(`
-          NOT EXISTS (
-            SELECT 1
-            FROM lead_batch_contacts lbc
-            WHERE lbc.contact_id = d.id
-              AND lbc.batch_id = $${idx}
-              ${organizationId ? `AND lbc.organization_id = $1` : ""}
-          )
-        `);
-        values.push(excludeBatchId);
-        idx += 1;
-      }
-
-        if (search) {
-          whereParts.push(`(
-          d.nombre ILIKE $${idx}
-            OR d.apellido ILIKE $${idx}
-            OR d.documento ILIKE $${idx}
-            OR d.telefono ILIKE $${idx}
-            OR d.celular ILIKE $${idx}
-            OR d.email ILIKE $${idx}
-            OR d.departamento ILIKE $${idx}
-            OR d.localidad ILIKE $${idx}
-          )`);
-          values.push(`%${search}%`);
-          idx += 1;
-        }
-
-        if (departamento) {
-          whereParts.push(`d.departamento ILIKE $${idx}`);
-          values.push(`%${departamento}%`);
-          idx += 1;
-        }
-
-        if (origenDato) {
-          whereParts.push(`d.origen_dato ILIKE $${idx}`);
-          values.push(`%${origenDato}%`);
-          idx += 1;
-        }
-
-        if (disponibilidad === "en_lote") {
-          whereParts.push(`lbc.batch_id IS NOT NULL`);
-        }
-
-        if (disponibilidad === "disponible") {
-          whereParts.push(`lbc.batch_id IS NULL`);
-        }
-
-        const normalizedCelular = buildNormalizedPhoneSql("d.celular");
-        const normalizedTelefono = buildNormalizedPhoneSql("d.telefono");
-        const blockedExistsSql = `
-          EXISTS (
-            SELECT 1
-            FROM no_call_entries n
-            WHERE n.numero IN (${normalizedCelular}, ${normalizedTelefono})
-          )
-        `;
-
-        if (blockedFilter === "true") {
-          whereParts.push(blockedExistsSql);
-        } else if (blockedFilter === "false") {
-          whereParts.push(`NOT ${blockedExistsSql}`);
-        }
-
-        if (estadoFilter) {
-          if (estadoFilter === "bloqueado") {
-            whereParts.push(blockedExistsSql);
-          } else if (estadoFilter === "nuevo") {
-            whereParts.push(`(d.estado IS NULL OR d.estado = 'nuevo')`);
-            whereParts.push(`NOT ${blockedExistsSql}`);
-          } else if (estadoFilter === "trabajado") {
-            whereParts.push(`d.estado = 'trabajado'`);
-            whereParts.push(`NOT ${blockedExistsSql}`);
+        let whereBuild;
+        try {
+          whereBuild = buildDatosParaTrabajarWhere(
+            {
+              search,
+              departamento,
+              origenDato,
+              excludeBatchId: getQueryParam(event, "excludeBatchId"),
+              disponibilidad,
+              blockedFilter,
+              estadoFilter
+            },
+            organizationId
+          );
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
           }
+          throw error;
         }
 
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+        const { whereClause, values, blockedExistsSql } = whereBuild;
+        let idx = whereBuild.nextIdx;
 
         const countResult = await client.query(
           `
