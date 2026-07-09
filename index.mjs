@@ -1687,15 +1687,46 @@ function* iterateCsvLines(input) {
   }
 }
 
-function* iterateNoCallValues(csvText) {
+function parseNoCallFileHeader(csvText) {
+  const lines = String(csvText || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  let metadataLineCount = 0;
+  let numeroTramite = null;
+  let fechaConsulta = null;
+
+  for (let i = 0; i < Math.min(lines.length, 5); i += 1) {
+    const line = lines[i].trim();
+    const tramiteMatch = line.match(/n[uú]mero\s+de\s+tr[aá]mite\s*:\s*(.+)/i);
+    const fechaMatch = line.match(/fecha\s+de\s+consulta\s*:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i);
+
+    if (tramiteMatch) {
+      numeroTramite = tramiteMatch[1].trim();
+      metadataLineCount = i + 1;
+      continue;
+    }
+    if (fechaMatch) {
+      const [d, m, y] = fechaMatch[1].split("/");
+      fechaConsulta = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      metadataLineCount = i + 1;
+      continue;
+    }
+    if (i > 0 && !tramiteMatch && !fechaMatch) break;
+  }
+
+  if (metadataLineCount === 0) metadataLineCount = 1;
+
+  return { metadataLineCount, numeroTramite, fechaConsulta };
+}
+
+function* iterateNoCallValues(csvText, skipLines = 1) {
   const text = String(csvText || "").replace(/^\uFEFF/, "");
   const iterator = iterateCsvLines(text);
-  const headerResult = iterator.next();
-  const header = headerResult.done ? "" : headerResult.value || "";
-  const delimiter = detectCsvDelimiter(header);
+  for (let i = 0; i < skipLines; i += 1) {
+    const r = iterator.next();
+    if (r.done) return;
+  }
   for (const line of iterator) {
     if (!line) continue;
-    const cells = parseCsvLine(line, delimiter);
+    const cells = parseCsvLine(line, detectCsvDelimiter(line));
     const first = cells[0] || "";
     if (first && first.trim()) {
       yield first.trim();
@@ -1723,8 +1754,9 @@ export async function processNoCallJob(jobId, options = {}) {
     if (!jobRes.rows.length) return;
 
     const csvText = jobRes.rows[0].csv_text || "";
-    const totalRows = Math.max(0, countCsvRows(csvText) - 1);
-    const valuesIter = iterateNoCallValues(csvText);
+    const { metadataLineCount } = parseNoCallFileHeader(csvText);
+    const totalRows = Math.max(0, countCsvRows(csvText) - metadataLineCount);
+    const valuesIter = iterateNoCallValues(csvText, metadataLineCount);
 
     let index = options.startAt ?? jobRes.rows[0].processed_rows ?? 0;
     let inserted = jobRes.rows[0].inserted_rows ?? 0;
@@ -21822,12 +21854,38 @@ async function getNewContactsDistribution(client, batchId) {
           FROM no_call_entries
           `
         );
+        const lastUpdateResult = await client.query(
+          `
+          SELECT numero_tramite, fecha_consulta, completed_at
+          FROM no_call_import_jobs
+          WHERE status = 'completed'
+          ORDER BY completed_at DESC
+          LIMIT 1
+          `
+        );
+        const lastUpdate = lastUpdateResult.rows[0] || null;
+        const lastUpdateFechaConsulta = lastUpdate?.fecha_consulta
+          ? new Date(lastUpdate.fecha_consulta).toISOString().slice(0, 10)
+          : null;
 
-        return json(200, statsResult.rows[0] || {
-          total: 0,
-          celulares: 0,
-          montevideo: 0,
-          interior: 0
+        return json(200, {
+          ...(statsResult.rows[0] || {
+            total: 0,
+            celulares: 0,
+            montevideo: 0,
+            interior: 0
+          }),
+          ultimaActualizacion: lastUpdate
+            ? {
+                numeroTramite: lastUpdate.numero_tramite || null,
+                fechaConsulta: lastUpdateFechaConsulta,
+                completedAt: lastUpdate.completed_at || null
+              }
+            : {
+                numeroTramite: null,
+                fechaConsulta: null,
+                completedAt: null
+              }
         });
       } finally {
         await client.end();
@@ -22484,6 +22542,8 @@ async function getNewContactsDistribution(client, batchId) {
       return json(400, { ok: false, message: "CSV vacio" });
     }
 
+    const { numeroTramite, fechaConsulta } = parseNoCallFileHeader(csvText);
+
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -22512,15 +22572,20 @@ async function getNewContactsDistribution(client, batchId) {
             inserted_rows,
             skipped_rows,
             csv_text,
-            created_by
+            created_by,
+            numero_tramite,
+            fecha_consulta
           )
-          VALUES ($1, 'queued', 0, 0, 0, 0, $2, $3)
-          RETURNING id, status, file_name, created_at
+          VALUES ($1, 'queued', 0, 0, 0, 0, $2, $3, $4, $5)
+          RETURNING id, status, file_name, created_at, numero_tramite, fecha_consulta
           `,
-          [fileName, csvText, dbUser?.id || null]
+          [fileName, csvText, dbUser?.id || null, numeroTramite, fechaConsulta]
         );
         const job = jobResult.rows[0];
         const jobId = job.id;
+        const fechaConsultaStr = job.fecha_consulta
+          ? new Date(job.fecha_consulta).toISOString().slice(0, 10)
+          : null;
         await enqueueNoCallJob(jobId);
         return json(201, {
           ok: true,
@@ -22529,6 +22594,8 @@ async function getNewContactsDistribution(client, batchId) {
             status: job.status,
             fileName: job.file_name,
             createdAt: job.created_at,
+            numeroTramite: job.numero_tramite || null,
+            fechaConsulta: fechaConsultaStr,
             total: 0,
             processed: 0,
             inserted: 0,
