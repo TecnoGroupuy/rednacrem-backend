@@ -2589,6 +2589,23 @@ async function applyInactividadSiCorresponde(client, agenteId, now) {
   const inactiveAt = addMinutes(lastSeen, INACTIVITY_MINUTES);
   if (now <= inactiveAt) return { changed: false, state };
 
+  const activeRes = await client.query(
+    `
+    SELECT *
+    FROM eventos_turno
+    WHERE agente_id = $1
+      AND fin IS NULL
+    ORDER BY inicio DESC
+    LIMIT 1
+    `,
+    [agenteId]
+  );
+  const activeEvent = activeRes.rows[0] || null;
+  if (activeEvent) {
+    const config = await getConfigMap(client);
+    await closeActiveTurnEvent(client, activeEvent, inactiveAt, config);
+  }
+
   await client.query(
     `
     INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
@@ -24894,6 +24911,22 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
 
         if (currentAfterInactivity && currentAfterInactivity.tipo === "INACTIVO") {
           const fecha = formatDateYmd(now);
+          const activeInactivoRes = await client.query(
+            `
+            SELECT *
+            FROM eventos_turno
+            WHERE agente_id = $1
+              AND fin IS NULL
+            ORDER BY inicio DESC
+            LIMIT 1
+            `,
+            [dbUser.id]
+          );
+          const activeInactivoEvent = activeInactivoRes.rows[0] || null;
+          if (activeInactivoEvent) {
+            const config = await getConfigMap(client);
+            await closeActiveTurnEvent(client, activeInactivoEvent, now, config);
+          }
           await client.query(
             `
             INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
@@ -25725,13 +25758,18 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             `,
             [agenteId, now, fecha]
           );
-          await client.query(
-            `
-            INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
-            VALUES ($1, 'TRABAJO', $2, NULL, $3)
-            `,
-            [agenteId, now, fecha]
-          );
+          if (activeEvent && activeEvent.tipo !== "TRABAJO") {
+            await closeEvent(activeEvent);
+          }
+          if (!activeEvent || activeEvent.tipo !== "TRABAJO") {
+            await client.query(
+              `
+              INSERT INTO eventos_turno (agente_id, tipo, inicio, fin, fecha)
+              VALUES ($1, 'TRABAJO', $2, NULL, $3)
+              `,
+              [agenteId, now, fecha]
+            );
+          }
           await upsertEstadoAgenteActual(client, agenteId, "TRABAJO", now, null, now);
         } else if (tipoNormalized === "LOGOUT") {
           if (activeEvent) {
