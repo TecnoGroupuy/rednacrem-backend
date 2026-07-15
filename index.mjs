@@ -18540,9 +18540,20 @@ export const handler = async (event) => {
           );
           let ventaContactId = null;
           let ventaContactMatchedExisting = false;
+          let ventaContactMatchedOutsideOrg = false;
           const contactCols = await getTableColumns(client, "contacts");
 
           const resolveExistingContactId = async (payload, orgId, preferredContactId = null) => {
+            const buildMatch = (row, matchedBy, scope = "org") => (
+              row?.id
+                ? {
+                    id: row.id,
+                    organizationId: row.organization_id || null,
+                    matchedBy,
+                    scope
+                  }
+                : null
+            );
             const normalizedDocumento = normalizeDocumento(payload?.documento || "");
             const normalizedEmail = normalizeEmail(payload?.email || payload?.correo_electronico || "");
             const phoneDigits = Array.from(
@@ -18565,7 +18576,8 @@ export const handler = async (event) => {
                 `,
                 contactCols.has("organization_id") ? [preferredContactId, orgId] : [preferredContactId]
               );
-              if (preferredRes.rows[0]?.id) return preferredRes.rows[0].id;
+              const preferredMatch = buildMatch(preferredRes.rows[0], "preferred");
+              if (preferredMatch) return preferredMatch;
             }
 
             if (normalizedDocumento) {
@@ -18586,7 +18598,8 @@ export const handler = async (event) => {
                 `,
                 documentoValues
               );
-              if (documentoRes.rows[0]?.id) return documentoRes.rows[0].id;
+              const documentoMatch = buildMatch(documentoRes.rows[0], "documento");
+              if (documentoMatch) return documentoMatch;
             }
 
             if (normalizedEmail) {
@@ -18607,7 +18620,23 @@ export const handler = async (event) => {
                 `,
                 emailValues
               );
-              if (emailRes.rows[0]?.id) return emailRes.rows[0].id;
+              const emailMatch = buildMatch(emailRes.rows[0], "email");
+              if (emailMatch) return emailMatch;
+
+              if (contactCols.has("organization_id")) {
+                const globalEmailRes = await client.query(
+                  `
+                  SELECT id, organization_id
+                  FROM contacts
+                  WHERE lower(trim(coalesce(email, ''))) = $1
+                  ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                  LIMIT 1
+                  `,
+                  [normalizedEmail]
+                );
+                const globalEmailMatch = buildMatch(globalEmailRes.rows[0], "email", "global");
+                if (globalEmailMatch) return globalEmailMatch;
+              }
             }
 
             for (const phoneDigitsValue of phoneDigits) {
@@ -18631,7 +18660,8 @@ export const handler = async (event) => {
                 `,
                 phoneValues
               );
-              if (phoneRes.rows[0]?.id) return phoneRes.rows[0].id;
+              const phoneMatch = buildMatch(phoneRes.rows[0], "phone");
+              if (phoneMatch) return phoneMatch;
             }
 
             return null;
@@ -18677,7 +18707,7 @@ export const handler = async (event) => {
           };
 
           if (leadData) {
-            ventaContactId = await resolveExistingContactId(
+            const existingContactMatch = await resolveExistingContactId(
               {
                 documento: candidateDocumento,
                 email: candidateEmail,
@@ -18687,7 +18717,16 @@ export const handler = async (event) => {
               ventaOrganizationId,
               leadData.contact_id || null
             );
+            ventaContactId = existingContactMatch?.id || null;
             ventaContactMatchedExisting = Boolean(ventaContactId);
+            ventaContactMatchedOutsideOrg = Boolean(
+              existingContactMatch &&
+              existingContactMatch.scope === "global" &&
+              contactCols.has("organization_id") &&
+              ventaOrganizationId &&
+              existingContactMatch.organizationId &&
+              String(existingContactMatch.organizationId) !== String(ventaOrganizationId)
+            );
             if (ventaContactId) {
               await syncLeadContactId(ventaContactId);
             }
@@ -18730,15 +18769,49 @@ export const handler = async (event) => {
               insertContactVals.push(ventaOrganizationId);
             }
             const insertContactPlaceholders = insertContactVals.map((_, idx) => `$${idx + 1}`);
-            const insertContactRes = await client.query(
-              `
-              INSERT INTO contacts (${insertContactCols.join(", ")}, created_at, updated_at)
-              VALUES (${insertContactPlaceholders.join(", ")}, now(), now())
-              RETURNING id
-              `,
-              insertContactVals
-            );
-            ventaContactId = insertContactRes.rows[0]?.id || null;
+            try {
+              const insertContactRes = await client.query(
+                `
+                INSERT INTO contacts (${insertContactCols.join(", ")}, created_at, updated_at)
+                VALUES (${insertContactPlaceholders.join(", ")}, now(), now())
+                RETURNING id
+                `,
+                insertContactVals
+              );
+              ventaContactId = insertContactRes.rows[0]?.id || null;
+            } catch (insertError) {
+              const duplicateEmailConstraint =
+                String(insertError?.constraint || "").trim() === "contacts_email_unique_idx" ||
+                /contacts_email_unique_idx/i.test(String(insertError?.message || ""));
+              if (!duplicateEmailConstraint) {
+                throw insertError;
+              }
+
+              const fallbackContactMatch = await resolveExistingContactId(
+                {
+                  documento: candidateDocumento,
+                  email: candidateEmail,
+                  telefono: contactData.telefono || leadData.telefono || "",
+                  celular: contactData.celular || leadData.celular || ""
+                },
+                ventaOrganizationId,
+                leadData.contact_id || null
+              );
+              ventaContactId = fallbackContactMatch?.id || null;
+              ventaContactMatchedExisting = Boolean(ventaContactId);
+              ventaContactMatchedOutsideOrg = Boolean(
+                fallbackContactMatch &&
+                fallbackContactMatch.scope === "global" &&
+                contactCols.has("organization_id") &&
+                ventaOrganizationId &&
+                fallbackContactMatch.organizationId &&
+                String(fallbackContactMatch.organizationId) !== String(ventaOrganizationId)
+              );
+
+              if (!ventaContactId) {
+                throw insertError;
+              }
+            }
             if (ventaContactId) {
               await syncLeadContactId(ventaContactId);
             }
@@ -18762,7 +18835,7 @@ export const handler = async (event) => {
               normalizeText(contactData.pais) || null
             ];
             console.log('[venta-contact-update] updating existing contact:', ventaContactId, JSON.stringify(updateValues.slice(1)));
-            const contactUpdateOrgClause = contactCols.has("organization_id") && ventaOrganizationId
+            const contactUpdateOrgClause = contactCols.has("organization_id") && ventaOrganizationId && !ventaContactMatchedOutsideOrg
               ? ` AND organization_id = $${updateValues.length + 1}`
               : "";
             const contactUpdateRes = await client.query(
