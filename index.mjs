@@ -3145,16 +3145,52 @@ async function getWorkReportRange(client, fechaDesde, fechaHasta, timezone = LOC
     [fechaDesde, fechaHasta, timezone, now, filterUserId, organizationId]
   );
 
-  return result.rows.map((row) => ({
-    fecha: row.fecha ? formatDateYmd(new Date(row.fecha)) : null,
-    id: row.id,
-    nombre: row.nombre,
-    apellido: row.apellido,
-    tipo: row.tipo,
-    inicioUtc: row.inicio_utc ? new Date(row.inicio_utc) : null,
-    finEfectivoUtc: row.fin_efectivo_utc ? new Date(row.fin_efectivo_utc) : null,
-    duracionSeg: Number(row.duracion_seg || 0)
-  }));
+  const porDia = new Map();
+  for (const row of result.rows) {
+    const fecha = row.fecha ? formatDateYmd(new Date(row.fecha)) : null;
+    if (!fecha) continue;
+    if (!porDia.has(fecha)) {
+      porDia.set(fecha, {
+        dia: fecha,
+        tiempoProductivoSeg: 0,
+        descansosSeg: 0,
+        banosSeg: 0,
+        supervisorSeg: 0,
+        inactivoSeg: 0
+      });
+    }
+    const acc = porDia.get(fecha);
+    const seg = Number(row.duracion_seg || 0);
+    const tipo = row.tipo;
+    if (tipo === "TRABAJO") acc.tiempoProductivoSeg += seg;
+    else if (tipo === "DESCANSO") acc.descansosSeg += seg;
+    else if (tipo === "BANO" || tipo === "BA?O") acc.banosSeg += seg;
+    else if (tipo === "SUPERVISOR") acc.supervisorSeg += seg;
+    else if (tipo === "INACTIVO") acc.inactivoSeg += seg;
+  }
+
+  let totalHorasSeg = 0;
+  const dias = Array.from(porDia.values())
+    .sort((a, b) => a.dia.localeCompare(b.dia))
+    .map((d) => {
+      const totalJornadaSeg = d.tiempoProductivoSeg + d.descansosSeg + d.banosSeg + d.supervisorSeg + d.inactivoSeg;
+      totalHorasSeg += d.tiempoProductivoSeg;
+      return {
+        dia: d.dia,
+        tiempoProductivoSeg: d.tiempoProductivoSeg,
+        descansosSeg: d.descansosSeg,
+        banosSeg: d.banosSeg,
+        supervisorSeg: d.supervisorSeg,
+        totalJornadaSeg,
+        tiempoProductivoLabel: formatDurationLabel(d.tiempoProductivoSeg),
+        descansosLabel: formatDurationLabel(d.descansosSeg),
+        banosLabel: formatDurationLabel(d.banosSeg),
+        supervisorLabel: formatDurationLabel(d.supervisorSeg),
+        totalJornadaLabel: formatDurationLabel(totalJornadaSeg)
+      };
+    });
+
+  return { totalHorasSeg, dias };
 }
 
 async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
