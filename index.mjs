@@ -28310,9 +28310,44 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
              u.role_key,
              u.status,
              u.created_at,
-             ou.role_in_org
+             ou.role_in_org,
+             CASE
+               WHEN u.status = 'baja' THEN baja_hist.changed_at
+               ELSE NULL
+             END AS fecha_baja,
+             CASE
+               WHEN u.status = 'baja' THEN proc.nombre_completo
+               ELSE NULL
+             END AS procesado_por,
+             CASE
+               WHEN u.status = 'baja' THEN COALESCE(reasignados.total, 0)
+               ELSE NULL
+             END AS contactos_reasignados_count
            FROM organization_users ou
            JOIN users u ON u.id = ou.user_id
+           LEFT JOIN LATERAL (
+             SELECT
+               ush.changed_at,
+               ush.changed_by
+             FROM user_status_history ush
+             WHERE ush.user_id = u.id
+               AND ush.new_status = 'baja'
+             ORDER BY ush.changed_at DESC
+             LIMIT 1
+           ) baja_hist ON u.status = 'baja'
+           LEFT JOIN LATERAL (
+             SELECT
+               NULLIF(TRIM(CONCAT(p.nombre, ' ', p.apellido)), '') AS nombre_completo
+             FROM users p
+             WHERE p.id = baja_hist.changed_by
+           ) proc ON u.status = 'baja'
+           LEFT JOIN LATERAL (
+             SELECT
+               COUNT(*)::int AS total
+             FROM lead_management_history lmh
+             WHERE lmh.resultado = 'reasignado'
+               AND lmh.nota ILIKE ('%' || NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), '') || '%')
+           ) reasignados ON u.status = 'baja'
            WHERE ou.organization_id = $1
              AND u.role_key IN ('vendedor', 'atencion_cliente')
              ${incluirInactivos ? "" : "AND ou.activo = true"}
@@ -28875,7 +28910,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       try {
         // Verificar que el target es vendedor si quien ejecuta es supervisor
         const targetUser = await client.query(
-          `SELECT role_key FROM users WHERE id = $1`,
+          `SELECT role_key, status FROM users WHERE id = $1`,
           [userId]
         );
 
@@ -29037,6 +29072,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             `;
           }
 
+          const previousStatus = targetUser.rows[0].status || null;
+
           const userRes = await client.query(
             `
             UPDATE users
@@ -29052,6 +29089,25 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             await client.query("ROLLBACK");
             return json(404, { ok: false, message: "Usuario no encontrado" });
           }
+
+          await client.query(
+            `
+            INSERT INTO user_status_history (
+              user_id,
+              old_status,
+              new_status,
+              changed_by,
+              reason
+            )
+            VALUES ($1, $2, 'baja', $3, $4)
+            `,
+            [
+              userId,
+              previousStatus,
+              dbUser.id,
+              "Baja procesada desde módulo equipo de venta"
+            ]
+          );
 
           const orgValues = [userId];
           let orgClause = "";
