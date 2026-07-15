@@ -659,6 +659,62 @@ async function getLeadContactColumns(client) {
   return leadContactColumnsCache;
 }
 
+let datosParaTrabajarSourceColumnsReady = false;
+async function ensureDatosParaTrabajarSourceColumns(client) {
+  if (datosParaTrabajarSourceColumnsReady) return;
+
+  await client.query(`
+    ALTER TABLE datos_para_trabajar
+    ADD COLUMN IF NOT EXISTS source_family text,
+    ADD COLUMN IF NOT EXISTS source_channel text,
+    ADD COLUMN IF NOT EXISTS source_system text
+  `);
+
+  await client.query(`
+    UPDATE datos_para_trabajar
+    SET
+      source_family = COALESCE(
+        source_family,
+        CASE
+          WHEN lower(trim(coalesce(origen_dato, ''))) IN ('facebook', 'instagram', 'whatsapp', 'sitio web', 'formulario web', 'web form', 'web_form', 'meta')
+            THEN 'hot'
+          WHEN lower(trim(coalesce(origen_dato, ''))) = 'manual'
+            THEN 'manual'
+          WHEN lower(trim(coalesce(origen_dato, ''))) = 'discado auto'
+            THEN 'discado'
+          WHEN lower(trim(coalesce(origen_dato, ''))) = 'recupero'
+            THEN 'recupero'
+          ELSE source_family
+        END
+      ),
+      source_channel = COALESCE(
+        source_channel,
+        CASE
+          WHEN lower(trim(coalesce(origen_dato, ''))) = 'facebook' THEN 'facebook'
+          WHEN lower(trim(coalesce(origen_dato, ''))) = 'instagram' THEN 'instagram'
+          WHEN lower(trim(coalesce(origen_dato, ''))) = 'whatsapp' THEN 'whatsapp'
+          WHEN lower(trim(coalesce(origen_dato, ''))) IN ('sitio web', 'formulario web', 'web form', 'web_form') THEN 'web_form'
+          ELSE source_channel
+        END
+      ),
+      source_system = COALESCE(
+        source_system,
+        CASE
+          WHEN lower(trim(coalesce(origen_dato, ''))) IN ('facebook', 'instagram', 'whatsapp', 'sitio web', 'formulario web', 'web form', 'web_form', 'meta', 'manual', 'discado auto', 'recupero')
+            THEN 'legacy_backfill'
+          ELSE source_system
+        END
+      )
+    WHERE source_family IS NULL
+       OR source_channel IS NULL
+       OR source_system IS NULL
+  `);
+
+  leadContactColumnsCache = null;
+  tableColumnsCache.delete("datos_para_trabajar");
+  datosParaTrabajarSourceColumnsReady = true;
+}
+
 function normalizePhoneDigits(value) {
   const digits = String(value || "").replace(/\D/g, "");
   return digits || "";
@@ -760,11 +816,78 @@ function normalizarOrigenDato(origen) {
     whatsapp: "WhatsApp",
     facebook: "Facebook",
     instagram: "Instagram",
-    "sitio web": "Sitio web",
+    "sitio web": "Formulario web",
+    "formulario web": "Formulario web",
+    "web form": "Formulario web",
+    web_form: "Formulario web",
     meta: "Meta"
   };
   const key = String(origen).toLowerCase().trim();
   return map[key] || origen;
+}
+
+const HOT_SOURCE_CHANNEL_OPTIONS = [
+  { value: "facebook", label: "Facebook" },
+  { value: "instagram", label: "Instagram" },
+  { value: "whatsapp", label: "WhatsApp" },
+  { value: "web_form", label: "Formulario web" }
+];
+
+function normalizeHotSourceChannel(value, extraHints = []) {
+  const values = [value, ...extraHints]
+    .filter(Boolean)
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const item of values) {
+    if (item.includes("whatsapp")) return "whatsapp";
+    if (item.includes("instagram")) return "instagram";
+    if (item.includes("facebook")) return "facebook";
+    if (
+      item.includes("formulario web") ||
+      item.includes("web form") ||
+      item.includes("sitio web") ||
+      item.includes("website") ||
+      item.includes("landing") ||
+      item.includes("webform") ||
+      item.includes("web_form")
+    ) {
+      return "web_form";
+    }
+  }
+
+  return null;
+}
+
+function buildLeadSourceDescriptor({
+  family = null,
+  channel = null,
+  system = null
+} = {}) {
+  return {
+    sourceFamily: family || null,
+    sourceChannel: channel || null,
+    sourceSystem: system || null
+  };
+}
+
+function inferAutomatedHotLeadSource({
+  origenDato = null,
+  campaignName = null,
+  formName = null,
+  fallbackChannel = null,
+  sourceSystem = "automation"
+} = {}) {
+  const sourceChannel = normalizeHotSourceChannel(
+    origenDato,
+    [campaignName, formName]
+  ) || fallbackChannel || null;
+
+  return buildLeadSourceDescriptor({
+    family: sourceChannel ? "hot" : null,
+    channel: sourceChannel,
+    system: sourceChannel ? sourceSystem : null
+  });
 }
 
 function isNullOrEmpty(value) {
@@ -8965,6 +9088,7 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
   try {
     await client.query("BEGIN");
     try {
+      await ensureDatosParaTrabajarSourceColumns(client);
       const loteRes = await client.query(
         `
         SELECT id, estado
@@ -9004,6 +9128,11 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
       }
 
       const leadCols = await getTableColumns(client, "datos_para_trabajar");
+      const manualSource = buildLeadSourceDescriptor({
+        family: "manual",
+        channel: null,
+        system: "manual_ui"
+      });
       await client.query(`
         ALTER TABLE datos_para_trabajar
         ADD COLUMN IF NOT EXISTS ingresado_por uuid REFERENCES users(id)
@@ -9146,6 +9275,9 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
         addCol("correo_electronico", correoElectronico);
         addCol("departamento", departamento);
         addCol("origen_dato", normalizarOrigenDato(origenDato || "manual"));
+        addCol("source_family", manualSource.sourceFamily);
+        addCol("source_channel", manualSource.sourceChannel);
+        addCol("source_system", manualSource.sourceSystem);
         addCol("organization_id", organizationId);
         addCol("ingresado_por", userId);
 
@@ -9825,6 +9957,12 @@ export const handler = async (event) => {
           const client = createDbClient();
           await client.connect();
           try {
+            await ensureDatosParaTrabajarSourceColumns(client);
+            const sourceMeta = buildLeadSourceDescriptor({
+              family: "hot",
+              channel: "facebook",
+              system: "meta_webhook"
+            });
             const evalRes = await evaluarEstadoLead(
               client,
               telefono || null,
@@ -9880,6 +10018,9 @@ export const handler = async (event) => {
               "celular",
               "correo_electronico",
               "origen_dato",
+              "source_family",
+              "source_channel",
+              "source_system",
               "estado",
               ...(hasMotivoBloqueo ? ["motivo_bloqueo"] : []),
               ...(hasMotivoBloqueoDetalle ? ["motivo_bloqueo_detalle"] : []),
@@ -9892,6 +10033,9 @@ export const handler = async (event) => {
               celular,
               email,
               normalizarOrigenDato("facebook"),
+              sourceMeta.sourceFamily,
+              sourceMeta.sourceChannel,
+              sourceMeta.sourceSystem,
               estado,
               ...(hasMotivoBloqueo ? [motivoBloqueo] : []),
               ...(hasMotivoBloqueoDetalle ? [motivoBloqueoDetalle] : []),
@@ -10004,6 +10148,13 @@ export const handler = async (event) => {
       const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato) || "facebook");
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
+      const sourceMeta = inferAutomatedHotLeadSource({
+        origenDato,
+        campaignName: campana,
+        formName: formulario,
+        fallbackChannel: "facebook",
+        sourceSystem: "meta_sheet"
+      });
 
       if (!telefono && !celular) {
         return json(400, { ok: false, message: "Se requiere teléfono o celular" });
@@ -10013,6 +10164,7 @@ export const handler = async (event) => {
       let responseData = { ok: true, skipped: true };
       try {
         await client.connect();
+        await ensureDatosParaTrabajarSourceColumns(client);
 
         // Normalizar telÃ©fono para comparaciÃ³n â€” quitar +598, 598, y 0 inicial
         const normalizeForCompare = (n) => {
@@ -10047,6 +10199,9 @@ export const handler = async (event) => {
           "email",
           "fecha_nacimiento",
           "origen_dato",
+          "source_family",
+          "source_channel",
+          "source_system",
           "estado",
           "organization_id",
           ...(hasDireccion ? ["direccion"] : []),
@@ -10065,6 +10220,9 @@ export const handler = async (event) => {
           email,
           fechaNacimiento,
           origenDato,
+          sourceMeta.sourceFamily,
+          sourceMeta.sourceChannel,
+          sourceMeta.sourceSystem,
           estado,
           orgId,
           ...(hasDireccion ? [direccion] : []),
@@ -10232,6 +10390,13 @@ export const handler = async (event) => {
       const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato) || "facebook");
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
+      const sourceMeta = inferAutomatedHotLeadSource({
+        origenDato,
+        campaignName: campana,
+        formName: formulario,
+        fallbackChannel: "facebook",
+        sourceSystem: "meta_sheet_global"
+      });
 
       if (!telefono && !celular) {
         return json(400, { ok: false, message: "Se requiere teléfono o celular" });
@@ -10241,6 +10406,7 @@ export const handler = async (event) => {
       let responseData = { ok: true, skipped: true };
       try {
         await client.connect();
+        await ensureDatosParaTrabajarSourceColumns(client);
 
         // Normalizar telÃ©fono para comparaciÃ³n â€” quitar +598, 598, y 0 inicial
         const normalizeForCompare = (n) => {
@@ -10267,15 +10433,15 @@ export const handler = async (event) => {
           `INSERT INTO datos_para_trabajar (
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
-            origen_dato, estado, organization_id,
+            origen_dato, source_family, source_channel, source_system, estado, organization_id,
             nota, localidad, departamento, fecha_lead, motivo_bloqueo${
               hasMotivoBloqueoDetalle ? ", motivo_bloqueo_detalle" : ""
             },
             campaign_name, form_name
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14${hasMotivoBloqueoDetalle ? ", $15" : ""},
-            $${hasMotivoBloqueoDetalle ? 16 : 15}, $${hasMotivoBloqueoDetalle ? 17 : 16}
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            $12, $13, $14, $15, $16${hasMotivoBloqueoDetalle ? ", $17" : ""},
+            $${hasMotivoBloqueoDetalle ? 18 : 17}, $${hasMotivoBloqueoDetalle ? 19 : 18}
           )
           RETURNING id`,
           hasMotivoBloqueoDetalle
@@ -10287,6 +10453,9 @@ export const handler = async (event) => {
                 email,
                 fechaNacimiento,
                 origenDato,
+                sourceMeta.sourceFamily,
+                sourceMeta.sourceChannel,
+                sourceMeta.sourceSystem,
                 estado,
                 orgId,
                 nota,
@@ -10306,6 +10475,9 @@ export const handler = async (event) => {
                 email,
                 fechaNacimiento,
                 origenDato,
+                sourceMeta.sourceFamily,
+                sourceMeta.sourceChannel,
+                sourceMeta.sourceSystem,
                 estado,
                 orgId,
                 nota,
@@ -10481,8 +10653,14 @@ export const handler = async (event) => {
     const client = createDbClient();
     await client.connect();
     try {
+      await ensureDatosParaTrabajarSourceColumns(client);
       const columnsInfo = await getLeadContactColumns(client);
       const dCols = columnsInfo.d;
+      const discadoSource = buildLeadSourceDescriptor({
+        family: "discado",
+        channel: null,
+        system: "discado_webhook"
+      });
 
       const columns = [];
       const placeholders = [];
@@ -10502,6 +10680,9 @@ export const handler = async (event) => {
       pushCol("direccion", direccion);
       pushCol("departamento", departamento);
       pushCol("origen_dato", normalizarOrigenDato(origenDato));
+      pushCol("source_family", discadoSource.sourceFamily);
+      pushCol("source_channel", discadoSource.sourceChannel);
+      pushCol("source_system", discadoSource.sourceSystem);
       pushCol("estado", "nuevo");
       pushCol("organization_id", organizationId);
       pushCol("fecha_lead", fechaLead);
@@ -23358,18 +23539,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
-        const result = await client.query(
-          `
-          SELECT DISTINCT origen_dato, COUNT(*) as total
-          FROM datos_para_trabajar
-          WHERE organization_id = $1
-            AND origen_dato IS NOT NULL AND origen_dato != ''
-          GROUP BY origen_dato
-          ORDER BY total DESC
-          `,
-          [organizationId]
-        );
-        return json(200, { ok: true, origenes: result.rows.map((r) => r.origen_dato) });
+        await ensureDatosParaTrabajarSourceColumns(client);
+        return json(200, {
+          ok: true,
+          origenes: HOT_SOURCE_CHANNEL_OPTIONS.map((item) => item.value)
+        });
       } finally {
         await client.end();
       }
@@ -23411,15 +23585,24 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
+        await ensureDatosParaTrabajarSourceColumns(client);
         // Definir rango de fechas
         let dateFilter = "";
         if (periodo === "dia") dateFilter = "AND d.created_at >= now() - interval '1 day'";
         else if (periodo === "semana") dateFilter = "AND d.created_at >= now() - interval '7 days'";
         else if (periodo === "mes") dateFilter = "AND d.created_at >= now() - interval '30 days'";
 
-        const orgFilter = organizationId ? `AND d.organization_id = '${organizationId}'` : "";
-        const origenFilter = origenDatoFilter ? "AND lower(coalesce(d.origen_dato, '')) = $1" : "";
-        const origenValues = origenDatoFilter ? [origenDatoFilter] : [];
+        const filterValues = [];
+        let filterIdx = 1;
+        const sourceFilters = [`coalesce(d.source_family, '') = 'hot'`];
+        if (origenDatoFilter) {
+          sourceFilters.push(`coalesce(d.source_channel, '') = $${filterIdx}`);
+          filterValues.push(origenDatoFilter);
+          filterIdx += 1;
+        }
+        sourceFilters.push(`d.organization_id = $${filterIdx}`);
+        filterValues.push(organizationId);
+        const sourceWhereClause = `AND ${sourceFilters.join(" AND ")}`;
 
         // MÃ©tricas generales
         const metricsRes = await client.query(
@@ -23440,11 +23623,10 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           WHERE 1=1
-          ${origenFilter}
-          ${orgFilter}
+          ${sourceWhereClause}
           ${dateFilter}
           `,
-          origenValues
+          filterValues
         );
 
         // Ingresos por dÃ­a (Ãºltimos 30 dÃ­as)
@@ -23458,13 +23640,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           WHERE 1=1
-            ${origenFilter}
+            ${sourceWhereClause}
             AND d.created_at >= now() - interval '30 days'
-            ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
           GROUP BY DATE(d.created_at AT TIME ZONE 'America/Montevideo')
           ORDER BY fecha DESC
           `,
-          origenValues
+          filterValues
         );
 
         // DistribuciÃ³n por vendedor
@@ -23482,14 +23663,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           JOIN users u ON u.id = lcs.assigned_to
           WHERE 1=1
-            ${origenFilter}
+            ${sourceWhereClause}
             AND u.status = 'activo'
-            ${organizationId ? `AND d.organization_id = '${organizationId}'` : ""}
             ${dateFilter.replace("d.created_at", "d.created_at")}
           GROUP BY u.id, u.nombre, u.apellido
           ORDER BY total DESC
           `,
-          origenValues
+          filterValues
         );
 
         return json(200, {
@@ -23550,6 +23730,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
+        await ensureDatosParaTrabajarSourceColumns(client);
         let dateFilter = "";
         if (periodo === "dia") dateFilter = "AND d.created_at >= now() - interval '1 day'";
         else if (periodo === "semana") dateFilter = "AND d.created_at >= now() - interval '7 days'";
@@ -23558,8 +23739,9 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         const filters = [];
         const filterValues = [];
         let filterIdx = 1;
+        filters.push(`coalesce(d.source_family, '') = 'hot'`);
         if (origenDatoFilter) {
-          filters.push(`lower(coalesce(d.origen_dato, '')) = $${filterIdx}`);
+          filters.push(`coalesce(d.source_channel, '') = $${filterIdx}`);
           filterValues.push(origenDatoFilter);
           filterIdx += 1;
         }
