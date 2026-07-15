@@ -2933,13 +2933,13 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       SELECT
         agente_id,
         SUM(CASE WHEN tipo = 'DESCANSO'
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS descanso_seg,
+          THEN EXTRACT(EPOCH FROM (LEAST(COALESCE(siguiente_inicio, $3), (($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE $2)) - inicio)) ELSE 0 END)::bigint AS descanso_seg,
         SUM(CASE WHEN tipo IN ('BANO', 'BA?O')
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS bano_seg,
+          THEN EXTRACT(EPOCH FROM (LEAST(COALESCE(siguiente_inicio, $3), (($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE $2)) - inicio)) ELSE 0 END)::bigint AS bano_seg,
         SUM(CASE WHEN tipo = 'SUPERVISOR'
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS supervisor_seg,
+          THEN EXTRACT(EPOCH FROM (LEAST(COALESCE(siguiente_inicio, $3), (($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE $2)) - inicio)) ELSE 0 END)::bigint AS supervisor_seg,
         SUM(CASE WHEN tipo = 'INACTIVO'
-          THEN EXTRACT(EPOCH FROM (COALESCE(siguiente_inicio, $3) - inicio)) ELSE 0 END)::bigint AS inactivo_seg
+          THEN EXTRACT(EPOCH FROM (LEAST(COALESCE(siguiente_inicio, $3), (($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE $2)) - inicio)) ELSE 0 END)::bigint AS inactivo_seg
       FROM intervalos
       GROUP BY agente_id
     ),
@@ -2948,10 +2948,10 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
         l.agente_id,
         l.login_utc,
         o.logout_utc,
-        COALESCE(o.logout_utc, $3) AS jornada_fin,
+        LEAST(COALESCE(o.logout_utc, $3), (($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE $2)) AS jornada_fin,
         CASE
           WHEN l.login_utc IS NULL THEN 0
-          ELSE EXTRACT(EPOCH FROM (COALESCE(o.logout_utc, $3) - l.login_utc))
+          ELSE EXTRACT(EPOCH FROM (LEAST(COALESCE(o.logout_utc, $3), (($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE $2)) - l.login_utc))
         END::bigint AS total_jornada_seg
       FROM logins l
       LEFT JOIN logouts o ON o.agente_id = l.agente_id
@@ -3032,6 +3032,110 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       totalJornadaLabel: totalJornadaSeg !== null ? formatDurationLabel(totalJornadaSeg) : null
     };
   });
+}
+
+async function getWorkReportRange(client, fechaDesde, fechaHasta, timezone = LOCAL_TZ, now = new Date(), filterUserId = null, organizationId = null) {
+  const result = await client.query(
+    `
+    WITH base AS (
+      SELECT
+        (e.inicio AT TIME ZONE $3)::date AS fecha_local,
+        e.agente_id,
+        e.tipo,
+        e.inicio,
+        e.fin
+      FROM eventos_turno e
+      WHERE (e.inicio AT TIME ZONE $3)::date BETWEEN $1::date AND $2::date
+        AND ($5::uuid IS NULL OR e.agente_id = $5::uuid)
+    ),
+    base_ranked AS (
+      SELECT
+        b.*,
+        CASE b.tipo
+          WHEN 'TRABAJO' THEN 1
+          WHEN 'INACTIVO' THEN 2
+          WHEN 'DESCANSO' THEN 3
+          WHEN 'BANO' THEN 4
+          WHEN 'BA?O' THEN 4
+          WHEN 'SUPERVISOR' THEN 5
+          WHEN 'LOGOUT' THEN 6
+          WHEN 'LOGIN' THEN 7
+          ELSE 99
+        END AS prioridad_tipo
+      FROM base b
+    ),
+    base_dedup AS (
+      SELECT *
+      FROM (
+        SELECT
+          br.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY br.fecha_local, br.agente_id, br.inicio
+            ORDER BY br.prioridad_tipo ASC
+          ) AS rn
+        FROM base_ranked br
+      ) x
+      WHERE x.rn = 1
+    ),
+    intervalos AS (
+      SELECT
+        fecha_local,
+        agente_id,
+        tipo,
+        inicio,
+        LEAD(inicio) OVER (
+          PARTITION BY fecha_local, agente_id
+          ORDER BY inicio
+        ) AS siguiente_inicio
+      FROM base_dedup
+    )
+    SELECT
+      i.fecha_local AS fecha,
+      u.id,
+      u.nombre,
+      u.apellido,
+      i.tipo,
+      i.inicio AS inicio_utc,
+      LEAST(
+        COALESCE(i.siguiente_inicio, $4),
+        ((i.fecha_local::date + INTERVAL '1 day')::timestamp AT TIME ZONE $3)
+      ) AS fin_efectivo_utc,
+      GREATEST(
+        EXTRACT(EPOCH FROM (
+          LEAST(
+            COALESCE(i.siguiente_inicio, $4),
+            ((i.fecha_local::date + INTERVAL '1 day')::timestamp AT TIME ZONE $3)
+          ) - i.inicio
+        )),
+        0
+      )::bigint AS duracion_seg
+    FROM intervalos i
+    JOIN users u ON u.id = i.agente_id
+    WHERE u.role_key = 'vendedor'
+      AND u.status != 'baja'
+      AND (u.is_test IS NULL OR u.is_test = false)
+      AND EXISTS (
+        SELECT 1
+        FROM organization_users ou
+        WHERE ou.user_id = u.id
+          AND ou.organization_id = $6::uuid
+          AND ou.activo = true
+      )
+    ORDER BY i.fecha_local ASC, u.nombre ASC, i.inicio ASC
+    `,
+    [fechaDesde, fechaHasta, timezone, now, filterUserId, organizationId]
+  );
+
+  return result.rows.map((row) => ({
+    fecha: row.fecha ? formatDateYmd(new Date(row.fecha)) : null,
+    id: row.id,
+    nombre: row.nombre,
+    apellido: row.apellido,
+    tipo: row.tipo,
+    inicioUtc: row.inicio_utc ? new Date(row.inicio_utc) : null,
+    finEfectivoUtc: row.fin_efectivo_utc ? new Date(row.fin_efectivo_utc) : null,
+    duracionSeg: Number(row.duracion_seg || 0)
+  }));
 }
 
 async function getAgentDetail(client, agenteId, fecha, now = new Date()) {
@@ -20774,7 +20878,18 @@ export const handler = async (event) => {
     }
   }
 
-async function redistributeNewContacts(client, batchId, fromSellerId = null) {
+async function redistributeNewContacts(client, batchId, fromSellerId = null, options = null) {
+  const requestedStates = Array.isArray(options?.states)
+    ? options.states.map((state) => String(state || "").trim()).filter(Boolean)
+    : [];
+  const states = requestedStates.length ? [...new Set(requestedStates)] : ["nuevo"];
+  const redistributionMode = options?.mode === "specific_seller" ? "specific_seller" : "round_robin";
+  const specificSellerId = options?.specificSellerId || null;
+
+  if (redistributionMode === "specific_seller" && !specificSellerId) {
+    throw new Error("specificSellerId es requerido para mode=specific_seller");
+  }
+
   let fromSellerNombre = null;
   if (fromSellerId) {
     const fromRes = await client.query(
@@ -20795,30 +20910,47 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null) {
     organizationId = orgRes.rows[0]?.organization_id || null;
   }
 
-  const sellersRes = await client.query(
-    `SELECT seller_id FROM lead_batch_sellers WHERE batch_id = $1 ORDER BY id ASC`,
-    [batchId]
-  );
-  if (!sellersRes.rows.length) return;
-  const sellerIds = sellersRes.rows.map((r) => r.seller_id);
+  let sellerIds = [];
+  if (redistributionMode === "round_robin") {
+    const sellersParams = [batchId];
+    let sellersWhere = `WHERE batch_id = $1`;
+    if (fromSellerId) {
+      sellersParams.push(fromSellerId);
+      sellersWhere += ` AND seller_id <> $2`;
+    }
+    const sellersRes = await client.query(
+      `SELECT seller_id FROM lead_batch_sellers ${sellersWhere} ORDER BY id ASC`,
+      sellersParams
+    );
+    if (!sellersRes.rows.length) return;
+    sellerIds = sellersRes.rows.map((r) => r.seller_id);
+  }
 
+  const contactsParams = [batchId, states];
+  let contactsWhere = `
+    WHERE batch_id = $1
+      AND estado_venta = ANY($2::text[])
+  `;
+  if (fromSellerId) {
+    contactsParams.push(fromSellerId);
+    contactsWhere += ` AND assigned_to = $3`;
+  }
   const contactsRes = await client.query(
     `
     SELECT contact_id, assigned_to
     FROM lead_contact_status
-    WHERE batch_id = $1
-      AND estado_venta = 'nuevo'
+    ${contactsWhere}
     ORDER BY created_at DESC
     `,
-    [batchId]
+    contactsParams
   );
   if (!contactsRes.rows.length) return;
   const contactIds = contactsRes.rows.map((r) => r.contact_id);
   const prevAssigned = contactsRes.rows.map((r) => r.assigned_to || null);
 
-  const assignedTo = contactIds.map(
-    (_contactId, index) => sellerIds[index % sellerIds.length]
-  );
+  const assignedTo = redistributionMode === "specific_seller"
+    ? contactIds.map(() => specificSellerId)
+    : contactIds.map((_contactId, index) => sellerIds[index % sellerIds.length]);
 
   const chunkSize = 500;
   for (let i = 0; i < contactIds.length; i += chunkSize) {
@@ -20835,10 +20967,10 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null) {
       ) v
       WHERE lcs.contact_id = v.contact_id
         AND lcs.batch_id = $3
-        AND lcs.estado_venta = 'nuevo'
+        AND lcs.estado_venta = ANY($4::text[])
         AND (lcs.assigned_to IS DISTINCT FROM v.assigned_to)
       `,
-      [contactChunk, assignedChunk, batchId]
+      [contactChunk, assignedChunk, batchId, states]
     );
   }
 
@@ -20909,6 +21041,8 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null) {
     }
   }
 }
+
+const LEAD_REDISTRIBUTION_PENDING_STATES = ["nuevo", "seguimiento", "rellamar", "no_contesta"];
 
 async function getNewContactsDistribution(client, batchId) {
   const res = await client.query(
@@ -28707,6 +28841,10 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     if (!userId) {
       return json(400, { ok: false, message: "User id requerido" });
     }
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
 
@@ -28754,128 +28892,269 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             message: "El supervisor solo puede desactivar vendedores"
           });
         }
-
-        await client.query("BEGIN");
-
-        const userValues = [userId];
-        let orgUserClause = "";
-        if (organizationId) {
-          userValues.push(organizationId);
-          orgUserClause = `
-            AND EXISTS (
-              SELECT 1
-              FROM organization_users ou
-              WHERE ou.user_id = users.id
-                AND ou.organization_id = $2
-                AND ou.activo = true
-            )
-          `;
-        }
-
-        const userRes = await client.query(
-          `
-          UPDATE users
-          SET status = 'baja',
-              updated_at = NOW()
-          WHERE id = $1
-          ${orgUserClause}
-          RETURNING id, nombre, apellido, status
-          `,
-          userValues
-        );
-        if (!userRes.rows.length) {
-          await client.query("ROLLBACK");
-          return json(404, { ok: false, message: "Usuario no encontrado" });
-        }
-
-        const orgValues = [userId];
-        let orgClause = "";
-        if (organizationId) {
-          orgValues.push(organizationId);
-          orgClause = "AND organization_id = $2";
-        }
-        await client.query(
-          `
-          UPDATE organization_users
-          SET activo = false
-          WHERE user_id = $1
-          ${orgClause}
-          `,
-          orgValues
-        );
-
-        const deleteValues = [userId];
-        let deleteOrgClause = "";
-        if (organizationId) {
-          deleteValues.push(organizationId);
-          deleteOrgClause = "AND lb.organization_id = $2";
-        }
-        await client.query(
-          `
-          DELETE FROM lead_batch_sellers lbs
-          USING lead_batches lb
-          WHERE lbs.seller_id = $1
-            AND lbs.batch_id = lb.id
-            AND lb.estado IN ('activo', 'asignado')
-            ${deleteOrgClause}
-          `,
-          deleteValues
-        );
-
-        // Redistribuir contactos "nuevo" del vendedor desactivado en lotes activos
-        const lotesValues = [userId];
-        let lotesOrgClause = "";
-        if (organizationId) {
-          lotesValues.push(organizationId);
-          lotesOrgClause = "AND lb.organization_id = $2";
-        }
-        const lotesRes = await client.query(
-          `
-          SELECT DISTINCT lcs.batch_id
-          FROM lead_contact_status lcs
-          JOIN lead_batches lb ON lb.id = lcs.batch_id
-          WHERE lcs.assigned_to = $1
-            AND lcs.estado_venta = 'nuevo'
-            AND lb.estado IN ('activo', 'asignado')
-            ${lotesOrgClause}
-          `,
-          lotesValues
-        );
-        for (const lote of lotesRes.rows || []) {
-          if (!lote?.batch_id) continue;
-          await redistributeNewContacts(client, lote.batch_id, userId);
-        }
-
-        const pendientesValues = [userId];
-        let pendientesOrgClause = "";
-        if (organizationId) {
-          pendientesValues.push(organizationId);
-          pendientesOrgClause = "AND lb.organization_id = $2";
-        }
+        const pendientesOrgClause = organizationId ? "AND lb.organization_id = $2" : "";
+        const pendientesStatusParam = organizationId ? "$3" : "$2";
         const pendientesRes = await client.query(
           `
           SELECT
             lb.id AS batch_id,
             lb.nombre AS batch_nombre,
+            lcs.estado_venta,
             COUNT(lcs.contact_id)::int AS pendientes
           FROM lead_contact_status lcs
           JOIN lead_batches lb ON lb.id = lcs.batch_id
           WHERE lcs.assigned_to = $1
-            AND lcs.estado_venta = 'nuevo'
+            AND lcs.estado_venta = ANY(${pendientesStatusParam}::text[])
             AND lb.estado IN ('activo', 'asignado')
             ${pendientesOrgClause}
-          GROUP BY lb.id, lb.nombre
-          ORDER BY pendientes DESC, lb.nombre ASC
+          GROUP BY lb.id, lb.nombre, lcs.estado_venta
+          ORDER BY lb.nombre ASC, lcs.estado_venta ASC
           `,
-          pendientesValues
+          organizationId
+            ? [userId, organizationId, LEAD_REDISTRIBUTION_PENDING_STATES]
+            : [userId, LEAD_REDISTRIBUTION_PENDING_STATES]
         );
 
-        await client.query("COMMIT");
-        return json(200, {
-          ok: true,
-          user: userRes.rows[0],
-          pendientes: pendientesRes.rows
-        });
+        const pendientesByEstado = {};
+        const pendientesByBatch = new Map();
+        let pendientesCount = 0;
+        for (const row of pendientesRes.rows || []) {
+          const estado = row.estado_venta;
+          const pendientes = Number(row.pendientes || 0);
+          pendientesByEstado[estado] = (pendientesByEstado[estado] || 0) + pendientes;
+          pendientesCount += pendientes;
+          const batchId = row.batch_id;
+          if (!pendientesByBatch.has(batchId)) {
+            pendientesByBatch.set(batchId, {
+              batch_id: batchId,
+              batch_nombre: row.batch_nombre,
+              pendientes: 0,
+              pendientes_by_estado: {}
+            });
+          }
+          const batchEntry = pendientesByBatch.get(batchId);
+          batchEntry.pendientes += pendientes;
+          batchEntry.pendientes_by_estado[estado] = pendientes;
+        }
+
+        const redistribucion = body?.redistribucion || null;
+        const redistribucionMode = redistribucion?.mode || null;
+        const redistribucionSellerId = redistribucion?.seller_id || null;
+        const hasPendingContacts = pendientesCount > 0;
+
+        if (hasPendingContacts && !redistribucion) {
+          return json(422, {
+            ok: false,
+            message: "Hay contactos pendientes que requieren redistribucion",
+            pendientes_count: pendientesCount,
+            pendientes_by_estado: pendientesByEstado,
+            pendientes: Array.from(pendientesByBatch.values())
+          });
+        }
+
+        if (hasPendingContacts && !["round_robin", "specific_seller"].includes(redistribucionMode)) {
+          return json(422, {
+            ok: false,
+            message: "redistribucion.mode debe ser 'round_robin' o 'specific_seller'",
+            pendientes_count: pendientesCount,
+            pendientes_by_estado: pendientesByEstado,
+            pendientes: Array.from(pendientesByBatch.values())
+          });
+        }
+
+        if (hasPendingContacts && redistribucionMode === "specific_seller") {
+          if (!redistribucionSellerId) {
+            return json(422, {
+              ok: false,
+              message: "redistribucion.seller_id es requerido para mode=specific_seller",
+              pendientes_count: pendientesCount,
+              pendientes_by_estado: pendientesByEstado,
+              pendientes: Array.from(pendientesByBatch.values())
+            });
+          }
+          if (redistribucionSellerId === userId) {
+            return json(422, {
+              ok: false,
+              message: "El vendedor destino debe ser distinto al vendedor desactivado",
+              pendientes_count: pendientesCount,
+              pendientes_by_estado: pendientesByEstado,
+              pendientes: Array.from(pendientesByBatch.values())
+            });
+          }
+        }
+
+        if (hasPendingContacts && redistribucionMode === "specific_seller") {
+          const sellerCheckParams = [redistribucionSellerId];
+          let sellerCheckOrgClause = "";
+          if (organizationId) {
+            sellerCheckParams.push(organizationId);
+            sellerCheckOrgClause = `
+              AND EXISTS (
+                SELECT 1
+                FROM organization_users ou
+                WHERE ou.user_id = u.id
+                  AND ou.organization_id = $2
+                  AND ou.activo = true
+              )
+            `;
+          }
+          const sellerCheckRes = await client.query(
+            `
+            SELECT u.id
+            FROM users u
+            WHERE u.id = $1
+              AND u.role_key = 'vendedor'
+              AND u.status != 'baja'
+              ${sellerCheckOrgClause}
+            `,
+            sellerCheckParams
+          );
+          if (!sellerCheckRes.rows.length) {
+            return json(422, {
+              ok: false,
+              message: "redistribucion.seller_id no es un vendedor activo válido",
+              pendientes_count: pendientesCount,
+              pendientes_by_estado: pendientesByEstado,
+              pendientes: Array.from(pendientesByBatch.values())
+            });
+          }
+        }
+
+        await client.query("BEGIN");
+        try {
+          const userValues = [userId];
+          let orgUserClause = "";
+          if (organizationId) {
+            userValues.push(organizationId);
+            orgUserClause = `
+              AND EXISTS (
+                SELECT 1
+                FROM organization_users ou
+                WHERE ou.user_id = users.id
+                  AND ou.organization_id = $2
+                  AND ou.activo = true
+              )
+            `;
+          }
+
+          const userRes = await client.query(
+            `
+            UPDATE users
+            SET status = 'baja',
+                updated_at = NOW()
+            WHERE id = $1
+            ${orgUserClause}
+            RETURNING id, nombre, apellido, status
+            `,
+            userValues
+          );
+          if (!userRes.rows.length) {
+            await client.query("ROLLBACK");
+            return json(404, { ok: false, message: "Usuario no encontrado" });
+          }
+
+          const orgValues = [userId];
+          let orgClause = "";
+          if (organizationId) {
+            orgValues.push(organizationId);
+            orgClause = "AND organization_id = $2";
+          }
+          await client.query(
+            `
+            UPDATE organization_users
+            SET activo = false
+            WHERE user_id = $1
+            ${orgClause}
+            `,
+            orgValues
+          );
+
+          const lotesOrgClause = organizationId ? "AND lb.organization_id = $2" : "";
+          const lotesStatusParam = organizationId ? "$3" : "$2";
+          const lotesRes = await client.query(
+            `
+            SELECT DISTINCT lcs.batch_id
+            FROM lead_contact_status lcs
+            JOIN lead_batches lb ON lb.id = lcs.batch_id
+            WHERE lcs.assigned_to = $1
+              AND lcs.estado_venta = ANY(${lotesStatusParam}::text[])
+              AND lb.estado IN ('activo', 'asignado')
+              ${lotesOrgClause}
+            `,
+            organizationId
+              ? [userId, organizationId, LEAD_REDISTRIBUTION_PENDING_STATES]
+              : [userId, LEAD_REDISTRIBUTION_PENDING_STATES]
+          );
+
+          for (const lote of lotesRes.rows || []) {
+            if (!lote?.batch_id) continue;
+            if (redistribucionMode === "specific_seller" && redistribucionSellerId) {
+              await client.query(
+                `
+                INSERT INTO lead_batch_sellers (batch_id, seller_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                `,
+                [lote.batch_id, redistribucionSellerId]
+              );
+            }
+            await redistributeNewContacts(client, lote.batch_id, userId, {
+              states: LEAD_REDISTRIBUTION_PENDING_STATES,
+              mode: redistribucionMode,
+              specificSellerId: redistribucionSellerId
+            });
+          }
+
+          const deleteValues = [userId];
+          let deleteOrgClause = "";
+          if (organizationId) {
+            deleteValues.push(organizationId);
+            deleteOrgClause = "AND lb.organization_id = $2";
+          }
+          await client.query(
+            `
+            DELETE FROM lead_batch_sellers lbs
+            USING lead_batches lb
+            WHERE lbs.seller_id = $1
+              AND lbs.batch_id = lb.id
+              AND lb.estado IN ('activo', 'asignado')
+              ${deleteOrgClause}
+            `,
+            deleteValues
+          );
+
+          const pendientesPostStatusParam = organizationId ? "$3" : "$2";
+          const pendientesPostRes = await client.query(
+            `
+            SELECT
+              lb.id AS batch_id,
+              lb.nombre AS batch_nombre,
+              lcs.estado_venta,
+              COUNT(lcs.contact_id)::int AS pendientes
+            FROM lead_contact_status lcs
+            JOIN lead_batches lb ON lb.id = lcs.batch_id
+            WHERE lcs.assigned_to = $1
+              AND lcs.estado_venta = ANY(${pendientesPostStatusParam}::text[])
+              AND lb.estado IN ('activo', 'asignado')
+              ${pendientesOrgClause}
+            GROUP BY lb.id, lb.nombre, lcs.estado_venta
+            ORDER BY lb.nombre ASC, lcs.estado_venta ASC
+            `,
+            organizationId
+              ? [userId, organizationId, LEAD_REDISTRIBUTION_PENDING_STATES]
+              : [userId, LEAD_REDISTRIBUTION_PENDING_STATES]
+          );
+
+          await client.query("COMMIT");
+          return json(200, {
+            ok: true,
+            user: userRes.rows[0],
+            pendientes: pendientesPostRes.rows
+          });
+        } catch (txError) {
+          await client.query("ROLLBACK");
+          throw txError;
+        }
       } catch (err) {
         try {
           await client.query("ROLLBACK");
