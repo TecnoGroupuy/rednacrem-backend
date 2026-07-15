@@ -27941,6 +27941,20 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           return json(400, { ok: false, message: "organization_id requerido" });
         }
 
+        const bajaRes = await client.query(
+          `
+          SELECT changed_at
+          FROM user_status_history
+          WHERE user_id = $1 AND new_status = 'baja'
+          ORDER BY changed_at DESC
+          LIMIT 1
+          `,
+          [sellerId]
+        );
+        const fechaBajaReal = bajaRes.rows[0]?.changed_at
+          ? formatDateYmd(new Date(bajaRes.rows[0].changed_at))
+          : null;
+
         const primeraGestionRes = await client.query(
           `
           SELECT MIN((fecha_gestion AT TIME ZONE 'America/Montevideo')::date) AS primera
@@ -27953,7 +27967,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         const primera = primeraRaw ? formatDateYmd(new Date(primeraRaw)) : null;
         const today = formatDateYmd(new Date());
         desde = fechaDesdeParsed || primera || today;
-        hasta = fechaHastaParsed || today;
+        hasta = fechaHastaParsed || fechaBajaReal || today;
 
         const hasDptContactId = await columnExists(client, "datos_para_trabajar", "contact_id");
         const contactsJoin = hasDptContactId
@@ -28027,11 +28041,22 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         );
         const pendientes_count = Object.values(pendientes_by_estado).reduce((sum, value) => sum + value, 0);
 
+        const jornadaReport = await getWorkReportRange(
+          client,
+          desde,
+          hasta,
+          "America/Montevideo",
+          new Date(),
+          sellerId,
+          organizationId
+        );
+
         return json(200, {
           ok: true,
           seller_id: sellerId,
           fecha_desde: desde,
           fecha_hasta: hasta,
+          jornada: jornadaReport,
           pendientes_count,
           pendientes_by_estado,
           resumen: {
