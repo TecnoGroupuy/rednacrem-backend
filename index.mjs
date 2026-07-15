@@ -21114,6 +21114,8 @@ export const handler = async (event) => {
     }
   }
 
+const ADD_SELLER_REDISTRIBUTION_STATES = ["nuevo", "no_contesta"];
+
 async function redistributeNewContacts(client, batchId, fromSellerId = null, options = null) {
   const requestedStates = Array.isArray(options?.states)
     ? options.states.map((state) => String(state || "").trim()).filter(Boolean)
@@ -21280,7 +21282,7 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
 
 const LEAD_REDISTRIBUTION_PENDING_STATES = ["nuevo", "seguimiento", "rellamar", "no_contesta"];
 
-async function getNewContactsDistribution(client, batchId) {
+async function getNewContactsDistribution(client, batchId, states = ["nuevo"]) {
   const res = await client.query(
     `
     SELECT
@@ -21292,12 +21294,12 @@ async function getNewContactsDistribution(client, batchId) {
     LEFT JOIN lead_contact_status lcs
       ON lcs.batch_id = lbs.batch_id
      AND lcs.assigned_to = lbs.seller_id
-     AND lcs.estado_venta = 'nuevo'
+     AND lcs.estado_venta = ANY($2::text[])
     WHERE lbs.batch_id = $1
     GROUP BY u.id, u.nombre, u.apellido
     ORDER BY cantidad DESC, u.id ASC
     `,
-    [batchId]
+    [batchId, states]
   );
   return res.rows.map((r) => ({
     seller_id: r.seller_id,
@@ -21583,8 +21585,14 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             );
           }
 
-          await redistributeNewContacts(client, batchId);
-          distribution = await getNewContactsDistribution(client, batchId);
+          await redistributeNewContacts(client, batchId, null, {
+            states: ADD_SELLER_REDISTRIBUTION_STATES
+          });
+          distribution = await getNewContactsDistribution(
+            client,
+            batchId,
+            ADD_SELLER_REDISTRIBUTION_STATES
+          );
 
           await client.query("COMMIT");
         } catch (err) {
