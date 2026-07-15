@@ -3048,6 +3048,35 @@ async function getWorkReportRange(client, fechaDesde, fechaHasta, timezone = LOC
       WHERE (e.inicio AT TIME ZONE $3)::date BETWEEN $1::date AND $2::date
         AND ($5::uuid IS NULL OR e.agente_id = $5::uuid)
     ),
+    vendedores AS (
+      SELECT
+        u.id,
+        u.nombre,
+        u.apellido
+      FROM users u
+      WHERE u.role_key = 'vendedor'
+        AND (u.is_test IS NULL OR u.is_test = false)
+        AND ($5::uuid IS NULL OR u.id = $5::uuid)
+        AND EXISTS (
+          SELECT 1
+          FROM organization_users ou
+          WHERE ou.user_id = u.id
+            AND ou.organization_id = $6::uuid
+        )
+        AND (
+          $5::uuid IS NOT NULL
+          OR (
+            u.status != 'baja'
+            AND EXISTS (
+              SELECT 1
+              FROM organization_users ou2
+              WHERE ou2.user_id = u.id
+                AND ou2.organization_id = $6::uuid
+                AND ou2.activo = true
+            )
+          )
+        )
+    ),
     base_ranked AS (
       SELECT
         b.*,
@@ -3110,17 +3139,7 @@ async function getWorkReportRange(client, fechaDesde, fechaHasta, timezone = LOC
         0
       )::bigint AS duracion_seg
     FROM intervalos i
-    JOIN users u ON u.id = i.agente_id
-    WHERE u.role_key = 'vendedor'
-      AND u.status != 'baja'
-      AND (u.is_test IS NULL OR u.is_test = false)
-      AND EXISTS (
-        SELECT 1
-        FROM organization_users ou
-        WHERE ou.user_id = u.id
-          AND ou.organization_id = $6::uuid
-          AND ou.activo = true
-      )
+    JOIN vendedores u ON u.id = i.agente_id
     ORDER BY i.fecha_local ASC, u.nombre ASC, i.inicio ASC
     `,
     [fechaDesde, fechaHasta, timezone, now, filterUserId, organizationId]
