@@ -23612,14 +23612,38 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             COUNT(*) FILTER (WHERE d.estado = 'nuevo') AS nuevos,
             COUNT(*) FILTER (WHERE d.estado = 'bloqueado') AS bloqueados,
             COUNT(*) FILTER (WHERE d.estado = 'trabajado') AS trabajados,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'no_contesta') AS no_contesta,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'dato_erroneo') AS datos_erroneos,
-            COUNT(*) FILTER (WHERE lcs.estado_venta IS NULL OR lcs.estado_venta = 'nuevo') AS sin_gestion,
-            COUNT(*) FILTER (WHERE lcs.estado_venta IN ('seguimiento', 'rellamar')) AS en_proceso,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rellamar') AS rellamar,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'seguimiento') AS seguimiento
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'venta'
+            ) AS convertidos,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'no_contesta'
+            ) AS no_contesta,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'rechazo'
+            ) AS rechazados,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'dato_erroneo'
+            ) AS datos_erroneos,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND (lcs.estado_venta IS NULL OR lcs.estado_venta = 'nuevo')
+            ) AS sin_gestion,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta IN ('seguimiento', 'rellamar')
+            ) AS en_proceso,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'rellamar'
+            ) AS rellamar,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'seguimiento'
+            ) AS seguimiento
           FROM datos_para_trabajar d
           LEFT JOIN lead_contact_status lcs ON lcs.contact_id = d.id
           WHERE 1=1
@@ -23655,10 +23679,22 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             u.nombre,
             u.apellido,
             COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'venta') AS convertidos,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'no_contesta') AS no_contesta,
-            COUNT(*) FILTER (WHERE lcs.estado_venta = 'rechazo') AS rechazados,
-            COUNT(*) FILTER (WHERE lcs.estado_venta IS NULL OR lcs.estado_venta = 'nuevo') AS sin_gestion
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'venta'
+            ) AS convertidos,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'no_contesta'
+            ) AS no_contesta,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND lcs.estado_venta = 'rechazo'
+            ) AS rechazados,
+            COUNT(*) FILTER (
+              WHERE d.estado IS DISTINCT FROM 'bloqueado'
+                AND (lcs.estado_venta IS NULL OR lcs.estado_venta = 'nuevo')
+            ) AS sin_gestion
           FROM lead_contact_status lcs
           JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           JOIN users u ON u.id = lcs.assigned_to
