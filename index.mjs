@@ -55,6 +55,17 @@ function safeResponse({ data, emptyCondition, warnings, meta, message }) {
   return json(200, response);
 }
 
+function getLeadManagementRegistrationErrorMessage(error) {
+  const constraint = String(error?.constraint || "").trim();
+  const rawMessage = String(error?.message || "").trim();
+
+  if (constraint === "contacts_email_unique_idx" || /contacts_email_unique_idx/i.test(rawMessage)) {
+    return "No se pudo finalizar la gestión porque el email del contacto ya existe en la base. Revisá el email ingresado o usá el contacto existente.";
+  }
+
+  return rawMessage || "No se pudo registrar la gestión.";
+}
+
 function loadEnvFile(filePath) {
   try {
     if (!fs.existsSync(filePath)) {
@@ -18483,7 +18494,8 @@ export const handler = async (event) => {
             `
             SELECT
               id,
-              organization_id,
+              ${leadColumns.has("organization_id") ? "organization_id" : "NULL::uuid AS organization_id"},
+              ${leadColumns.has("contact_id") ? "contact_id" : "NULL::uuid AS contact_id"},
               ${selectLeadColumn("nombre")},
               ${selectLeadColumn("apellido")},
               ${selectLeadColumn("telefono")},
@@ -18511,78 +18523,231 @@ export const handler = async (event) => {
           ventaOrganizationId = leadData?.organization_id || batchOrganizationId || requestOrganizationId || null;
           const leadTelefonoDigits = normalizePhoneDigits(leadData?.telefono || "");
           const leadCelularDigits = normalizePhoneDigits(leadData?.celular || "");
+          const contactData = body.contact || {};
+          const candidateDocumento = normalizeDocumento(contactData.documento || leadData?.documento || "");
+          const candidateEmail = normalizeEmail(
+            contactData.email || contactData.correo_electronico || leadData?.correo_electronico || ""
+          );
+          const candidatePhoneDigits = Array.from(
+            new Set(
+              [
+                leadTelefonoDigits,
+                leadCelularDigits,
+                normalizePhoneDigits(contactData.telefono || ""),
+                normalizePhoneDigits(contactData.celular || "")
+              ].filter(Boolean)
+            )
+          );
           let ventaContactId = null;
+          let ventaContactMatchedExisting = false;
+          const contactCols = await getTableColumns(client, "contacts");
 
-          if (leadData && (leadTelefonoDigits || leadCelularDigits)) {
-            const existingContactRes = await client.query(
+          const resolveExistingContactId = async (payload, orgId, preferredContactId = null) => {
+            const normalizedDocumento = normalizeDocumento(payload?.documento || "");
+            const normalizedEmail = normalizeEmail(payload?.email || payload?.correo_electronico || "");
+            const phoneDigits = Array.from(
+              new Set(
+                [
+                  normalizePhoneDigits(payload?.telefono || ""),
+                  normalizePhoneDigits(payload?.celular || "")
+                ].filter(Boolean)
+              )
+            );
+
+            if (preferredContactId && isValidUuid(String(preferredContactId))) {
+              const preferredRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE id = $1
+                  ${contactCols.has("organization_id") ? "AND ($2::uuid IS NULL OR organization_id = $2)" : ""}
+                LIMIT 1
+                `,
+                contactCols.has("organization_id") ? [preferredContactId, orgId] : [preferredContactId]
+              );
+              if (preferredRes.rows[0]?.id) return preferredRes.rows[0].id;
+            }
+
+            if (normalizedDocumento) {
+              const documentoValues = [normalizedDocumento];
+              const documentoOrgClause = contactCols.has("organization_id")
+                ? "AND ($1::uuid IS NULL OR organization_id = $1)"
+                : "";
+              if (contactCols.has("organization_id")) documentoValues.unshift(orgId);
+              const documentoRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE 1=1
+                  ${documentoOrgClause}
+                  AND regexp_replace(coalesce(documento,''), '\\D', '', 'g') = $${documentoValues.length}
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                `,
+                documentoValues
+              );
+              if (documentoRes.rows[0]?.id) return documentoRes.rows[0].id;
+            }
+
+            if (normalizedEmail) {
+              const emailValues = [normalizedEmail];
+              const emailOrgClause = contactCols.has("organization_id")
+                ? "AND ($1::uuid IS NULL OR organization_id = $1)"
+                : "";
+              if (contactCols.has("organization_id")) emailValues.unshift(orgId);
+              const emailRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE 1=1
+                  ${emailOrgClause}
+                  AND lower(trim(coalesce(email, ''))) = $${emailValues.length}
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                `,
+                emailValues
+              );
+              if (emailRes.rows[0]?.id) return emailRes.rows[0].id;
+            }
+
+            for (const phoneDigitsValue of phoneDigits) {
+              const phoneValues = [phoneDigitsValue];
+              const phoneOrgClause = contactCols.has("organization_id")
+                ? "AND ($1::uuid IS NULL OR organization_id = $1)"
+                : "";
+              if (contactCols.has("organization_id")) phoneValues.unshift(orgId);
+              const phoneRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE 1=1
+                  ${phoneOrgClause}
+                  AND (
+                    regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $${phoneValues.length}
+                    OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $${phoneValues.length}
+                  )
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                `,
+                phoneValues
+              );
+              if (phoneRes.rows[0]?.id) return phoneRes.rows[0].id;
+            }
+
+            return null;
+          };
+
+          const syncLeadContactId = async (contactId) => {
+            if (!contactId || !leadColumns.has("contact_id")) return;
+            if (String(leadData?.contact_id || "") === String(contactId)) return;
+            await client.query(
+              `
+              UPDATE datos_para_trabajar
+              SET contact_id = $2,
+                  updated_at = now()
+              WHERE id = $1
+                AND ($3::uuid IS NULL OR organization_id = $3)
+              `,
+              [leadId, contactId, leadOrgId]
+            );
+            if (leadData) leadData.contact_id = contactId;
+          };
+
+          const ensureNoActiveAlta = async (contactId, orgId) => {
+            if (!contactId) return;
+            const activeProductValues = [contactId];
+            const activeProductOrgClause = cpCols.has("organization_id") && orgId
+              ? "AND organization_id = $2"
+              : "";
+            if (activeProductOrgClause) activeProductValues.push(orgId);
+            const activeProductRes = await client.query(
               `
               SELECT id
-              FROM contacts
-              WHERE ($1::uuid IS NULL OR organization_id = $1)
-                AND (
-                  ($2::text <> '' AND (
-                    regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
-                    OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $2
-                  ))
-                  OR ($3::text <> '' AND (
-                    regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $3
-                    OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3
-                  ))
-                )
-              ORDER BY updated_at DESC NULLS LAST, created_at DESC
+              FROM contact_products
+              WHERE contact_id = $1
+                AND estado = 'alta'
+                ${activeProductOrgClause}
               LIMIT 1
               `,
-              [ventaOrganizationId, leadTelefonoDigits || "", leadCelularDigits || ""]
+              activeProductValues
             );
-            ventaContactId = existingContactRes.rows[0]?.id || null;
+            if (activeProductRes.rows.length) {
+              throw new Error("Este contacto ya tiene una venta activa registrada.");
+            }
+          };
+
+          if (leadData) {
+            ventaContactId = await resolveExistingContactId(
+              {
+                documento: candidateDocumento,
+                email: candidateEmail,
+                telefono: candidatePhoneDigits[0] || contactData.telefono || leadData.telefono || "",
+                celular: candidatePhoneDigits[1] || contactData.celular || leadData.celular || ""
+              },
+              ventaOrganizationId,
+              leadData.contact_id || null
+            );
+            ventaContactMatchedExisting = Boolean(ventaContactId);
+            if (ventaContactId) {
+              await syncLeadContactId(ventaContactId);
+            }
           }
 
-          const ventaContactExisted = Boolean(ventaContactId);
-          const contactData = body.contact || {};
+          const cpCols = await getTableColumns(client, "contact_products");
+          if (ventaContactId) {
+            await ensureNoActiveAlta(ventaContactId, ventaOrganizationId);
+          }
+
           if (leadData && !ventaContactId) {
+            const insertContactCols = [
+              "nombre",
+              "apellido",
+              "documento",
+              "fecha_nacimiento",
+              "telefono",
+              "celular",
+              "email",
+              "direccion",
+              "departamento",
+              "pais",
+              "status"
+            ];
+            const insertContactVals = [
+              normalizeText(contactData.nombre || leadData.nombre) || "Sin nombre",
+              normalizeText(contactData.apellido || leadData.apellido) || "",
+              normalizeText(contactData.documento || leadData.documento) || null,
+              contactData.fecha_nacimiento || contactData.fechaNacimiento || leadData.fecha_nacimiento || null,
+              cleanPhone(contactData.telefono || leadData.telefono) || null,
+              cleanPhone(contactData.celular || leadData.celular) || null,
+              normalizeEmail(contactData.email || contactData.correo_electronico || leadData.correo_electronico) || null,
+              normalizeText(contactData.direccion || leadData.direccion) || null,
+              normalizeText(contactData.departamento || leadData.departamento) || null,
+              normalizeText(contactData.pais) || "Uruguay",
+              "activo"
+            ];
+            if (contactCols.has("organization_id")) {
+              insertContactCols.push("organization_id");
+              insertContactVals.push(ventaOrganizationId);
+            }
+            const insertContactPlaceholders = insertContactVals.map((_, idx) => `$${idx + 1}`);
             const insertContactRes = await client.query(
               `
-              INSERT INTO contacts (
-                nombre,
-                apellido,
-                documento,
-                fecha_nacimiento,
-                telefono,
-                celular,
-                email,
-                direccion,
-                departamento,
-                pais,
-                status,
-                organization_id,
-                created_at,
-                updated_at
-              )
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
+              INSERT INTO contacts (${insertContactCols.join(", ")}, created_at, updated_at)
+              VALUES (${insertContactPlaceholders.join(", ")}, now(), now())
               RETURNING id
               `,
-              [
-                normalizeText(contactData.nombre || leadData.nombre) || "Sin nombre",
-                normalizeText(contactData.apellido || leadData.apellido) || "",
-                normalizeText(contactData.documento || leadData.documento) || null,
-                contactData.fecha_nacimiento || contactData.fechaNacimiento || leadData.fecha_nacimiento || null,
-                cleanPhone(contactData.telefono || leadData.telefono) || null,
-                cleanPhone(contactData.celular || leadData.celular) || null,
-                normalizeEmail(contactData.email || contactData.correo_electronico || leadData.correo_electronico) || null,
-                normalizeText(contactData.direccion || leadData.direccion) || null,
-                normalizeText(contactData.departamento || leadData.departamento) || null,
-                normalizeText(contactData.pais) || "Uruguay",
-                "activo",
-                ventaOrganizationId
-              ]
+              insertContactVals
             );
             ventaContactId = insertContactRes.rows[0]?.id || null;
+            if (ventaContactId) {
+              await syncLeadContactId(ventaContactId);
+            }
           }
 
           // If the contact already existed, replace its data with what the
           // seller filled in the venta modal. COALESCE keeps the existing
           // value when a field was left empty, so nothing is wiped.
-          if (ventaContactId && ventaContactExisted && body.contact) {
+          if (ventaContactId && ventaContactMatchedExisting && body.contact) {
             const updateValues = [
               ventaContactId,
               normalizeText(contactData.nombre) || null,
@@ -18597,6 +18762,9 @@ export const handler = async (event) => {
               normalizeText(contactData.pais) || null
             ];
             console.log('[venta-contact-update] updating existing contact:', ventaContactId, JSON.stringify(updateValues.slice(1)));
+            const contactUpdateOrgClause = contactCols.has("organization_id") && ventaOrganizationId
+              ? ` AND organization_id = $${updateValues.length + 1}`
+              : "";
             const contactUpdateRes = await client.query(
               `
               UPDATE contacts SET
@@ -18612,9 +18780,9 @@ export const handler = async (event) => {
                 pais = COALESCE($11, pais),
                 updated_at = now()
               WHERE id = $1
-                AND organization_id = $12
+                ${contactUpdateOrgClause}
               `,
-              [...updateValues, ventaOrganizationId]
+              contactUpdateOrgClause ? [...updateValues, ventaOrganizationId] : updateValues
             );
             if (!contactUpdateRes.rowCount) {
               await client.query("ROLLBACK");
@@ -18631,8 +18799,6 @@ export const handler = async (event) => {
           const cobranzaDocumento = body.cobranza_documento || body.cobranzaDocumento || null;
           console.log('[venta-backend] products from body:', JSON.stringify(productData));
           console.log('[venta-backend] familySales:', body.familySales?.length || 0);
-
-          const cpCols = await getTableColumns(client, "contact_products");
 
           // Resolve (or create) a products row id by explicit id or by name.
           const resolveProductId = async (productName, precioVal, orgId, explicitId) => {
@@ -18814,57 +18980,49 @@ export const handler = async (event) => {
 
           // Find-or-create a contact from a payload (used for family sales).
           const findOrCreateContact = async (payload, orgId) => {
-            const telDigits = normalizePhoneDigits(payload?.telefono || "");
-            const celDigits = normalizePhoneDigits(payload?.celular || "");
-            let cid = null;
-            if (telDigits || celDigits) {
-              const r = await client.query(
-                `
-                SELECT id
-                FROM contacts
-                WHERE ($1::uuid IS NULL OR organization_id = $1)
-                  AND (
-                    ($2::text <> '' AND (
-                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
-                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $2
-                    ))
-                    OR ($3::text <> '' AND (
-                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $3
-                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3
-                    ))
-                  )
-                ORDER BY updated_at DESC NULLS LAST, created_at DESC
-                LIMIT 1
-                `,
-                [orgId, telDigits || "", celDigits || ""]
-              );
-              cid = r.rows[0]?.id || null;
-            }
+            const cid = await resolveExistingContactId(payload, orgId, payload?.contact_id || null);
             if (cid) return cid;
+            const familyContactCols = [
+              "nombre",
+              "apellido",
+              "documento",
+              "fecha_nacimiento",
+              "telefono",
+              "celular",
+              "email",
+              "direccion",
+              "departamento",
+              "pais",
+              "status"
+            ];
+            const familyContactVals = [
+              normalizeText(payload?.nombre) || "Sin nombre",
+              normalizeText(payload?.apellido) || "",
+              normalizeText(payload?.documento) || null,
+              payload?.fecha_nacimiento || null,
+              cleanPhone(payload?.telefono) || null,
+              cleanPhone(payload?.celular) || null,
+              normalizeEmail(payload?.email || payload?.correo_electronico) || null,
+              normalizeText(payload?.direccion) || null,
+              normalizeText(payload?.departamento) || null,
+              "Uruguay",
+              "activo"
+            ];
+            if (contactCols.has("organization_id")) {
+              familyContactCols.push("organization_id");
+              familyContactVals.push(orgId);
+            }
+            const familyContactPlaceholders = familyContactVals.map((_, idx) => `$${idx + 1}`);
             const ins = await client.query(
               `
               INSERT INTO contacts (
-                nombre, apellido, documento, fecha_nacimiento, telefono, celular,
-                email, direccion, departamento, pais, status, organization_id,
+                ${familyContactCols.join(", ")},
                 created_at, updated_at
               )
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
+              VALUES (${familyContactPlaceholders.join(", ")}, now(), now())
               RETURNING id
               `,
-              [
-                normalizeText(payload?.nombre) || "Sin nombre",
-                normalizeText(payload?.apellido) || "",
-                normalizeText(payload?.documento) || null,
-                payload?.fecha_nacimiento || null,
-                cleanPhone(payload?.telefono) || null,
-                cleanPhone(payload?.celular) || null,
-                normalizeEmail(payload?.email || payload?.correo_electronico) || null,
-                normalizeText(payload?.direccion) || null,
-                normalizeText(payload?.departamento) || null,
-                "Uruguay",
-                "activo",
-                orgId
-              ]
+              familyContactVals
             );
             return ins.rows[0]?.id || null;
           };
@@ -19017,7 +19175,7 @@ export const handler = async (event) => {
       return json(500, {
         ok: false,
         message: "Failed to register lead management",
-        error: error.message
+        error: getLeadManagementRegistrationErrorMessage(error)
       });
     }
   }
