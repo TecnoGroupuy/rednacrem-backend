@@ -21487,6 +21487,50 @@ async function getNewContactsDistribution(client, batchId, states = ["nuevo"]) {
   }));
 }
 
+async function getBatchSellerTotals(client, batchId, organizationId = null) {
+  const values = [batchId];
+  let orgClause = "";
+  if (organizationId) {
+    values.push(organizationId);
+    orgClause = ` AND lb.organization_id = $2`;
+  }
+
+  const res = await client.query(
+    `
+    SELECT
+      u.id AS seller_id,
+      u.nombre,
+      u.apellido,
+      COALESCE(vc.total, 0)::int AS total_contactos,
+      COALESCE(vc.gestionados, 0)::int AS gestionados
+    FROM lead_batch_sellers lbs
+    JOIN users u ON u.id = lbs.seller_id
+    JOIN lead_batches lb ON lb.id = lbs.batch_id
+    LEFT JOIN (
+      SELECT
+        batch_id,
+        assigned_to,
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE estado_venta != 'nuevo') AS gestionados
+      FROM lead_contact_status
+      GROUP BY batch_id, assigned_to
+    ) vc ON vc.batch_id = lbs.batch_id AND vc.assigned_to = lbs.seller_id
+    WHERE lbs.batch_id = $1
+    ${orgClause}
+    ORDER BY COALESCE(vc.total, 0) DESC, u.id ASC
+    `,
+    values
+  );
+
+  return res.rows.map((row) => ({
+    seller_id: row.seller_id,
+    nombre: row.nombre,
+    apellido: row.apellido,
+    total_contactos: Number(row.total_contactos) || 0,
+    gestionados: Number(row.gestionados) || 0
+  }));
+}
+
 function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
   const {
     search,
@@ -22000,7 +22044,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
 
           // 4c) Redistribuir y calcular distribución una sola vez
           await redistributeNewContacts(client, batchId, null, null, organizationId);
-          distribution = await getNewContactsDistribution(client, batchId);
+          distribution = await getBatchSellerTotals(client, batchId, organizationId);
 
           await client.query("COMMIT");
         } catch (err) {
@@ -22552,7 +22596,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             states,
             mode: "round_robin"
           }, organizationId);
-          distribution = await getNewContactsDistribution(client, batchId, states);
+          distribution = await getBatchSellerTotals(client, batchId, organizationId);
           await client.query("COMMIT");
         } catch (err) {
           await client.query("ROLLBACK");
