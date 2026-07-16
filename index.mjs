@@ -21273,8 +21273,9 @@ export const handler = async (event) => {
   }
 
 const ADD_SELLER_REDISTRIBUTION_STATES = ["nuevo", "no_contesta"];
+const ALLOWED_REDISTRIBUTE_STATES = ["no_contesta", "rellamar", "seguimiento"];
 
-async function redistributeNewContacts(client, batchId, fromSellerId = null, options = null) {
+async function redistributeNewContacts(client, batchId, fromSellerId = null, options = null, organizationId = null) {
   const requestedStates = Array.isArray(options?.states)
     ? options.states.map((state) => String(state || "").trim()).filter(Boolean)
     : [];
@@ -21297,25 +21298,34 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
     }
   }
 
-  let organizationId = null;
   if (fromSellerNombre) {
     const orgRes = await client.query(
       `SELECT organization_id FROM lead_batches WHERE id = $1`,
       [batchId]
     );
-    organizationId = orgRes.rows[0]?.organization_id || null;
+    organizationId = organizationId || orgRes.rows[0]?.organization_id || null;
   }
 
   let sellerIds = [];
   if (redistributionMode === "round_robin") {
     const sellersParams = [batchId];
-    let sellersWhere = `WHERE batch_id = $1`;
+    let sellersJoin = "";
+    let sellersWhere = `WHERE lbs.batch_id = $1`;
     if (fromSellerId) {
       sellersParams.push(fromSellerId);
-      sellersWhere += ` AND seller_id <> $2`;
+      sellersWhere += ` AND lbs.seller_id <> $2`;
+    }
+    if (organizationId) {
+      sellersParams.push(organizationId);
+      sellersJoin = `JOIN lead_batches lb ON lb.id = lbs.batch_id`;
+      sellersWhere += ` AND lb.organization_id = $${sellersParams.length}`;
     }
     const sellersRes = await client.query(
-      `SELECT seller_id FROM lead_batch_sellers ${sellersWhere} ORDER BY id ASC`,
+      `SELECT lbs.seller_id
+       FROM lead_batch_sellers lbs
+       ${sellersJoin}
+       ${sellersWhere}
+       ORDER BY lbs.id ASC`,
       sellersParams
     );
     if (!sellersRes.rows.length) return;
@@ -21330,6 +21340,10 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
   if (fromSellerId) {
     contactsParams.push(fromSellerId);
     contactsWhere += ` AND assigned_to = $3`;
+  }
+  if (organizationId) {
+    contactsParams.push(organizationId);
+    contactsWhere += ` AND organization_id = $${contactsParams.length}`;
   }
   const contactsRes = await client.query(
     `
@@ -21352,6 +21366,12 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
   for (let i = 0; i < contactIds.length; i += chunkSize) {
     const contactChunk = contactIds.slice(i, i + chunkSize);
     const assignedChunk = assignedTo.slice(i, i + chunkSize);
+    const updateValues = [contactChunk, assignedChunk, batchId, states];
+    let updateOrgClause = "";
+    if (organizationId) {
+      updateValues.push(organizationId);
+      updateOrgClause = ` AND lcs.organization_id = $5`;
+    }
     await client.query(
       `
       UPDATE lead_contact_status lcs
@@ -21364,9 +21384,10 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
       WHERE lcs.contact_id = v.contact_id
         AND lcs.batch_id = $3
         AND lcs.estado_venta = ANY($4::text[])
+        ${updateOrgClause}
         AND (lcs.assigned_to IS DISTINCT FROM v.assigned_to)
       `,
-      [contactChunk, assignedChunk, batchId, states]
+      updateValues
     );
   }
 
@@ -21745,7 +21766,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
 
           await redistributeNewContacts(client, batchId, null, {
             states: ADD_SELLER_REDISTRIBUTION_STATES
-          });
+          }, organizationId);
           distribution = await getNewContactsDistribution(
             client,
             batchId,
@@ -21978,7 +21999,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           }
 
           // 4c) Redistribuir y calcular distribución una sola vez
-          await redistributeNewContacts(client, batchId);
+          await redistributeNewContacts(client, batchId, null, null, organizationId);
           distribution = await getNewContactsDistribution(client, batchId);
 
           await client.query("COMMIT");
@@ -22420,7 +22441,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
              ON CONFLICT DO NOTHING`,
             [batchId, sellerId]
           );
-          await redistributeNewContacts(client, batchId);
+          await redistributeNewContacts(client, batchId, null, null, organizationId);
           distribution = await getNewContactsDistribution(client, batchId);
           await client.query("COMMIT");
         } catch (err) {
@@ -22441,6 +22462,118 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, {
         ok: false,
         message: "Failed to add seller to lead batch",
+        error: error.message
+      });
+    }
+  }
+
+  // POST /lead-batches/:id/redistribute
+  // Body: { states: ["no_contesta"|"rellamar"|"seguimiento"] }
+  if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/redistribute$/)) {
+    const match = path.match(/\/lead-batches\/([^/]+)\/redistribute$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const rawStates = Array.isArray(body?.states) ? body.states : [];
+    const states = rawStates
+      .map((state) => String(state || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (!states.length) {
+      return json(400, { ok: false, message: "states es requerido y no puede estar vacío" });
+    }
+    const invalidState = states.find((state) => !ALLOWED_REDISTRIBUTE_STATES.includes(state));
+    if (invalidState) {
+      return json(400, {
+        ok: false,
+        message: `Estado inválido para redistribución: ${invalidState}`
+      });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status && error.status !== 400) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+        }
+        if (!organizationId) {
+          try {
+            organizationId = await resolveOrganizationIdFromLeadBatchId(client, dbUser, batchId);
+          } catch (error) {
+            if (error?.status) return json(error.status, { ok: false, message: error.message });
+            throw error;
+          }
+        }
+
+        const batchParams = [batchId];
+        let orgBatchClause = "";
+        if (organizationId) {
+          batchParams.push(organizationId);
+          orgBatchClause = " AND organization_id = $2";
+        }
+        const batchRes = await client.query(
+          `SELECT id FROM lead_batches WHERE id = $1${orgBatchClause}`,
+          batchParams
+        );
+        if (!batchRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
+        await client.query("BEGIN");
+        let distribution = [];
+        try {
+          await redistributeNewContacts(client, batchId, null, {
+            states,
+            mode: "round_robin"
+          }, organizationId);
+          distribution = await getNewContactsDistribution(client, batchId, states);
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+
+        return json(200, {
+          ok: true,
+          message: "Redistribución completada",
+          states,
+          distribution
+        });
+      } catch (err) {
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to redistribute lead batch contacts",
         error: error.message
       });
     }
@@ -29623,7 +29756,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               states: LEAD_REDISTRIBUTION_PENDING_STATES,
               mode: redistribucionMode,
               specificSellerId: redistribucionSellerId
-            });
+            }, organizationId);
           }
 
           const deleteValues = [userId];
