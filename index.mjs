@@ -13829,10 +13829,25 @@ export const handler = async (event) => {
         `);
 
         const contactRes = await client.query(
-          `SELECT id FROM contacts WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          `
+          SELECT
+            id,
+            nombre,
+            apellido,
+            documento,
+            telefono,
+            celular,
+            fecha_nacimiento,
+            direccion,
+            departamento
+          FROM contacts
+          WHERE id = $1 AND organization_id = $2
+          LIMIT 1
+          `,
           [contactId, organizationId]
         );
-        if (!contactRes.rows.length) {
+        const contactRow = contactRes.rows[0] || null;
+        if (!contactRow) {
           await client.query("ROLLBACK");
           return json(404, { ok: false, message: "Contacto no encontrado" });
         }
@@ -13971,6 +13986,139 @@ export const handler = async (event) => {
           await client.query("RELEASE SAVEPOINT baja_audit_insert");
           // No romper el flujo por falta de tabla/permisos en auditoría
           console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
+        }
+
+        await client.query("SAVEPOINT recupero_candidato_insert");
+        try {
+          const fechaBajaValue = fechaBaja || null;
+          const existingRecuperoRes = await client.query(
+            `
+            SELECT id
+            FROM recupero_candidatos
+            WHERE contact_id = $1
+              AND organization_id = $2
+              AND estado != 'recuperado'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [contactId, organizationId]
+          );
+          const existingRecuperoId = existingRecuperoRes.rows[0]?.id || null;
+
+          if (existingRecuperoId) {
+            await client.query(
+              `
+              UPDATE recupero_candidatos
+              SET
+                nombre = $1,
+                apellido = $2,
+                documento = $3,
+                telefono = $4,
+                celular = $5,
+                fecha_nacimiento = $6,
+                departamento = $7,
+                direccion = $8,
+                producto_anterior = $9,
+                precio_anterior = $10,
+                fecha_venta = $11,
+                medio_pago = $12,
+                vendedor_origen = $13,
+                fecha_baja = COALESCE($14::date, now()::date),
+                motivo_baja = $15,
+                motivo_baja_detalle = $16,
+                contact_id = $17,
+                estado = 'disponible',
+                estado_administrativo = 'activo',
+                resultado_gestion = 'nuevo',
+                seller_id = NULL,
+                fecha_asignacion = NULL,
+                updated_at = now()
+              WHERE id = $18
+              `,
+              [
+                contactRow.nombre || null,
+                contactRow.apellido || null,
+                contactRow.documento || null,
+                contactRow.telefono || null,
+                contactRow.celular || null,
+                contactRow.fecha_nacimiento || null,
+                contactRow.departamento || null,
+                contactRow.direccion || null,
+                cpRow.nombre_producto || null,
+                cpRow.precio ?? null,
+                cpRow.fecha_alta || null,
+                cpRow.medio_pago || null,
+                cpRow.seller_name_snapshot || null,
+                fechaBajaValue,
+                motivoBaja,
+                observacion || null,
+                contactId,
+                existingRecuperoId
+              ]
+            );
+          } else {
+            await client.query(
+              `
+              INSERT INTO recupero_candidatos (
+                organization_id,
+                nombre,
+                apellido,
+                documento,
+                telefono,
+                celular,
+                fecha_nacimiento,
+                departamento,
+                direccion,
+                producto_anterior,
+                precio_anterior,
+                fecha_venta,
+                medio_pago,
+                vendedor_origen,
+                fecha_baja,
+                motivo_baja,
+                motivo_baja_detalle,
+                contact_id,
+                estado,
+                estado_administrativo,
+                resultado_gestion,
+                importado_por,
+                importado_at
+              )
+              VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                COALESCE($15::date, now()::date),
+                $16, $17, $18, 'disponible', 'activo', 'nuevo', $19, now()
+              )
+              `,
+              [
+                organizationId,
+                contactRow.nombre || null,
+                contactRow.apellido || null,
+                contactRow.documento || null,
+                contactRow.telefono || null,
+                contactRow.celular || null,
+                contactRow.fecha_nacimiento || null,
+                contactRow.departamento || null,
+                contactRow.direccion || null,
+                cpRow.nombre_producto || null,
+                cpRow.precio ?? null,
+                cpRow.fecha_alta || null,
+                cpRow.medio_pago || null,
+                cpRow.seller_name_snapshot || null,
+                fechaBajaValue,
+                motivoBaja,
+                observacion || null,
+                contactId,
+                userId
+              ]
+            );
+          }
+
+          await client.query("RELEASE SAVEPOINT recupero_candidato_insert");
+        } catch (recuperoError) {
+          await client.query("ROLLBACK TO SAVEPOINT recupero_candidato_insert");
+          await client.query("RELEASE SAVEPOINT recupero_candidato_insert");
+          console.warn("RECUPERO_CANDIDATO_INSERT_WARNING", recuperoError?.message || recuperoError);
         }
 
         await client.query("COMMIT");
