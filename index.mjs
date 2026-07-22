@@ -1243,7 +1243,7 @@ async function fetchRecuperoContactos({
     motivo_baja: 'rc.motivo_baja'
   };
   const orderExpr = (sortField && sortableColumns[sortField]) || 'rc.fecha_baja';
-  const orderDir = sortDir === 'DESC' ? 'DESC' : 'ASC';
+  const orderDir = sortDir === 'ASC' ? 'ASC' : 'DESC';
   const where = conditions.join(' AND ');
 
   const itemsRes = await client.query(
@@ -2253,6 +2253,7 @@ function mapClientRowToApi(row) {
 
   return {
     id: row.id,
+    productId: row.product_row_id || null,
     name,
     product: row.nombre_producto || "Sin producto",
     plan: row.producto_estado === "alta" ? "Activo" : "Inactivo",
@@ -7046,24 +7047,11 @@ async function listClientsDirectory({
       `
       WITH summary AS (
         ${buildContactSummarySelect()}
-      ),
-      ranked_products AS (
-        SELECT
-          cp.*,
-          ROW_NUMBER() OVER (
-            PARTITION BY cp.contact_id
-            ORDER BY
-              CASE WHEN cp.estado = 'alta' THEN 0 ELSE 1 END,
-              cp.fecha_alta DESC NULLS LAST,
-              cp.created_at DESC
-          ) AS rn
-        FROM contact_products cp
       )
       SELECT COUNT(*)::int AS total
       FROM summary s
-      JOIN ranked_products rp
+      JOIN contact_products rp
         ON rp.contact_id = s.id
-       AND rp.rn = 1
       ${whereClause}
       `,
       values
@@ -7080,21 +7068,10 @@ async function listClientsDirectory({
       `
       WITH summary AS (
         ${buildContactSummarySelect()}
-      ),
-      ranked_products AS (
-        SELECT
-          cp.*,
-          ROW_NUMBER() OVER (
-            PARTITION BY cp.contact_id
-            ORDER BY
-              CASE WHEN cp.estado = 'alta' THEN 0 ELSE 1 END,
-              cp.fecha_alta DESC NULLS LAST,
-              cp.created_at DESC
-          ) AS rn
-        FROM contact_products cp
       )
       SELECT
         s.*,
+        rp.id AS product_row_id,
         rp.nombre_producto,
         rp.plan,
         rp.precio,
@@ -7103,15 +7080,15 @@ async function listClientsDirectory({
         rp.cuotas_pagas,
         rp.carencia_cuotas
       FROM summary s
-      JOIN ranked_products rp
+      JOIN contact_products rp
         ON rp.contact_id = s.id
-       AND rp.rn = 1
       ${whereClause}
       ORDER BY
         CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
         s.created_at DESC,
         s.nombre ASC,
-        s.apellido ASC
+        s.apellido ASC,
+        rp.fecha_alta DESC NULLS LAST
       LIMIT $${limitIdx} OFFSET $${offsetIdx}
       `,
       values
@@ -7317,8 +7294,16 @@ async function getClientMetrics(organizationId) {
         ${productWhere}
       )
       SELECT
-        (SELECT COUNT(*)::int FROM summary WHERE tipo_persona = 'cliente_actual') AS activos,
-        (SELECT COUNT(*)::int FROM summary WHERE tipo_persona = 'cliente_historico') AS en_baja,
+        (SELECT COUNT(*)::int
+         FROM contact_products cp
+         JOIN contacts c ON c.id = cp.contact_id
+         WHERE cp.estado = 'alta' ${organizationId ? "AND c.organization_id = $1" : ""}
+        ) AS activos,
+        (SELECT COUNT(*)::int
+         FROM contact_products cp
+         JOIN contacts c ON c.id = cp.contact_id
+         WHERE cp.estado <> 'alta' ${organizationId ? "AND c.organization_id = $1" : ""}
+        ) AS en_baja,
         (SELECT COALESCE(AVG(precio), 0)::numeric(12,2) FROM active_products) AS cuota_promedio
       `,
       values
