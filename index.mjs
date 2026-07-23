@@ -7679,6 +7679,11 @@ async function getClientMetrics(organizationId) {
          JOIN contacts c ON c.id = cp.contact_id
          WHERE cp.estado <> 'alta' ${organizationId ? "AND c.organization_id = $1" : ""}
         ) AS en_baja,
+        (SELECT COUNT(DISTINCT cp.contact_id)::int
+         FROM contact_products cp
+         JOIN contacts c ON c.id = cp.contact_id
+         WHERE cp.estado = 'alta' ${organizationId ? "AND c.organization_id = $1" : ""}
+        ) AS clientes_unicos,
         (SELECT COALESCE(AVG(precio), 0)::numeric(12,2) FROM active_products) AS cuota_promedio
       `,
       values
@@ -7689,6 +7694,7 @@ async function getClientMetrics(organizationId) {
     return {
       activos: Number(row.activos || 0),
       enBaja: Number(row.en_baja || 0),
+      clientesUnicos: Number(row.clientes_unicos || 0),
       cuotaPromedio: Number(row.cuota_promedio || 0),
       cuotaPromedioLabel: formatUyuAmount(row.cuota_promedio || 0)
     };
