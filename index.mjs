@@ -229,6 +229,37 @@ const CONTACT_PRODUCT_BAJA_MOTIVOS = [
   { slug: "otro_servicio", label: "Cuenta con otro servicio" }
 ];
 const CONTACT_PRODUCT_BAJA_SLUGS = CONTACT_PRODUCT_BAJA_MOTIVOS.map((m) => m.slug);
+function resolverMotivoBajaSlug(valorCrudo) {
+  const valor = normalizeText(valorCrudo);
+  if (!valor) return null;
+
+  const slugLower = valor.toLowerCase();
+  if (CONTACT_PRODUCT_BAJA_SLUGS.includes(slugLower)) {
+    return slugLower;
+  }
+
+  const normalizeComparable = (input) =>
+    String(input || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim()
+      .toLowerCase();
+
+  const valorComparable = normalizeComparable(valor);
+  const labelMatch = CONTACT_PRODUCT_BAJA_MOTIVOS.find(
+    (item) => normalizeComparable(item.label) === valorComparable
+  );
+  if (labelMatch) {
+    return labelMatch.slug;
+  }
+
+  const slugTolerante = valorComparable.replace(/\s+/g, "_");
+  if (CONTACT_PRODUCT_BAJA_SLUGS.includes(slugTolerante)) {
+    return slugTolerante;
+  }
+
+  return null;
+}
 
 const INTERNAL_CONTACT_ACCESS_ROLES = [
   "superadministrador",
@@ -6939,6 +6970,346 @@ async function resolveOrganizationIdForRequest(dbUser, event) {
   }
 }
 
+async function aplicarBajaContactProduct(client, {
+  contactId,
+  productId,
+  motivoBaja,
+  observacion,
+  fechaBaja,
+  userId,
+  organizationId
+}) {
+  if (!motivoBaja || !CONTACT_PRODUCT_BAJA_SLUGS.includes(motivoBaja)) {
+    return {
+      ok: false,
+      status: 400,
+      message: "motivo_baja inválido"
+    };
+  }
+
+  await client.query(`
+    ALTER TABLE contact_products
+    ADD COLUMN IF NOT EXISTS baja_gestionada_por uuid REFERENCES users(id)
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS recupero_alerts (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      contact_id uuid REFERENCES contacts(id),
+      product_id uuid REFERENCES contact_products(id),
+      seller_user_id uuid REFERENCES users(id),
+      motivo_baja text,
+      fecha_baja timestamptz DEFAULT now(),
+      gestionado_por uuid REFERENCES users(id),
+      atendido boolean DEFAULT false,
+      created_at timestamptz DEFAULT now()
+    )
+  `);
+
+  const contactRes = await client.query(
+    `
+    SELECT
+      id,
+      nombre,
+      apellido,
+      documento,
+      telefono,
+      celular,
+      fecha_nacimiento,
+      direccion,
+      departamento
+    FROM contacts
+    WHERE id = $1 AND organization_id = $2
+    LIMIT 1
+    `,
+    [contactId, organizationId]
+  );
+  const contactRow = contactRes.rows[0] || null;
+  if (!contactRow) {
+    return { ok: false, status: 404, message: "Contacto no encontrado" };
+  }
+
+  const cpCols = await getTableColumns(client, "contact_products");
+  const cpOrgClause = cpCols.has("organization_id") ? "AND organization_id = $3" : "";
+  const cpValues = cpCols.has("organization_id")
+    ? [productId, contactId, organizationId]
+    : [productId, contactId];
+  const cpSelectColumns = [
+    "id",
+    "estado",
+    "contact_id",
+    "nombre_producto",
+    "precio",
+    "fecha_alta",
+    cpCols.has("medio_pago") ? "medio_pago" : "NULL::text AS medio_pago",
+    cpCols.has("seller_user_id") ? "seller_user_id" : "NULL::uuid AS seller_user_id",
+    cpCols.has("seller_name_snapshot") ? "seller_name_snapshot" : "NULL::text AS seller_name_snapshot",
+    "fecha_alta >= (now()::date - interval '90 days') AS genero_recupero_alert"
+  ];
+  const cpRes = await client.query(
+    `
+    SELECT ${cpSelectColumns.join(", ")}
+    FROM contact_products
+    WHERE id = $1
+      AND contact_id = $2
+      ${cpOrgClause}
+    LIMIT 1
+    `,
+    cpValues
+  );
+  const cpRow = cpRes.rows[0] || null;
+  if (!cpRow) {
+    return { ok: false, status: 404, message: "Producto del contacto no encontrado" };
+  }
+  if (String(cpRow.estado || "").toLowerCase() === "baja") {
+    return { ok: false, status: 409, message: "Este producto ya está dado de baja" };
+  }
+
+  const updateValues = [motivoBaja, observacion || null, userId, fechaBaja, productId, contactId];
+  let updateOrgClause = "";
+  if (cpCols.has("organization_id")) {
+    updateValues.push(organizationId);
+    updateOrgClause = `AND organization_id = $${updateValues.length}`;
+  }
+  await client.query(
+    `
+    UPDATE contact_products
+    SET
+      estado = 'baja',
+      motivo_baja = $1,
+      motivo_baja_detalle = $2,
+      baja_gestionada_por = $3,
+      fecha_baja = COALESCE($4::date, now()::date),
+      updated_at = now()
+    WHERE id = $5
+      AND contact_id = $6
+      ${updateOrgClause}
+    `,
+    updateValues
+  );
+
+  if (cpRow.genero_recupero_alert && cpRow.seller_user_id) {
+    await client.query(
+      `
+      INSERT INTO recupero_alerts (
+        contact_id,
+        product_id,
+        seller_user_id,
+        motivo_baja,
+        fecha_baja,
+        gestionado_por
+      )
+      VALUES ($1, $2, $3, $4, COALESCE($5::date, now()::date), $6)
+      `,
+      [contactId, productId, cpRow.seller_user_id, motivoBaja, fechaBaja, userId]
+    );
+  }
+
+  let gestionadoPorNombre = null;
+  let gestionadoPorEmail = null;
+  if (userId) {
+    const userRes = await client.query(
+      `
+      SELECT nombre, apellido, email
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [userId]
+    );
+    const userRow = userRes.rows[0] || null;
+    gestionadoPorNombre =
+      [userRow?.nombre, userRow?.apellido].filter(Boolean).join(" ").trim() ||
+      userRow?.email ||
+      null;
+    gestionadoPorEmail = userRow?.email || null;
+  }
+
+  await client.query("SAVEPOINT baja_audit_insert");
+  try {
+    await client.query(
+      `
+      INSERT INTO contact_product_baja_audit (
+        contact_id,
+        product_id,
+        organization_id,
+        nombre_producto,
+        precio_producto,
+        fecha_alta_producto,
+        medio_pago,
+        motivo_baja,
+        motivo_baja_detalle,
+        fecha_baja,
+        gestionado_por,
+        gestionado_por_nombre,
+        gestionado_por_email,
+        seller_user_id,
+        seller_nombre,
+        genero_recupero_alert
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::date, now()::date), $11, $12, $13, $14, $15, $16)
+      `,
+      [
+        contactId,
+        productId,
+        organizationId,
+        cpRow.nombre_producto || null,
+        cpRow.precio ?? null,
+        cpRow.fecha_alta || null,
+        cpRow.medio_pago || null,
+        motivoBaja,
+        observacion || null,
+        fechaBaja,
+        userId,
+        gestionadoPorNombre,
+        gestionadoPorEmail,
+        cpRow.seller_user_id || null,
+        cpRow.seller_name_snapshot || null,
+        Boolean(cpRow.genero_recupero_alert)
+      ]
+    );
+    await client.query("RELEASE SAVEPOINT baja_audit_insert");
+  } catch (auditError) {
+    await client.query("ROLLBACK TO SAVEPOINT baja_audit_insert");
+    await client.query("RELEASE SAVEPOINT baja_audit_insert");
+    console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
+  }
+
+  await client.query("SAVEPOINT recupero_candidato_insert");
+  try {
+    const fechaBajaValue = fechaBaja || null;
+    const existingRecuperoRes = await client.query(
+      `
+      SELECT id
+      FROM recupero_candidatos
+      WHERE contact_id = $1
+        AND organization_id = $2
+        AND estado != 'recuperado'
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [contactId, organizationId]
+    );
+    const existingRecuperoId = existingRecuperoRes.rows[0]?.id || null;
+
+    if (existingRecuperoId) {
+      await client.query(
+        `
+        UPDATE recupero_candidatos
+        SET
+          nombre = $1,
+          apellido = $2,
+          documento = $3,
+          telefono = $4,
+          celular = $5,
+          fecha_nacimiento = $6,
+          departamento = $7,
+          direccion = $8,
+          producto_anterior = $9,
+          precio_anterior = $10,
+          fecha_venta = $11,
+          medio_pago = $12,
+          vendedor_origen = $13,
+          fecha_baja = COALESCE($14::date, now()::date),
+          motivo_baja = $15,
+          motivo_baja_detalle = $16,
+          contact_id = $17,
+          estado = 'disponible',
+          estado_administrativo = 'activo',
+          resultado_gestion = 'nuevo',
+          seller_id = NULL,
+          fecha_asignacion = NULL,
+          updated_at = now()
+        WHERE id = $18
+        `,
+        [
+          contactRow.nombre || null,
+          contactRow.apellido || null,
+          contactRow.documento || null,
+          contactRow.telefono || null,
+          contactRow.celular || null,
+          contactRow.fecha_nacimiento || null,
+          contactRow.departamento || null,
+          contactRow.direccion || null,
+          cpRow.nombre_producto || null,
+          cpRow.precio ?? null,
+          cpRow.fecha_alta || null,
+          cpRow.medio_pago || null,
+          cpRow.seller_name_snapshot || null,
+          fechaBajaValue,
+          motivoBaja,
+          observacion || null,
+          contactId,
+          existingRecuperoId
+        ]
+      );
+    } else {
+      await client.query(
+        `
+        INSERT INTO recupero_candidatos (
+          organization_id,
+          nombre,
+          apellido,
+          documento,
+          telefono,
+          celular,
+          fecha_nacimiento,
+          departamento,
+          direccion,
+          producto_anterior,
+          precio_anterior,
+          fecha_venta,
+          medio_pago,
+          vendedor_origen,
+          fecha_baja,
+          motivo_baja,
+          motivo_baja_detalle,
+          contact_id,
+          estado,
+          estado_administrativo,
+          resultado_gestion,
+          importado_por,
+          importado_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+          COALESCE($15::date, now()::date),
+          $16, $17, $18, 'disponible', 'activo', 'nuevo', $19, now()
+        )
+        `,
+        [
+          organizationId,
+          contactRow.nombre || null,
+          contactRow.apellido || null,
+          contactRow.documento || null,
+          contactRow.telefono || null,
+          contactRow.celular || null,
+          contactRow.fecha_nacimiento || null,
+          contactRow.departamento || null,
+          contactRow.direccion || null,
+          cpRow.nombre_producto || null,
+          cpRow.precio ?? null,
+          cpRow.fecha_alta || null,
+          cpRow.medio_pago || null,
+          cpRow.seller_name_snapshot || null,
+          fechaBajaValue,
+          motivoBaja,
+          observacion || null,
+          contactId,
+          userId
+        ]
+      );
+    }
+
+    await client.query("RELEASE SAVEPOINT recupero_candidato_insert");
+  } catch (recuperoError) {
+    await client.query("ROLLBACK TO SAVEPOINT recupero_candidato_insert");
+    await client.query("RELEASE SAVEPOINT recupero_candidato_insert");
+    console.warn("RECUPERO_CANDIDATO_INSERT_WARNING", recuperoError?.message || recuperoError);
+  }
+
+  return { ok: true };
+}
+
 async function listSuperadminUsers() {
   const client = createDbClient();
 
@@ -9506,6 +9877,12 @@ export const handler = async (event) => {
   const productMatch = path.match(/\/products\/([^/]+)$/);
   const productsAvailableMatch = path.match(/\/products\/available$/);
   const clientDetailMatch = path.match(/\/clients\/([^/]+)$/);
+  const clientsBajaMasivaPreviewMatch =
+    path.match(/\/api\/clients\/baja-masiva\/preview$/) ||
+    path.match(/\/clients\/baja-masiva\/preview$/);
+  const clientsBajaMasivaConfirmMatch =
+    path.match(/\/api\/clients\/baja-masiva\/confirm$/) ||
+    path.match(/\/clients\/baja-masiva\/confirm$/);
   const clientMedioPagoMatch = path.match(/\/clients\/([^/]+)\/medio-pago$/);
   const clientProductoMatch = path.match(/\/clients\/([^/]+)\/producto$/);
   const contactDetailMatch = path.match(/\/contacts\/([^/]+)$/);
@@ -13787,329 +14164,27 @@ export const handler = async (event) => {
       const observacion = normalizeText(body?.observacion) || null;
       const fechaBaja = body.fecha_baja ? body.fecha_baja : null;
 
-      if (!motivoBaja || !CONTACT_PRODUCT_BAJA_SLUGS.includes(motivoBaja)) {
-        return json(400, {
-          ok: false,
-          message: "motivo_baja inválido",
-          motivos_validos: CONTACT_PRODUCT_BAJA_MOTIVOS
-        });
-      }
-
       const client = createDbClient();
       await client.connect();
       try {
         await client.query("BEGIN");
-        await client.query(`
-          ALTER TABLE contact_products
-          ADD COLUMN IF NOT EXISTS baja_gestionada_por uuid REFERENCES users(id)
-        `);
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS recupero_alerts (
-            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-            contact_id uuid REFERENCES contacts(id),
-            product_id uuid REFERENCES contact_products(id),
-            seller_user_id uuid REFERENCES users(id),
-            motivo_baja text,
-            fecha_baja timestamptz DEFAULT now(),
-            gestionado_por uuid REFERENCES users(id),
-            atendido boolean DEFAULT false,
-            created_at timestamptz DEFAULT now()
-          )
-        `);
-
-        const contactRes = await client.query(
-          `
-          SELECT
-            id,
-            nombre,
-            apellido,
-            documento,
-            telefono,
-            celular,
-            fecha_nacimiento,
-            direccion,
-            departamento
-          FROM contacts
-          WHERE id = $1 AND organization_id = $2
-          LIMIT 1
-          `,
-          [contactId, organizationId]
-        );
-        const contactRow = contactRes.rows[0] || null;
-        if (!contactRow) {
+        const resultado = await aplicarBajaContactProduct(client, {
+          contactId,
+          productId,
+          motivoBaja,
+          observacion,
+          fechaBaja,
+          userId,
+          organizationId
+        });
+        if (!resultado.ok) {
           await client.query("ROLLBACK");
-          return json(404, { ok: false, message: "Contacto no encontrado" });
-        }
-
-        const cpCols = await getTableColumns(client, "contact_products");
-        const cpOrgClause = cpCols.has("organization_id") ? "AND organization_id = $3" : "";
-        const cpValues = cpCols.has("organization_id")
-          ? [productId, contactId, organizationId]
-          : [productId, contactId];
-        const cpSelectColumns = [
-          "id",
-          "estado",
-          "contact_id",
-          "nombre_producto",
-          "precio",
-          "fecha_alta",
-          cpCols.has("medio_pago") ? "medio_pago" : "NULL::text AS medio_pago",
-          cpCols.has("seller_user_id") ? "seller_user_id" : "NULL::uuid AS seller_user_id",
-          cpCols.has("seller_name_snapshot") ? "seller_name_snapshot" : "NULL::text AS seller_name_snapshot",
-          "fecha_alta >= (now()::date - interval '90 days') AS genero_recupero_alert"
-        ];
-        const cpRes = await client.query(
-          `
-          SELECT ${cpSelectColumns.join(", ")}
-          FROM contact_products
-          WHERE id = $1
-            AND contact_id = $2
-            ${cpOrgClause}
-          LIMIT 1
-          `,
-          cpValues
-        );
-        const cpRow = cpRes.rows[0] || null;
-        if (!cpRow) {
-          await client.query("ROLLBACK");
-          return json(404, { ok: false, message: "Producto del contacto no encontrado" });
-        }
-        if (String(cpRow.estado || "").toLowerCase() === "baja") {
-          await client.query("ROLLBACK");
-          return json(409, { ok: false, message: "Este producto ya está dado de baja" });
-        }
-
-        const updateValues = [motivoBaja, observacion || null, userId, fechaBaja, productId, contactId];
-        let updateOrgClause = "";
-        if (cpCols.has("organization_id")) {
-          updateValues.push(organizationId);
-          updateOrgClause = `AND organization_id = $${updateValues.length}`;
-        }
-        await client.query(
-          `
-          UPDATE contact_products
-          SET
-            estado = 'baja',
-            motivo_baja = $1,
-            motivo_baja_detalle = $2,
-            baja_gestionada_por = $3,
-            fecha_baja = COALESCE($4::date, now()::date),
-            updated_at = now()
-          WHERE id = $5
-            AND contact_id = $6
-            ${updateOrgClause}
-          `,
-          updateValues
-        );
-
-        if (cpRow.genero_recupero_alert && cpRow.seller_user_id) {
-          await client.query(
-            `
-            INSERT INTO recupero_alerts (
-              contact_id,
-              product_id,
-              seller_user_id,
-              motivo_baja,
-              fecha_baja,
-              gestionado_por
-            )
-            VALUES ($1, $2, $3, $4, COALESCE($5::date, now()::date), $6)
-            `,
-            [contactId, productId, cpRow.seller_user_id, motivoBaja, fechaBaja, userId]
-          );
-        }
-
-        // Auditoría (tabla dedicada): registrar quién dio de baja y cuándo
-        await client.query("SAVEPOINT baja_audit_insert");
-        try {
-          const gestionadoPorNombre =
-            [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() ||
-            dbUser?.email ||
-            authUser?.email ||
-            null;
-          const gestionadoPorEmail = dbUser?.email || authUser?.email || null;
-          await client.query(
-            `
-            INSERT INTO contact_product_baja_audit (
-              contact_id,
-              product_id,
-              organization_id,
-              nombre_producto,
-              precio_producto,
-              fecha_alta_producto,
-              medio_pago,
-              motivo_baja,
-              motivo_baja_detalle,
-              fecha_baja,
-              gestionado_por,
-              gestionado_por_nombre,
-              gestionado_por_email,
-              seller_user_id,
-              seller_nombre,
-              genero_recupero_alert
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::date, now()::date), $11, $12, $13, $14, $15, $16)
-            `,
-            [
-              contactId,
-              productId,
-              organizationId,
-              cpRow.nombre_producto || null,
-              cpRow.precio ?? null,
-              cpRow.fecha_alta || null,
-              cpRow.medio_pago || null,
-              motivoBaja,
-              observacion || null,
-              fechaBaja,
-              userId,
-              gestionadoPorNombre,
-              gestionadoPorEmail,
-              cpRow.seller_user_id || null,
-              cpRow.seller_name_snapshot || null,
-              Boolean(cpRow.genero_recupero_alert)
-            ]
-          );
-          await client.query("RELEASE SAVEPOINT baja_audit_insert");
-        } catch (auditError) {
-          await client.query("ROLLBACK TO SAVEPOINT baja_audit_insert");
-          await client.query("RELEASE SAVEPOINT baja_audit_insert");
-          // No romper el flujo por falta de tabla/permisos en auditoría
-          console.warn("BAJA_AUDIT_INSERT_WARNING", auditError?.message || auditError);
-        }
-
-        await client.query("SAVEPOINT recupero_candidato_insert");
-        try {
-          const fechaBajaValue = fechaBaja || null;
-          const existingRecuperoRes = await client.query(
-            `
-            SELECT id
-            FROM recupero_candidatos
-            WHERE contact_id = $1
-              AND organization_id = $2
-              AND estado != 'recuperado'
-            ORDER BY created_at DESC
-            LIMIT 1
-            `,
-            [contactId, organizationId]
-          );
-          const existingRecuperoId = existingRecuperoRes.rows[0]?.id || null;
-
-          if (existingRecuperoId) {
-            await client.query(
-              `
-              UPDATE recupero_candidatos
-              SET
-                nombre = $1,
-                apellido = $2,
-                documento = $3,
-                telefono = $4,
-                celular = $5,
-                fecha_nacimiento = $6,
-                departamento = $7,
-                direccion = $8,
-                producto_anterior = $9,
-                precio_anterior = $10,
-                fecha_venta = $11,
-                medio_pago = $12,
-                vendedor_origen = $13,
-                fecha_baja = COALESCE($14::date, now()::date),
-                motivo_baja = $15,
-                motivo_baja_detalle = $16,
-                contact_id = $17,
-                estado = 'disponible',
-                estado_administrativo = 'activo',
-                resultado_gestion = 'nuevo',
-                seller_id = NULL,
-                fecha_asignacion = NULL,
-                updated_at = now()
-              WHERE id = $18
-              `,
-              [
-                contactRow.nombre || null,
-                contactRow.apellido || null,
-                contactRow.documento || null,
-                contactRow.telefono || null,
-                contactRow.celular || null,
-                contactRow.fecha_nacimiento || null,
-                contactRow.departamento || null,
-                contactRow.direccion || null,
-                cpRow.nombre_producto || null,
-                cpRow.precio ?? null,
-                cpRow.fecha_alta || null,
-                cpRow.medio_pago || null,
-                cpRow.seller_name_snapshot || null,
-                fechaBajaValue,
-                motivoBaja,
-                observacion || null,
-                contactId,
-                existingRecuperoId
-              ]
-            );
-          } else {
-            await client.query(
-              `
-              INSERT INTO recupero_candidatos (
-                organization_id,
-                nombre,
-                apellido,
-                documento,
-                telefono,
-                celular,
-                fecha_nacimiento,
-                departamento,
-                direccion,
-                producto_anterior,
-                precio_anterior,
-                fecha_venta,
-                medio_pago,
-                vendedor_origen,
-                fecha_baja,
-                motivo_baja,
-                motivo_baja_detalle,
-                contact_id,
-                estado,
-                estado_administrativo,
-                resultado_gestion,
-                importado_por,
-                importado_at
-              )
-              VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                COALESCE($15::date, now()::date),
-                $16, $17, $18, 'disponible', 'activo', 'nuevo', $19, now()
-              )
-              `,
-              [
-                organizationId,
-                contactRow.nombre || null,
-                contactRow.apellido || null,
-                contactRow.documento || null,
-                contactRow.telefono || null,
-                contactRow.celular || null,
-                contactRow.fecha_nacimiento || null,
-                contactRow.departamento || null,
-                contactRow.direccion || null,
-                cpRow.nombre_producto || null,
-                cpRow.precio ?? null,
-                cpRow.fecha_alta || null,
-                cpRow.medio_pago || null,
-                cpRow.seller_name_snapshot || null,
-                fechaBajaValue,
-                motivoBaja,
-                observacion || null,
-                contactId,
-                userId
-              ]
-            );
+          const payload = { ok: false, message: resultado.message };
+          if (resultado.status === 400 && resultado.message === "motivo_baja inválido") {
+            payload.motivos_validos = CONTACT_PRODUCT_BAJA_MOTIVOS;
           }
-
-          await client.query("RELEASE SAVEPOINT recupero_candidato_insert");
-        } catch (recuperoError) {
-          await client.query("ROLLBACK TO SAVEPOINT recupero_candidato_insert");
-          await client.query("RELEASE SAVEPOINT recupero_candidato_insert");
-          console.warn("RECUPERO_CANDIDATO_INSERT_WARNING", recuperoError?.message || recuperoError);
+          return json(resultado.status || 400, payload);
         }
-
         await client.query("COMMIT");
         return json(200, { ok: true });
       } catch (error) {
@@ -14120,6 +14195,315 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to baja producto", error: error.message });
+    }
+  }
+
+  if (method === "POST" && clientsBajaMasivaPreviewMatch) {
+    const payload = extractDatosTrabajarCsvPayload(event);
+    if (payload.error) {
+      return json(400, { ok: false, message: payload.error });
+    }
+    const csvText = payload.csvText;
+    if (!csvText || !csvText.trim()) {
+      return json(400, { ok: false, message: "CSV vacio" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      if (!["supervisor", "superadministrador"].includes(dbUser?.role_key)) {
+        return json(403, { ok: false, message: "Forbidden" });
+      }
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const { headers, rows } = parseCsvWithHeaders(csvText);
+      const normalizeHeaderKey = (value) =>
+        normalizeText(value)
+          .toLowerCase()
+          .replace(/\s+/g, "_");
+      const headerIndex = new Map();
+      headers.forEach((header, index) => {
+        const key = normalizeHeaderKey(header);
+        if (key && !headerIndex.has(key)) {
+          headerIndex.set(key, index);
+        }
+      });
+
+      const documentoIndex = headerIndex.get("documento");
+      const motivoIndex = headerIndex.get("motivo");
+      const fechaBajaIndex =
+        headerIndex.get("fecha_baja") ??
+        headerIndex.get("fecha_de_baja") ??
+        headerIndex.get("fechabaja");
+
+      if (
+        typeof documentoIndex !== "number" ||
+        typeof motivoIndex !== "number" ||
+        typeof fechaBajaIndex !== "number"
+      ) {
+        return json(400, {
+          ok: false,
+          message: "El CSV debe incluir las columnas documento, motivo y fecha_baja"
+        });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const cpCols = await getTableColumns(client, "contact_products");
+        const cpOrgClause = cpCols.has("organization_id") ? "AND organization_id = $2" : "";
+        const resumen = {
+          encontrados: 0,
+          no_encontrados: 0,
+          ya_en_baja: 0,
+          motivo_invalido: 0
+        };
+        const filas = [];
+
+        for (const row of rows) {
+          const documento = normalizeDocumento(row[documentoIndex]);
+          const motivoCrudo = normalizeText(row[motivoIndex]) || null;
+          const motivo = motivoCrudo ? resolverMotivoBajaSlug(motivoCrudo) : null;
+          const fechaBaja = normalizeText(row[fechaBajaIndex]) || null;
+
+          const item = {
+            documento,
+            nombre: null,
+            motivo,
+            fecha_baja: fechaBaja,
+            estado: "no_encontrado",
+            contact_id: null,
+            product_id: null
+          };
+
+          if (!motivo || !CONTACT_PRODUCT_BAJA_SLUGS.includes(motivo)) {
+            item.estado = "motivo_invalido";
+            resumen.motivo_invalido += 1;
+            filas.push(item);
+            continue;
+          }
+
+          if (!documento) {
+            resumen.no_encontrados += 1;
+            filas.push(item);
+            continue;
+          }
+
+          const contactRes = await client.query(
+            `
+            SELECT id, nombre, apellido
+            FROM contacts
+            WHERE organization_id = $1
+              AND regexp_replace(COALESCE(documento, ''), '[^0-9]', '', 'g') = $2
+            ORDER BY created_at DESC NULLS LAST, id DESC
+            LIMIT 1
+            `,
+            [organizationId, documento]
+          );
+          const contactRow = contactRes.rows[0] || null;
+          if (!contactRow) {
+            resumen.no_encontrados += 1;
+            filas.push(item);
+            continue;
+          }
+
+          item.contact_id = contactRow.id || null;
+          item.nombre = [contactRow.nombre, contactRow.apellido].filter(Boolean).join(" ").trim() || null;
+
+          const cpValues = cpCols.has("organization_id")
+            ? [contactRow.id, organizationId]
+            : [contactRow.id];
+          const cpRes = await client.query(
+            `
+            SELECT id, estado, fecha_alta, created_at
+            FROM contact_products
+            WHERE contact_id = $1
+              ${cpOrgClause}
+            ORDER BY
+              CASE WHEN estado = 'alta' THEN 0 ELSE 1 END,
+              fecha_alta DESC NULLS LAST,
+              created_at DESC
+            `,
+            cpValues
+          );
+          const activeProduct = cpRes.rows.find(
+            (productRow) => String(productRow.estado || "").toLowerCase() === "alta"
+          );
+
+          if (activeProduct) {
+            item.estado = "encontrado";
+            item.product_id = activeProduct.id || null;
+            resumen.encontrados += 1;
+          } else if (cpRes.rows.length > 0) {
+            item.estado = "ya_en_baja";
+            resumen.ya_en_baja += 1;
+          } else {
+            resumen.no_encontrados += 1;
+          }
+
+          filas.push(item);
+        }
+
+        return json(200, {
+          ok: true,
+          total: filas.length,
+          resumen,
+          filas
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to preview baja masiva",
+        error: error.message
+      });
+    }
+  }
+
+  if (method === "POST" && clientsBajaMasivaConfirmMatch) {
+    const bodyRaw = safeParseBody(event);
+    if (bodyRaw === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      if (!["supervisor", "superadministrador"].includes(dbUser?.role_key)) {
+        return json(403, { ok: false, message: "Forbidden" });
+      }
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+      if (!organizationId) {
+        return json(400, { ok: false, message: "organization_id requerido" });
+      }
+
+      const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
+      const filas = Array.isArray(body?.filas) ? body.filas : null;
+      if (!filas) {
+        return json(400, { ok: false, message: "filas requeridas" });
+      }
+
+      const client = createDbClient();
+      let transactionStarted = false;
+      try {
+        await client.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+
+        const detalle = [];
+        let aplicadas = 0;
+        let fallidas = 0;
+
+        for (const fila of filas) {
+          await client.query("SAVEPOINT fila_baja");
+          try {
+            const resultado = await aplicarBajaContactProduct(client, {
+              contactId: fila?.contact_id || null,
+              productId: fila?.product_id || null,
+              motivoBaja: normalizeText(fila?.motivo) || null,
+              observacion: null,
+              fechaBaja: fila?.fecha_baja || null,
+              userId: dbUser?.id || null,
+              organizationId
+            });
+
+            if (resultado.ok) {
+              await client.query("RELEASE SAVEPOINT fila_baja");
+              aplicadas += 1;
+              detalle.push({ contact_id: fila?.contact_id || null, ok: true, message: null });
+            } else {
+              await client.query("ROLLBACK TO SAVEPOINT fila_baja");
+              await client.query("RELEASE SAVEPOINT fila_baja");
+              fallidas += 1;
+              detalle.push({
+                contact_id: fila?.contact_id || null,
+                ok: false,
+                message: resultado.message
+              });
+            }
+          } catch (error) {
+            await client.query("ROLLBACK TO SAVEPOINT fila_baja");
+            await client.query("RELEASE SAVEPOINT fila_baja");
+            fallidas += 1;
+            detalle.push({
+              contact_id: fila?.contact_id || null,
+              ok: false,
+              message: error.message
+            });
+          }
+        }
+
+        await client.query("COMMIT");
+        transactionStarted = false;
+
+        return json(200, {
+          ok: true,
+          total: filas.length,
+          aplicadas,
+          fallidas,
+          detalle
+        });
+      } catch (error) {
+        if (transactionStarted) {
+          try {
+            await client.query("ROLLBACK");
+          } catch (_) {}
+        }
+        return json(500, {
+          ok: false,
+          message: "Failed to confirm baja masiva",
+          error: error.message
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to confirm baja masiva",
+        error: error.message
+      });
     }
   }
 
