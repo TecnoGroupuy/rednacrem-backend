@@ -59,7 +59,11 @@ function getLeadManagementRegistrationErrorMessage(error) {
   const constraint = String(error?.constraint || "").trim();
   const rawMessage = String(error?.message || "").trim();
 
-  if (constraint === "contacts_email_unique_idx" || /contacts_email_unique_idx/i.test(rawMessage)) {
+  if (
+    constraint === "contacts_email_org_unique_idx" ||
+    constraint === "contacts_email_unique_idx" ||
+    /contacts_email_(org_)?unique_idx/i.test(rawMessage)
+  ) {
     return "No se pudo finalizar la gestión porque el email del contacto ya existe en la base. Revisá el email ingresado o usá el contacto existente.";
   }
 
