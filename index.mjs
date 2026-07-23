@@ -14122,6 +14122,186 @@ export const handler = async (event) => {
     }
   }
 
+  if (
+    method === "DELETE" &&
+    (path.match(/\/api\/contact-products\/([^/]+)$/) || path.match(/\/contact-products\/([^/]+)$/))
+  ) {
+    const match =
+      path.match(/\/api\/contact-products\/([^/]+)$/) ||
+      path.match(/\/contact-products\/([^/]+)$/);
+    const contactProductId = match?.[1];
+    if (!contactProductId) {
+      return json(400, { ok: false, message: "id requerido" });
+    }
+    if (!isValidUuid(contactProductId)) {
+      return json(400, { ok: false, message: "id inválido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
+        await client.query("BEGIN");
+
+        const targetRes = await client.query(
+          `
+          SELECT
+            cp.id,
+            cp.contact_id,
+            cp.sale_id,
+            cp.nombre_producto,
+            cp.precio,
+            cp.fecha_alta,
+            cp.created_at
+          FROM contact_products cp
+          JOIN contacts c ON c.id = cp.contact_id
+          WHERE cp.id = $1
+            AND c.organization_id = $2
+          LIMIT 1
+          `,
+          [contactProductId, organizationId]
+        );
+
+        const target = targetRes.rows[0] || null;
+        if (!target) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Producto del contacto no encontrado" });
+        }
+
+        let siblingRes;
+        if (target.sale_id) {
+          siblingRes = await client.query(
+            `
+            SELECT id
+            FROM contact_products
+            WHERE sale_id = $1
+              AND contact_id = $2
+              AND fecha_alta IS NOT DISTINCT FROM $3
+              AND id <> $4
+            ORDER BY created_at DESC NULLS LAST, id DESC
+            `,
+            [target.sale_id, target.contact_id, target.fecha_alta, target.id]
+          );
+
+          if (!siblingRes.rows.length) {
+            await client.query("ROLLBACK");
+            return json(409, {
+              ok: false,
+              message: "No se puede eliminar: es la única relación de este contacto con esta venta. Si el producto es incorrecto, use el flujo de baja en lugar de eliminar."
+            });
+          }
+        } else {
+          siblingRes = await client.query(
+            `
+            SELECT id
+            FROM contact_products
+            WHERE contact_id = $1
+              AND nombre_producto IS NOT DISTINCT FROM $2
+              AND precio IS NOT DISTINCT FROM $3
+              AND fecha_alta IS NOT DISTINCT FROM $4
+              AND id <> $5
+            ORDER BY created_at DESC NULLS LAST, id DESC
+            `,
+            [target.contact_id, target.nombre_producto, target.precio, target.fecha_alta, target.id]
+          );
+
+          if (!siblingRes.rows.length) {
+            await client.query("ROLLBACK");
+            return json(409, {
+              ok: false,
+              message: "No se puede eliminar: es la única relación de este contacto con esta venta. Si el producto es incorrecto, use el flujo de baja en lugar de eliminar."
+            });
+          }
+        }
+
+        const siblingId = siblingRes.rows[0].id;
+
+        const saleItemsRes = await client.query(
+          `
+          UPDATE sale_items
+          SET product_id = $1
+          WHERE product_id = $2
+          `,
+          [siblingId, target.id]
+        );
+
+        const recuperoAlertsRes = await client.query(
+          `
+          UPDATE recupero_alerts
+          SET product_id = $1
+          WHERE product_id = $2
+          `,
+          [siblingId, target.id]
+        );
+
+        const bajaAuditRes = await client.query(
+          `
+          UPDATE contact_product_baja_audit
+          SET product_id = $1
+          WHERE product_id = $2
+          `,
+          [siblingId, target.id]
+        );
+
+        const deleteRes = await client.query(
+          `
+          DELETE FROM contact_products
+          WHERE id = $1
+          RETURNING id
+          `,
+          [target.id]
+        );
+
+        if (!deleteRes.rows.length) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Producto del contacto no encontrado" });
+        }
+
+        await client.query("COMMIT");
+        return json(200, {
+          ok: true,
+          deleted_id: target.id,
+          reassigned: {
+            recupero_alerts: recuperoAlertsRes.rowCount || 0,
+            contact_product_baja_audit: bajaAuditRes.rowCount || 0,
+            sale_items: saleItemsRes.rowCount || 0
+          }
+        });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to delete contact product", error: error.message });
+    }
+  }
+
   if (method === "POST" && contactProductBajaMatch) {
     const contactId = contactProductBajaMatch[1];
     const productId = contactProductBajaMatch[2];
