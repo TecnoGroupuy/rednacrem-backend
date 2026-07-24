@@ -5512,68 +5512,113 @@ async function processClientImportBatch(
           const motivoBajaDetalle = isBaja ? (estadoRaw || "importado") : null;
 
           let shouldInsertContactProduct = true;
+          let skipContactProductReason = null;
+          let existingContactProductId = null;
           if (contactImportStatus === "updated") {
-            const exists = await client.query(
-              `
-              SELECT id
-              FROM contact_products
-              WHERE contact_id = $1
-                AND fecha_alta = $2
-                AND nombre_producto = $3
-                ${organizationId ? "AND organization_id = $4" : ""}
-              LIMIT 1
-              `,
-              organizationId
-                ? [contact.id, fechaAlta, productName || "Producto", organizationId]
-                : [contact.id, fechaAlta, productName || "Producto"]
-            );
-            if (exists.rowCount > 0) {
-              shouldInsertContactProduct = false;
+            if (saleId) {
+              const existsBySaleId = await client.query(
+                `
+                SELECT id
+                FROM contact_products
+                WHERE sale_id = $1
+                LIMIT 1
+                `,
+                [saleId]
+              );
+              if (existsBySaleId.rowCount > 0) {
+                shouldInsertContactProduct = false;
+                skipContactProductReason = "existing_sale_id";
+                existingContactProductId = existsBySaleId.rows[0]?.id || null;
+              }
+            } else {
+              const fallbackValues = [contact.id, fechaAlta, precio, sellerUserId];
+              const fallbackOrgClause = organizationId ? "AND organization_id = $5" : "";
+              if (organizationId) fallbackValues.push(organizationId);
+              const existsFallback = await client.query(
+                `
+                SELECT id
+                FROM contact_products
+                WHERE contact_id = $1
+                  AND fecha_alta = $2
+                  AND precio IS NOT DISTINCT FROM $3
+                  AND seller_user_id IS NOT DISTINCT FROM $4
+                  ${fallbackOrgClause}
+                LIMIT 1
+                `,
+                fallbackValues
+              );
+              if (existsFallback.rowCount > 0) {
+                shouldInsertContactProduct = false;
+                skipContactProductReason = "legacy_fallback_match";
+                existingContactProductId = existsFallback.rows[0]?.id || null;
+              }
             }
           }
 
+          if (!shouldInsertContactProduct) {
+            console.warn("CONTACT_PRODUCT_IMPORT_SKIPPED", JSON.stringify({
+              row_number: row.row_number ?? null,
+              contact_id: contact.id,
+              sale_id: saleId,
+              product_name: productName || row.producto_nombre || null,
+              reason: skipContactProductReason,
+              existing_contact_product_id: existingContactProductId
+            }));
+          }
+
           if (shouldInsertContactProduct) {
-            await client.query(
-              `
-              INSERT INTO contact_products (
-                contact_id,
-                nombre_producto,
-                plan,
-                precio,
-                fecha_alta,
-                cuotas_pagas,
-                carencia_cuotas,
-                estado,
-                motivo_baja,
-                motivo_baja_detalle,
-                fecha_baja,
-                seller_user_id,
-                seller_name_snapshot,
-                seller_origin,
-                sale_id,
-                organization_id
-              )
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-              `,
-              [
-                contact.id,
-                productName || "Producto",
-                row.plan || null,
-                precio || 0,
-                fechaAlta,
-                row.cuotas_pagas || 0,
-                row.carencia_cuotas || 0,
-                isBaja ? "baja" : "alta",
-                motivoBaja,
-                motivoBajaDetalle,
-                fechaBaja,
-                sellerUserId,
-                sellerNameSnapshot,
-                "importado",
-                saleId,
-                organizationId
-              ]
-            );
+            try {
+              await client.query(
+                `
+                INSERT INTO contact_products (
+                  contact_id,
+                  nombre_producto,
+                  plan,
+                  precio,
+                  fecha_alta,
+                  cuotas_pagas,
+                  carencia_cuotas,
+                  estado,
+                  motivo_baja,
+                  motivo_baja_detalle,
+                  fecha_baja,
+                  seller_user_id,
+                  seller_name_snapshot,
+                  seller_origin,
+                  sale_id,
+                  organization_id
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                `,
+                [
+                  contact.id,
+                  productName || "Producto",
+                  row.plan || null,
+                  precio || 0,
+                  fechaAlta,
+                  row.cuotas_pagas || 0,
+                  row.carencia_cuotas || 0,
+                  isBaja ? "baja" : "alta",
+                  motivoBaja,
+                  motivoBajaDetalle,
+                  fechaBaja,
+                  sellerUserId,
+                  sellerNameSnapshot,
+                  "importado",
+                  saleId,
+                  organizationId
+                ]
+              );
+            } catch (contactProductError) {
+              console.error("CONTACT_PRODUCT_IMPORT_INSERT_FAILED", JSON.stringify({
+                row_number: row.row_number ?? null,
+                contact_id: contact.id,
+                sale_id: saleId,
+                product_name: productName || row.producto_nombre || null,
+                error: contactProductError?.message || String(contactProductError)
+              }));
+              throw contactProductError;
+            }
           }
         }
 
