@@ -23158,6 +23158,19 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           );
         }
 
+        // Sincronizar columnas legacy de lead_batches (seller_id / asignado_a)
+        // si el vendedor retirado coincidía con ellas.
+        const legacyUpdateValue = newSellerId || null;
+        await client.query(
+          `UPDATE lead_batches
+           SET seller_id = CASE WHEN seller_id = $2 THEN $3 ELSE seller_id END,
+               asignado_a = CASE WHEN asignado_a = $2 THEN $3 ELSE asignado_a END,
+               updated_at = now()
+           WHERE id = $1
+             AND (seller_id = $2 OR asignado_a = $2)`,
+          [batchId, sellerId, legacyUpdateValue]
+        );
+
         // Retirar vendedor saliente
         const deleteParams = [batchId, sellerId];
         let orgLbsClause = "";
