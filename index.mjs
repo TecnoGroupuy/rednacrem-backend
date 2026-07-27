@@ -23053,8 +23053,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         const orgClause = organizationId ? ` AND organization_id = $4` : "";
         const orgParams = organizationId ? [organizationId] : [];
 
-        // SIEMPRE: rellamar y seguimiento van al vendedor destino especÃ­fico (tienen contexto)
-        // Solo aplica si hay new_seller_id (mode specific o roundrobin con destino)
+        // SIEMPRE: rellamar y seguimiento van al vendedor destino específico si existe.
+        // Si no hay destino, quedan sin asignar para evitar referencias huérfanas.
         if (newSellerId) {
           await client.query(
             `UPDATE lead_contact_status
@@ -23063,9 +23063,17 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                AND estado_venta IN ('rellamar', 'seguimiento')${orgClause}`,
             [newSellerId, batchId, sellerId, ...orgParams]
           );
+        } else {
+          await client.query(
+            `UPDATE lead_contact_status
+             SET assigned_to = NULL, updated_at = now()
+             WHERE batch_id = $1 AND assigned_to = $2
+               AND estado_venta IN ('rellamar', 'seguimiento')${orgClause.replace("$4", "$3")}`,
+            [batchId, sellerId, ...orgParams]
+          );
         }
 
-        // nuevo y no_contesta segÃºn el mode elegido
+        // nuevo y no_contesta según el mode elegido
         if (mode === "specific") {
           // Van al vendedor destino
           await client.query(
@@ -23116,6 +23124,20 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                 updateParams
               );
             }
+          } else {
+            const fallbackParams = [batchId, sellerId];
+            let fallbackOrgClause = "";
+            if (organizationId) {
+              fallbackParams.push(organizationId);
+              fallbackOrgClause = ` AND organization_id = $3`;
+            }
+            await client.query(
+              `UPDATE lead_contact_status
+               SET assigned_to = NULL, updated_at = now()
+               WHERE batch_id = $1 AND assigned_to = $2
+                 AND estado_venta IN ('nuevo', 'no_contesta')${fallbackOrgClause}`,
+              fallbackParams
+            );
           }
         } else if (mode === "pool") {
           // Dejar sin asignar (assigned_to = null)
@@ -23148,8 +23170,18 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           deleteParams
         );
 
+        const remainingRes = await client.query(
+          `SELECT COUNT(*)::int AS count FROM lead_batch_sellers WHERE batch_id = $1`,
+          [batchId]
+        );
+        const remainingSellers = remainingRes.rows[0]?.count ?? 0;
+
         await client.query("COMMIT");
-        return json(200, { ok: true, message: "Vendedor retirado correctamente" });
+        return json(200, {
+          ok: true,
+          message: "Vendedor retirado correctamente",
+          data: { remainingSellers }
+        });
       } catch (err) {
         await client.query("ROLLBACK");
         return json(500, { ok: false, message: err.message });
