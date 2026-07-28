@@ -2829,7 +2829,8 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
       SELECT
         user_id,
         COUNT(*)::int AS total_llamadas,
-        COUNT(*) FILTER (WHERE resultado = 'venta')::int AS total_ventas
+        COUNT(*) FILTER (WHERE resultado = 'venta')::int AS total_ventas,
+        COUNT(*) FILTER (WHERE resultado IN ('venta', 'rechazo', 'seguimiento', 'rellamar'))::int AS total_utiles
       FROM (
         SELECT DISTINCT ON (contact_id, user_id)
           user_id,
@@ -2850,7 +2851,8 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
   for (const row of callsRes.rows) {
     callsMap.set(row.user_id, {
       total_llamadas: Number(row.total_llamadas || 0),
-      total_ventas: Number(row.total_ventas || 0)
+      total_ventas: Number(row.total_ventas || 0),
+      total_utiles: Number(row.total_utiles || 0)
     });
   }
 
@@ -2885,14 +2887,16 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
 
   let totalLlamadas = 0;
   let totalVentas = 0;
+  let totalUtiles = 0;
   let totalPauseMinutes = 0;
   let agentesActivos = 0;
   const agentesOutput = [];
 
   for (const seller of sellers) {
-    const callStats = callsMap.get(seller.id) || { total_llamadas: 0, total_ventas: 0 };
+    const callStats = callsMap.get(seller.id) || { total_llamadas: 0, total_ventas: 0, total_utiles: 0 };
     totalLlamadas += callStats.total_llamadas;
     totalVentas += callStats.total_ventas;
+    totalUtiles += callStats.total_utiles;
 
     const eventStats = eventsMap.get(seller.id) || {
       login_time: null,
@@ -2901,7 +2905,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
       pause_count: 0
     };
 
-    const conversion = computeConversion(callStats.total_ventas, callStats.total_llamadas);
+    const conversion = computeConversion(callStats.total_ventas, callStats.total_utiles);
 
     let tiempoConectadoMinutos = null;
     if (eventStats.login_time) {
@@ -2971,10 +2975,11 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     agentes_total: sellers.length,
     agentes_atencion: agentesAtencion,
     total_llamadas: totalLlamadas,
+    total_utiles: totalUtiles,
     meta_llamadas: config.meta_llamadas_dia * sellers.length,
     total_ventas: totalVentas,
     meta_ventas: config.meta_ventas_dia * sellers.length,
-    conversion_promedio: computeConversion(totalVentas, totalLlamadas)
+    conversion_promedio: computeConversion(totalVentas, totalUtiles)
   };
 
   const alertas_activas = alertasRes.rows.map((row) => ({
