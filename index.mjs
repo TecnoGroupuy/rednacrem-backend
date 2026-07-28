@@ -27073,8 +27073,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           const contacto = datosUtiles > 0 && gestiones > 0
             ? Math.round((datosUtiles / gestiones) * 100)
             : 0;
-          const efectividad = gestiones > 0 && ventas > 0
-            ? Math.round((ventas / gestiones) * 100)
+          const efectividad = datosUtiles > 0 && ventas > 0
+            ? Math.round((ventas / datosUtiles) * 100)
             : 0;
           return {
             origen_dato: origenDato ?? null,
@@ -27127,8 +27127,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           totals.contacto = totalDatosUtiles > 0 && totals.gestiones > 0
             ? Math.round((totalDatosUtiles / totals.gestiones) * 100)
             : 0;
-          totals.efectividad = totals.gestiones > 0 && totals.ventas > 0
-            ? Math.round((totals.ventas / totals.gestiones) * 100)
+          totals.efectividad = totalDatosUtiles > 0 && totals.ventas > 0
+            ? Math.round((totals.ventas / totalDatosUtiles) * 100)
             : 0;
           return {
             id: seller.id,
