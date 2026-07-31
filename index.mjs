@@ -1,5 +1,6 @@
 ﻿import fs from "node:fs";
 import crypto from "node:crypto";
+import https from "node:https";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -6753,10 +6754,53 @@ function buildDigestAuthorizationHeader({ username, password, method, url, chall
   return `Digest ${parts.join(", ")}`;
 }
 
+function createGatewayResponse(statusCode, headers, bodyBuffer) {
+  const normalizedHeaders = new Map(
+    Object.entries(headers || {}).map(([key, value]) => [String(key).toLowerCase(), value])
+  );
+  const bodyText = Buffer.isBuffer(bodyBuffer)
+    ? bodyBuffer.toString("utf8")
+    : String(bodyBuffer || "");
+
+  return {
+    status: Number(statusCode) || 500,
+    ok: Number(statusCode) >= 200 && Number(statusCode) < 300,
+    headers: {
+      get(name) {
+        return normalizedHeaders.get(String(name || "").toLowerCase()) ?? null;
+      }
+    },
+    async text() {
+      return bodyText;
+    },
+    async json() {
+      return JSON.parse(bodyText);
+    }
+  };
+}
+
+function gatewayRequest(url, { method = "GET", headers = {}, body }) {
+  const gatewayAgent = new https.Agent({ rejectUnauthorized: false });
+  return new Promise((resolve, reject) => {
+    const request = https.request(url, { method, headers, agent: gatewayAgent }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        resolve(createGatewayResponse(response.statusCode, response.headers, Buffer.concat(chunks)));
+      });
+    });
+    request.on("error", reject);
+    if (body !== undefined && body !== null) {
+      request.write(body);
+    }
+    request.end();
+  });
+}
+
 async function fetchWithGatewayAuth(url, { method = "GET", headers = {}, body, username, password }) {
   const requestHeaders = { ...headers };
   const basicToken = Buffer.from(`${username || ""}:${password || ""}`).toString("base64");
-  let response = await fetch(url, {
+  let response = await gatewayRequest(url, {
     method,
     headers: {
       ...requestHeaders,
@@ -6781,7 +6825,7 @@ async function fetchWithGatewayAuth(url, { method = "GET", headers = {}, body, u
   if (!digestHeader) {
     return response;
   }
-  return fetch(url, {
+  return gatewayRequest(url, {
     method,
     headers: {
       ...requestHeaders,
@@ -6960,13 +7004,13 @@ async function sendSms(client, {
           parsedBody = { raw: responseText };
         }
       }
-      if (response.ok) {
+      if (response.ok && parsedBody?.error_code === 202) {
         status = "sent";
-        dinstarTaskId =
-          parsedBody?.task_id ||
-          parsedBody?.taskId ||
-          parsedBody?.id ||
-          null;
+        dinstarTaskId = parsedBody?.task_id ?? null;
+      } else if (response.ok) {
+        errorDetail = parsedBody?.error_code != null
+          ? `Dinstar error_code=${parsedBody.error_code}${responseText ? `: ${responseText}` : ""}`
+          : (responseText || `HTTP ${response.status}`);
       } else {
         errorDetail = responseText || `HTTP ${response.status}`;
       }
