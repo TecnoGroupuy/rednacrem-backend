@@ -6702,58 +6702,6 @@ function withOrganizationIdQuery(event, organizationId) {
   };
 }
 
-function md5Hex(value) {
-  return crypto.createHash("md5").update(String(value || "")).digest("hex");
-}
-
-function parseDigestChallenge(headerValue) {
-  const source = String(headerValue || "");
-  const pairs = [...source.matchAll(/([a-z0-9_]+)=(?:"([^"]*)"|([^,\s]+))/gi)];
-  const parsed = {};
-  for (const match of pairs) {
-    parsed[String(match[1] || "").toLowerCase()] = match[2] ?? match[3] ?? "";
-  }
-  return parsed;
-}
-
-function buildDigestAuthorizationHeader({ username, password, method, url, challenge }) {
-  const realm = challenge.realm || "";
-  const nonce = challenge.nonce || "";
-  const opaque = challenge.opaque || "";
-  const algorithm = (challenge.algorithm || "MD5").toUpperCase();
-  const qop = String(challenge.qop || "")
-    .split(",")
-    .map((item) => item.trim())
-    .find((item) => item) || null;
-  if (algorithm !== "MD5" || !realm || !nonce) {
-    return null;
-  }
-  const uriUrl = new URL(url);
-  const uri = `${uriUrl.pathname}${uriUrl.search}`;
-  const ha1 = md5Hex(`${username}:${realm}:${password}`);
-  const ha2 = md5Hex(`${String(method || "GET").toUpperCase()}:${uri}`);
-  const nc = "00000001";
-  const cnonce = crypto.randomBytes(8).toString("hex");
-  const response = qop
-    ? md5Hex(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
-    : md5Hex(`${ha1}:${nonce}:${ha2}`);
-  const parts = [
-    `username="${username}"`,
-    `realm="${realm}"`,
-    `nonce="${nonce}"`,
-    `uri="${uri}"`,
-    `response="${response}"`,
-    `algorithm=${algorithm}`
-  ];
-  if (opaque) parts.push(`opaque="${opaque}"`);
-  if (qop) {
-    parts.push(`qop=${qop}`);
-    parts.push(`nc=${nc}`);
-    parts.push(`cnonce="${cnonce}"`);
-  }
-  return `Digest ${parts.join(", ")}`;
-}
-
 function createGatewayResponse(statusCode, headers, bodyBuffer) {
   const normalizedHeaders = new Map(
     Object.entries(headers || {}).map(([key, value]) => [String(key).toLowerCase(), value])
@@ -6768,6 +6716,16 @@ function createGatewayResponse(statusCode, headers, bodyBuffer) {
     headers: {
       get(name) {
         return normalizedHeaders.get(String(name || "").toLowerCase()) ?? null;
+      },
+      getSetCookie() {
+        const value = normalizedHeaders.get("set-cookie");
+        if (Array.isArray(value)) {
+          return value;
+        }
+        if (value == null) {
+          return [];
+        }
+        return [value];
       }
     },
     async text() {
@@ -6801,42 +6759,72 @@ function gatewayRequest(url, { method = "GET", headers = {}, body }) {
   });
 }
 
-async function fetchWithGatewayAuth(url, { method = "GET", headers = {}, body, username, password }) {
-  const requestHeaders = { ...headers };
-  const basicToken = Buffer.from(`${username || ""}:${password || ""}`).toString("base64");
-  let response = await gatewayRequest(url, {
-    method,
+async function dinstarLogin(host, port, username, password) {
+  const url = `https://${host}:${port}/goform/IADIdentityAuth`;
+  const body = `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+  const response = await gatewayRequest(url, {
+    method: "POST",
     headers: {
-      ...requestHeaders,
-      Authorization: `Basic ${basicToken}`
+      "Content-Type": "application/x-www-form-urlencoded"
     },
     body
   });
-  if (response.status !== 401) {
-    return response;
+  const setCookieHeaders = response.headers.getSetCookie();
+  const jsessionMatch = setCookieHeaders
+    .map((header) => /JSESSIONID=([^;]+)/i.exec(String(header || "")))
+    .find(Boolean);
+  const devckieMatch = setCookieHeaders
+    .map((header) => /devckie=([^;]+)/i.exec(String(header || "")))
+    .find(Boolean);
+  if (!jsessionMatch) {
+    const detailText = await response.text().catch(() => "");
+    throw new Error(detailText || "Dinstar login failed: no JSESSIONID in response");
   }
-  const challengeHeader = response.headers.get("www-authenticate") || "";
-  if (!/digest/i.test(challengeHeader)) {
-    return response;
+  return {
+    jsessionId: jsessionMatch[1],
+    devckie: devckieMatch?.[1] || null
+  };
+}
+
+async function dinstarSendSmsForm(host, port, session, { phone, message, portIndex = 0, encoding = "gsm-7bit" }) {
+  const url = `https://${host}:${port}/goform/WIAMsgSend`;
+  const params = new URLSearchParams();
+  params.set(`Index${portIndex}`, "on");
+  params.set("SendMode", "0");
+  params.set("NumbersFile", "");
+  params.set("Addressee", phone);
+  params.set("Encoding", encoding === "unicode" ? "1" : "0");
+  params.set("MsgInfo", message);
+  params.set("ok", "Send");
+  const body = params.toString();
+  const cookieParts = [];
+  if (session.devckie) {
+    cookieParts.push(`devckie=${session.devckie}`);
   }
-  const digestHeader = buildDigestAuthorizationHeader({
-    username,
-    password,
-    method,
-    url,
-    challenge: parseDigestChallenge(challengeHeader)
-  });
-  if (!digestHeader) {
-    return response;
-  }
-  return gatewayRequest(url, {
-    method,
+  cookieParts.push(`JSESSIONID=${session.jsessionId}`);
+  const response = await gatewayRequest(url, {
+    method: "POST",
     headers: {
-      ...requestHeaders,
-      Authorization: digestHeader
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: cookieParts.join("; ")
     },
     body
   });
+  const location = response.headers.get("location") || "";
+  const success = response.status === 302 && /enWIASendMsg/i.test(location);
+  return {
+    success,
+    status: response.status,
+    location
+  };
+}
+
+function resolveSmsPortIndex(simPorts) {
+  if (!Array.isArray(simPorts) || simPorts.length === 0) {
+    return 0;
+  }
+  const firstPort = Number.parseInt(String(simPorts[0] ?? "").trim(), 10);
+  return Number.isFinite(firstPort) && firstPort >= 0 ? firstPort : 0;
 }
 
 async function updateSmsConnectionTestStatusIfExists(client, organizationId, status, detail) {
@@ -6861,23 +6849,13 @@ async function testSmsGatewayConnection({ host, port, username, password }) {
   if (!safeHost || !Number.isFinite(safePort) || safePort <= 0 || !username || !password) {
     return { status: "error", detail: "host, port, username y password son requeridos" };
   }
-  const url = `https://${safeHost}:${safePort}/api/query_sms_result?task_id=0`;
   try {
-    const response = await fetchWithGatewayAuth(url, {
-      method: "GET",
-      username,
-      password
-    });
-    const detailText = await response.text().catch(() => "");
-    if (!response.ok) {
-      return {
-        status: "error",
-        detail: detailText || `HTTP ${response.status}`
-      };
-    }
+    const session = await dinstarLogin(safeHost, safePort, username, password);
     return {
       status: "ok",
-      detail: detailText || "Conexión establecida"
+      detail: session.devckie
+        ? `Conexión establecida (JSESSIONID recibido, devckie=${session.devckie})`
+        : "Conexión establecida (JSESSIONID recibido)"
     };
   } catch (error) {
     return {
@@ -6972,51 +6950,28 @@ async function sendSms(client, {
       return null;
     }
 
-    const url = `https://${connection.host}:${connection.port}/api/send_sms`;
-    const payload = {
-      text: String(message),
-      param: [{ number: normalizedPhone }],
-      encoding: encoding === "unicode" ? "unicode" : "gsm-7bit",
-      request_status_report: true
-    };
-    if (Array.isArray(connection.sim_ports) && connection.sim_ports.length) {
-      payload.sim_ports = connection.sim_ports;
-    }
-
-    let response = null;
-    let responseText = "";
-    let parsedBody = null;
     let status = "failed";
     let errorDetail = null;
     let dinstarTaskId = null;
 
     try {
-      response = await fetchWithGatewayAuth(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload),
-        username: connection.username,
-        password: connection.password
+      const session = await dinstarLogin(
+        connection.host,
+        connection.port,
+        connection.username,
+        connection.password
+      );
+      const portIndex = resolveSmsPortIndex(connection.sim_ports);
+      const result = await dinstarSendSmsForm(connection.host, connection.port, session, {
+        phone: normalizedPhone,
+        message: String(message),
+        portIndex,
+        encoding
       });
-      responseText = await response.text().catch(() => "");
-      if (responseText) {
-        try {
-          parsedBody = JSON.parse(responseText);
-        } catch {
-          parsedBody = { raw: responseText };
-        }
-      }
-      if (response.ok && parsedBody?.error_code === 202) {
+      if (result.success) {
         status = "sent";
-        dinstarTaskId = parsedBody?.task_id ?? null;
-      } else if (response.ok) {
-        errorDetail = parsedBody?.error_code != null
-          ? `Dinstar error_code=${parsedBody.error_code}${responseText ? `: ${responseText}` : ""}`
-          : (responseText || `HTTP ${response.status}`);
       } else {
-        errorDetail = responseText || `HTTP ${response.status}`;
+        errorDetail = `Unexpected response: status=${result.status} location=${result.location}`;
       }
     } catch (error) {
       errorDetail = error?.message || String(error);
