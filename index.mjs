@@ -23,6 +23,7 @@ const s3Client = new S3Client({ region: "us-east-1" });
 const S3_BUCKET = "rednacrem-assets";
 const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
 const BATCH_TIPOS = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"];
+const DINSTAR_FALLBACK_DEVCKIE = "db32-0622-5072-0063";
 
 function getRequestId(event) {
   const headerId =
@@ -6780,9 +6781,13 @@ async function dinstarLogin(host, port, username, password) {
     const detailText = await response.text().catch(() => "");
     throw new Error(detailText || "Dinstar login failed: no JSESSIONID in response");
   }
+  const resolvedDevckie = devckieMatch?.[1] || DINSTAR_FALLBACK_DEVCKIE;
+  console.log(
+    `[sms] dinstar login devckie_source=${devckieMatch ? "response" : "fallback"} jsession_prefix=${String(jsessionMatch[1] || "").slice(0, 8)}`
+  );
   return {
     jsessionId: jsessionMatch[1],
-    devckie: devckieMatch?.[1] || null
+    devckie: resolvedDevckie
   };
 }
 
