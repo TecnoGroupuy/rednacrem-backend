@@ -6781,8 +6781,12 @@ function createGatewayResponse(statusCode, headers, bodyBuffer) {
 
 function gatewayRequest(url, { method = "GET", headers = {}, body }) {
   const gatewayAgent = new https.Agent({ rejectUnauthorized: false });
+  const requestHeaders = { ...headers };
+  if (body !== undefined && body !== null) {
+    requestHeaders["Content-Length"] = Buffer.byteLength(body).toString();
+  }
   return new Promise((resolve, reject) => {
-    const request = https.request(url, { method, headers, agent: gatewayAgent }, (response) => {
+    const request = https.request(url, { method, headers: requestHeaders, agent: gatewayAgent }, (response) => {
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
       response.on("end", () => {
