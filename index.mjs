@@ -20919,7 +20919,10 @@ export const handler = async (event) => {
         return json(200, {
           ok: true,
           success: true,
+          gestion_id: gestionId,
+          estado_venta_final: nextEstadoVenta,
           data: { resultado: effectiveResultado, intentos: nextAttempts, gestion_id: gestionId },
+          shouldPreserveAgendaState,
           error: null
         });
       } catch (error) {
