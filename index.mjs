@@ -6656,6 +6656,375 @@ async function resolveExternalConnectionTargetForLead(client, leadId, organizati
   return { contactId, productId };
 }
 
+function normalizeSmsSimPorts(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value
+      .map((item) => Number.parseInt(String(item || "").trim(), 10))
+      .filter((item) => Number.isFinite(item) && item > 0)
+  )];
+}
+
+function sanitizeSmsConnectionRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    host: row.host,
+    port: row.port,
+    sim_ports: Array.isArray(row.sim_ports) ? row.sim_ports : [],
+    username: row.username,
+    enabled: row.enabled === true,
+    last_test_at: row.last_test_at || null,
+    last_test_status: row.last_test_status || null,
+    last_test_detail: row.last_test_detail || null,
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null
+  };
+}
+
+function withOrganizationIdQuery(event, organizationId) {
+  const organizationIdValue = normalizeText(organizationId) || null;
+  const nextQuery = {
+    ...(event?.queryStringParameters || {})
+  };
+  if (organizationIdValue) {
+    nextQuery.organization_id = organizationIdValue;
+  }
+  const rawQuery = new URLSearchParams(
+    Object.entries(nextQuery).filter(([, value]) => value !== undefined && value !== null)
+  ).toString();
+  return {
+    ...event,
+    queryStringParameters: nextQuery,
+    rawQueryString: rawQuery
+  };
+}
+
+function md5Hex(value) {
+  return crypto.createHash("md5").update(String(value || "")).digest("hex");
+}
+
+function parseDigestChallenge(headerValue) {
+  const source = String(headerValue || "");
+  const pairs = [...source.matchAll(/([a-z0-9_]+)=(?:"([^"]*)"|([^,\s]+))/gi)];
+  const parsed = {};
+  for (const match of pairs) {
+    parsed[String(match[1] || "").toLowerCase()] = match[2] ?? match[3] ?? "";
+  }
+  return parsed;
+}
+
+function buildDigestAuthorizationHeader({ username, password, method, url, challenge }) {
+  const realm = challenge.realm || "";
+  const nonce = challenge.nonce || "";
+  const opaque = challenge.opaque || "";
+  const algorithm = (challenge.algorithm || "MD5").toUpperCase();
+  const qop = String(challenge.qop || "")
+    .split(",")
+    .map((item) => item.trim())
+    .find((item) => item) || null;
+  if (algorithm !== "MD5" || !realm || !nonce) {
+    return null;
+  }
+  const uriUrl = new URL(url);
+  const uri = `${uriUrl.pathname}${uriUrl.search}`;
+  const ha1 = md5Hex(`${username}:${realm}:${password}`);
+  const ha2 = md5Hex(`${String(method || "GET").toUpperCase()}:${uri}`);
+  const nc = "00000001";
+  const cnonce = crypto.randomBytes(8).toString("hex");
+  const response = qop
+    ? md5Hex(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
+    : md5Hex(`${ha1}:${nonce}:${ha2}`);
+  const parts = [
+    `username="${username}"`,
+    `realm="${realm}"`,
+    `nonce="${nonce}"`,
+    `uri="${uri}"`,
+    `response="${response}"`,
+    `algorithm=${algorithm}`
+  ];
+  if (opaque) parts.push(`opaque="${opaque}"`);
+  if (qop) {
+    parts.push(`qop=${qop}`);
+    parts.push(`nc=${nc}`);
+    parts.push(`cnonce="${cnonce}"`);
+  }
+  return `Digest ${parts.join(", ")}`;
+}
+
+async function fetchWithGatewayAuth(url, { method = "GET", headers = {}, body, username, password }) {
+  const requestHeaders = { ...headers };
+  const basicToken = Buffer.from(`${username || ""}:${password || ""}`).toString("base64");
+  let response = await fetch(url, {
+    method,
+    headers: {
+      ...requestHeaders,
+      Authorization: `Basic ${basicToken}`
+    },
+    body
+  });
+  if (response.status !== 401) {
+    return response;
+  }
+  const challengeHeader = response.headers.get("www-authenticate") || "";
+  if (!/digest/i.test(challengeHeader)) {
+    return response;
+  }
+  const digestHeader = buildDigestAuthorizationHeader({
+    username,
+    password,
+    method,
+    url,
+    challenge: parseDigestChallenge(challengeHeader)
+  });
+  if (!digestHeader) {
+    return response;
+  }
+  return fetch(url, {
+    method,
+    headers: {
+      ...requestHeaders,
+      Authorization: digestHeader
+    },
+    body
+  });
+}
+
+async function updateSmsConnectionTestStatusIfExists(client, organizationId, status, detail) {
+  if (!client || !isValidUuid(organizationId)) return;
+  await client.query(
+    `
+    UPDATE sms_connections
+    SET
+      last_test_at = now(),
+      last_test_status = $2,
+      last_test_detail = $3,
+      updated_at = now()
+    WHERE organization_id = $1
+    `,
+    [organizationId, status, detail || null]
+  );
+}
+
+async function testSmsGatewayConnection({ host, port, username, password }) {
+  const safeHost = normalizeText(host);
+  const safePort = Number.parseInt(String(port || "").trim(), 10);
+  if (!safeHost || !Number.isFinite(safePort) || safePort <= 0 || !username || !password) {
+    return { status: "error", detail: "host, port, username y password son requeridos" };
+  }
+  const url = `https://${safeHost}:${safePort}/api/query_sms_result?task_id=0`;
+  try {
+    const response = await fetchWithGatewayAuth(url, {
+      method: "GET",
+      username,
+      password
+    });
+    const detailText = await response.text().catch(() => "");
+    if (!response.ok) {
+      return {
+        status: "error",
+        detail: detailText || `HTTP ${response.status}`
+      };
+    }
+    return {
+      status: "ok",
+      detail: detailText || "Conexión establecida"
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      detail: error?.message || String(error)
+    };
+  }
+}
+
+async function resolveSmsTemplateForProduct(client, organizationId, productId) {
+  if (!client || !isValidUuid(organizationId)) return null;
+  if (isValidUuid(productId)) {
+    const specificRes = await client.query(
+      `
+      SELECT
+        st.id,
+        st.organization_id,
+        st.product_id,
+        st.template,
+        st.encoding,
+        st.activo,
+        st.created_at,
+        st.updated_at,
+        p.nombre AS product_name
+      FROM sms_templates st
+      LEFT JOIN products p ON p.id = st.product_id
+      WHERE st.organization_id = $1
+        AND st.product_id = $2
+        AND st.activo = true
+      LIMIT 1
+      `,
+      [organizationId, productId]
+    );
+    if (specificRes.rows[0]) return specificRes.rows[0];
+  }
+  const defaultRes = await client.query(
+    `
+    SELECT
+      st.id,
+      st.organization_id,
+      st.product_id,
+      st.template,
+      st.encoding,
+      st.activo,
+      st.created_at,
+      st.updated_at,
+      NULL::text AS product_name
+    FROM sms_templates st
+    WHERE st.organization_id = $1
+      AND st.product_id IS NULL
+      AND st.activo = true
+    LIMIT 1
+    `,
+    [organizationId]
+  );
+  return defaultRes.rows[0] || null;
+}
+
+function renderSmsTemplate(template, replacements = {}) {
+  let rendered = String(template || "");
+  for (const [token, value] of Object.entries(replacements)) {
+    const safeValue = value == null ? "" : String(value);
+    rendered = rendered.split(token).join(safeValue);
+  }
+  return rendered;
+}
+
+async function sendSms(client, {
+  organizationId,
+  contactId = null,
+  saleId = null,
+  productId = null,
+  phone,
+  message,
+  encoding = "gsm-7bit"
+}) {
+  try {
+    if (!client || !isValidUuid(organizationId)) return null;
+    const normalizedPhone = cleanPhone(phone) || null;
+    if (!normalizedPhone || !String(message || "").trim()) return null;
+    const connectionRes = await client.query(
+      `
+      SELECT id, host, port, sim_ports, username, password, enabled
+      FROM sms_connections
+      WHERE organization_id = $1
+      LIMIT 1
+      `,
+      [organizationId]
+    );
+    const connection = connectionRes.rows[0] || null;
+    if (!connection || connection.enabled !== true) {
+      return null;
+    }
+
+    const url = `https://${connection.host}:${connection.port}/api/send_sms`;
+    const payload = {
+      text: String(message),
+      param: [{ number: normalizedPhone }],
+      encoding: encoding === "unicode" ? "unicode" : "gsm-7bit",
+      request_status_report: true
+    };
+    if (Array.isArray(connection.sim_ports) && connection.sim_ports.length) {
+      payload.sim_ports = connection.sim_ports;
+    }
+
+    let response = null;
+    let responseText = "";
+    let parsedBody = null;
+    let status = "failed";
+    let errorDetail = null;
+    let dinstarTaskId = null;
+
+    try {
+      response = await fetchWithGatewayAuth(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload),
+        username: connection.username,
+        password: connection.password
+      });
+      responseText = await response.text().catch(() => "");
+      if (responseText) {
+        try {
+          parsedBody = JSON.parse(responseText);
+        } catch {
+          parsedBody = { raw: responseText };
+        }
+      }
+      if (response.ok) {
+        status = "sent";
+        dinstarTaskId =
+          parsedBody?.task_id ||
+          parsedBody?.taskId ||
+          parsedBody?.id ||
+          null;
+      } else {
+        errorDetail = responseText || `HTTP ${response.status}`;
+      }
+    } catch (error) {
+      errorDetail = error?.message || String(error);
+    }
+
+    try {
+      await client.query(
+        `
+        INSERT INTO sms_log (
+          organization_id,
+          contact_id,
+          sale_id,
+          product_id,
+          phone,
+          message,
+          encoding,
+          dinstar_task_id,
+          status,
+          error_detail,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), now())
+        `,
+        [
+          organizationId,
+          isValidUuid(contactId) ? contactId : null,
+          isValidUuid(saleId) ? saleId : null,
+          isValidUuid(productId) ? productId : null,
+          normalizedPhone,
+          String(message),
+          encoding === "unicode" ? "unicode" : "gsm-7bit",
+          dinstarTaskId,
+          status,
+          errorDetail
+        ]
+      );
+    } catch (logError) {
+      console.warn("[sms] failed to write log", logError?.message || logError);
+    }
+
+    if (status === "failed") {
+      console.warn("[sms] failed", errorDetail || `HTTP ${response?.status || 500}`);
+    }
+
+    return {
+      status,
+      dinstar_task_id: dinstarTaskId,
+      error_detail: errorDetail
+    };
+  } catch (error) {
+    console.warn("[sms] failed", error?.message || error);
+    return null;
+  }
+}
+
 async function isLeadBlockedInDpt(client, contactId) {
   if (!client) throw new Error("isLeadBlockedInDpt requires a db client");
   if (!contactId) return false;
@@ -9951,6 +10320,9 @@ export const handler = async (event) => {
   const connectionLogsMatch =
     path.match(/\/api\/connections\/([^/]+)\/logs$/) ||
     path.match(/\/connections\/([^/]+)\/logs$/);
+  const smsTemplateMatch =
+    path.match(/\/api\/sms-templates\/([^/]+)$/) ||
+    path.match(/\/sms-templates\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
@@ -10290,6 +10662,410 @@ export const handler = async (event) => {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to delete connection", error: error.message });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/sms-connections")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const result = await client.query(
+          `
+          SELECT id, organization_id, host, port, sim_ports, username, enabled,
+                 last_test_at, last_test_status, last_test_detail, created_at, updated_at
+          FROM sms_connections
+          WHERE organization_id = $1
+          LIMIT 1
+          `,
+          [organizationId]
+        );
+        if (!result.rows.length) {
+          return json(404, { ok: false, message: "SMS connection not found" });
+        }
+        return json(200, { ok: true, item: sanitizeSmsConnectionRow(result.rows[0]) });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load SMS connection", error: error.message });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/sms-connections/test")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const requestedOrganizationId = normalizeText(body?.organization_id || "") || null;
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(
+          client,
+          dbUser,
+          withOrganizationIdQuery(event, requestedOrganizationId)
+        );
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const result = await testSmsGatewayConnection({
+          host: body?.host,
+          port: body?.port,
+          username: normalizeText(body?.username || ""),
+          password: String(body?.password || "")
+        });
+        await updateSmsConnectionTestStatusIfExists(
+          client,
+          organizationId,
+          result.status === "ok" ? "ok" : "error",
+          result.detail || null
+        );
+        return json(200, result);
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(200, {
+        status: "error",
+        detail: error?.message || String(error)
+      });
+    }
+  }
+
+  if (method === "POST" && path.endsWith("/sms-connections")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const requestedOrganizationId = normalizeText(body?.organization_id || "") || null;
+      const host = normalizeText(body?.host || "");
+      const port = Number.parseInt(String(body?.port || "").trim(), 10);
+      const username = normalizeText(body?.username || "");
+      const password = String(body?.password || "");
+      const simPorts = normalizeSmsSimPorts(body?.sim_ports);
+      const enabled = typeof body?.enabled === "boolean" ? body.enabled : true;
+      if (!requestedOrganizationId || !host || !Number.isFinite(port) || port <= 0 || !username || !password) {
+        return json(422, { ok: false, message: "organization_id, host, port, username y password son requeridos" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(
+          client,
+          dbUser,
+          withOrganizationIdQuery(event, requestedOrganizationId)
+        );
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const existing = await client.query(
+          `SELECT id FROM sms_connections WHERE organization_id = $1 LIMIT 1`,
+          [organizationId]
+        );
+        const result = existing.rows.length
+          ? await client.query(
+              `
+              UPDATE sms_connections
+              SET host = $2,
+                  port = $3,
+                  sim_ports = $4::int[],
+                  username = $5,
+                  password = $6,
+                  enabled = $7,
+                  updated_at = now()
+              WHERE organization_id = $1
+              RETURNING id, organization_id, host, port, sim_ports, username, enabled,
+                        last_test_at, last_test_status, last_test_detail, created_at, updated_at
+              `,
+              [organizationId, host, port, simPorts, username, password, enabled]
+            )
+          : await client.query(
+              `
+              INSERT INTO sms_connections (
+                organization_id, host, port, sim_ports, username, password, enabled, created_at, updated_at
+              )
+              VALUES ($1, $2, $3, $4::int[], $5, $6, $7, now(), now())
+              RETURNING id, organization_id, host, port, sim_ports, username, enabled,
+                        last_test_at, last_test_status, last_test_detail, created_at, updated_at
+              `,
+              [organizationId, host, port, simPorts, username, password, enabled]
+            );
+        return json(existing.rows.length ? 200 : 201, { ok: true, item: sanitizeSmsConnectionRow(result.rows[0]) });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to save SMS connection", error: error.message });
+    }
+  }
+
+  if (method === "GET" && (path.endsWith("/sms-templates") || path.endsWith("/sms-template"))) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const result = await client.query(
+          `
+          SELECT
+            st.id,
+            st.organization_id,
+            st.product_id,
+            p.nombre AS product_name,
+            st.template,
+            st.encoding,
+            st.activo,
+            st.created_at,
+            st.updated_at
+          FROM sms_templates st
+          LEFT JOIN products p ON p.id = st.product_id
+          WHERE st.organization_id = $1
+          ORDER BY CASE WHEN st.product_id IS NULL THEN 0 ELSE 1 END, p.nombre ASC NULLS LAST, st.created_at DESC
+          `,
+          [organizationId]
+        );
+        if (path.endsWith("/sms-template")) {
+          const defaultRow = result.rows.find((row) => !row.product_id) || null;
+          if (!defaultRow) {
+            return json(404, { ok: false, message: "SMS template not found" });
+          }
+          return json(200, { ok: true, item: defaultRow });
+        }
+        return json(200, { ok: true, items: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load SMS templates", error: error.message });
+    }
+  }
+
+  if (method === "POST" && (path.endsWith("/sms-templates") || path.endsWith("/sms-template"))) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const requestedOrganizationId = normalizeText(body?.organization_id || "") || null;
+      const template = String(body?.template || "");
+      const encoding = body?.encoding === "unicode" ? "unicode" : "gsm-7bit";
+      const requestedProductId = body?.product_id == null || body?.product_id === ""
+        ? null
+        : String(body.product_id);
+      if (!requestedOrganizationId || !template.trim()) {
+        return json(422, { ok: false, message: "organization_id y template son requeridos" });
+      }
+      if (requestedProductId && !isValidUuid(requestedProductId)) {
+        return json(400, { ok: false, message: "product_id inválido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(
+          client,
+          dbUser,
+          withOrganizationIdQuery(event, requestedOrganizationId)
+        );
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const existing = await client.query(
+          `
+          SELECT id
+          FROM sms_templates
+          WHERE organization_id = $1
+            AND product_id IS NOT DISTINCT FROM $2::uuid
+          LIMIT 1
+          `,
+          [organizationId, requestedProductId]
+        );
+        const result = existing.rows.length
+          ? await client.query(
+              `
+              UPDATE sms_templates
+              SET template = $3,
+                  encoding = $4,
+                  activo = true,
+                  updated_at = now()
+              WHERE id = $1
+                AND organization_id = $2
+              RETURNING id, organization_id, product_id, template, encoding, activo, created_at, updated_at
+              `,
+              [existing.rows[0].id, organizationId, template, encoding]
+            )
+          : await client.query(
+              `
+              INSERT INTO sms_templates (
+                organization_id, product_id, template, encoding, activo, created_at, updated_at
+              )
+              VALUES ($1, $2::uuid, $3, $4, true, now(), now())
+              RETURNING id, organization_id, product_id, template, encoding, activo, created_at, updated_at
+              `,
+              [organizationId, requestedProductId, template, encoding]
+            );
+        return json(existing.rows.length ? 200 : 201, { ok: true, item: result.rows[0] });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to save SMS template", error: error.message });
+    }
+  }
+
+  if (method === "DELETE" && smsTemplateMatch) {
+    const templateId = smsTemplateMatch[1];
+    if (!isValidUuid(templateId)) return json(400, { ok: false, message: "template id inválido" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const result = await client.query(
+          `
+          DELETE FROM sms_templates
+          WHERE id = $1
+            AND organization_id = $2
+          RETURNING id
+          `,
+          [templateId, organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "SMS template not found" });
+        return json(200, { ok: true });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to delete SMS template", error: error.message });
+    }
+  }
+
+  if (method === "GET" && path.endsWith("/sms-log")) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const limitParam = Number.parseInt(String(getQueryParam(event, "limit") || "20"), 10);
+        const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 20;
+        const result = await client.query(
+          `
+          SELECT
+            sl.id,
+            sl.organization_id,
+            sl.contact_id,
+            sl.sale_id,
+            sl.product_id,
+            sl.phone,
+            sl.message,
+            sl.encoding,
+            sl.dinstar_task_id,
+            sl.status,
+            sl.error_detail,
+            sl.created_at,
+            sl.updated_at,
+            COALESCE(
+              NULLIF(TRIM(CONCAT(c.nombre, ' ', c.apellido)), ''),
+              c.nombre,
+              c.apellido,
+              c.documento,
+              sl.phone
+            ) AS contact_name
+          FROM sms_log sl
+          LEFT JOIN contacts c ON c.id = sl.contact_id
+          WHERE sl.organization_id = $1
+          ORDER BY sl.created_at DESC
+          LIMIT $2
+          `,
+          [organizationId, limit]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load SMS log", error: error.message });
     }
   }
 
@@ -19131,6 +19907,12 @@ export const handler = async (event) => {
 
         let batchOrganizationId = null;
         let ventaOrganizationId = null;
+        let ventaSmsContactId = null;
+        let ventaSmsSaleId = null;
+        let ventaSmsProductId = null;
+        let ventaSmsProductName = null;
+        let ventaSmsContactName = null;
+        let ventaSmsPhone = null;
         try {
           const orgRes = await client.query(
             `SELECT organization_id FROM lead_batches WHERE id = $1 LIMIT 1`,
@@ -19281,6 +20063,10 @@ export const handler = async (event) => {
           const leadTelefonoDigits = normalizePhoneDigits(leadData?.telefono || "");
           const leadCelularDigits = normalizePhoneDigits(leadData?.celular || "");
           const contactData = body.contact || {};
+          ventaSmsContactName = normalizeText(contactData.nombre || leadData?.nombre || "") || null;
+          ventaSmsPhone = cleanPhone(
+            contactData.celular || leadData?.celular || contactData.telefono || leadData?.telefono
+          ) || null;
           const candidateDocumento = normalizeDocumento(contactData.documento || leadData?.documento || "");
           const candidateEmail = normalizeEmail(
             contactData.email || contactData.correo_electronico || leadData?.correo_electronico || ""
@@ -19722,6 +20508,13 @@ export const handler = async (event) => {
               relation: null
             }, orgId);
 
+            if (contactId === ventaContactId && !ventaSmsProductId) {
+              ventaSmsContactId = contactId;
+              ventaSmsSaleId = saleId || null;
+              ventaSmsProductId = resolvedProductId || null;
+              ventaSmsProductName = productName || null;
+            }
+
             if (saleId && contactProductId && cpCols.has("sale_id")) {
               await client.query(
                 `
@@ -19905,6 +20698,65 @@ export const handler = async (event) => {
             externalConnectionTarget.productId,
             externalConnectionOrganizationId
           );
+        }
+
+        if (
+          effectiveResultado === "venta" &&
+          ventaOrganizationId &&
+          ventaSmsContactId &&
+          ventaSmsProductId
+        ) {
+          try {
+            const smsTemplate = await resolveSmsTemplateForProduct(
+              client,
+              ventaOrganizationId,
+              ventaSmsProductId
+            );
+            if (smsTemplate?.template) {
+              let smsPhone = ventaSmsPhone || null;
+              let smsContactName = ventaSmsContactName || null;
+              if (!smsPhone || !smsContactName) {
+                const contactLookup = await client.query(
+                  `
+                  SELECT nombre, apellido, celular, telefono
+                  FROM contacts
+                  WHERE id = $1
+                    AND organization_id = $2
+                  LIMIT 1
+                  `,
+                  [ventaSmsContactId, ventaOrganizationId]
+                );
+                const contactRow = contactLookup.rows[0] || null;
+                smsPhone = smsPhone || cleanPhone(contactRow?.celular || contactRow?.telefono) || null;
+                smsContactName = smsContactName ||
+                  normalizeText([contactRow?.nombre, contactRow?.apellido].filter(Boolean).join(" ")) || null;
+              }
+              if (smsPhone) {
+                const organizationRes = await client.query(
+                  `SELECT nombre FROM organizations WHERE id = $1 LIMIT 1`,
+                  [ventaOrganizationId]
+                );
+                const organizationName = organizationRes.rows[0]?.nombre || "";
+                const renderedSms = renderSmsTemplate(smsTemplate.template, {
+                  "#nombre#": smsContactName || "",
+                  "#organizacion#": organizationName,
+                  "#producto#": ventaSmsProductName || smsTemplate.product_name || "",
+                  "#telefono_contacto#": smsPhone || ""
+                });
+                await sendSms(client, {
+                  organizationId: ventaOrganizationId,
+                  contactId: ventaSmsContactId,
+                  saleId: ventaSmsSaleId,
+                  productId: ventaSmsProductId,
+                  phone: smsPhone,
+                  message: renderedSms,
+                  encoding: smsTemplate.encoding || "gsm-7bit"
+                });
+              }
+            }
+          } catch (error) {
+            console.warn("[sms] failed to send sale SMS", error?.message || error);
+          }
         }
 
         const summary = await getTeamSummary(client, formatDateYmd(new Date()), new Date());
