@@ -6796,6 +6796,7 @@ async function dinstarSendSmsForm(host, port, session, { phone, message, portInd
   params.set("Encoding", encoding === "unicode" ? "1" : "0");
   params.set("MsgInfo", message);
   params.set("ok", "Send");
+  params.set("send_sms", "");
   const body = params.toString();
   const cookieParts = [];
   if (session.devckie) {
