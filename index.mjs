@@ -19747,7 +19747,7 @@ export const handler = async (event) => {
         const currentOrgClause = requireAssignedLead ? "AND organization_id = $3" : "AND organization_id = $2";
         let currentStatusRes = await client.query(
           `
-          SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
+          SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual, proxima_accion
           FROM lead_contact_status
           WHERE contact_id = $1
             ${currentAssignedClause}
@@ -19803,7 +19803,7 @@ export const handler = async (event) => {
 
             currentStatusRes = await client.query(
               `
-              SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual
+              SELECT intentos, batch_id, assigned_to, estado_venta, ola_actual, proxima_accion
               FROM lead_contact_status
               WHERE contact_id = $1
                 ${currentAssignedClause}
@@ -19835,6 +19835,34 @@ export const handler = async (event) => {
         const assignedTo = currentStatusRes.rows[0]?.assigned_to || dbUser?.id || null;
         const currentEstadoVenta = currentStatusRes.rows[0]?.estado_venta || null;
         const currentOla = currentStatusRes.rows[0]?.ola_actual || 1;
+        const currentProximaAccion = currentStatusRes.rows[0]?.proxima_accion || null;
+        const activeAgendaRes = await client.query(
+          `
+          SELECT
+            la.id,
+            la.fecha_agenda,
+            (
+              SELECT lmh.resultado
+              FROM lead_management_history lmh
+              WHERE lmh.contact_id = la.contact_id
+                AND lmh.batch_id = la.batch_id
+                AND lmh.resultado IN ('seguimiento', 'rellamar')
+              ORDER BY lmh.fecha_gestion DESC
+              LIMIT 1
+            ) AS agenda_tipo
+          FROM lead_agenda la
+          JOIN datos_para_trabajar d ON d.id = la.contact_id
+          WHERE la.contact_id = $1
+            AND la.batch_id = $2
+            AND la.cumplida = false
+            AND d.organization_id = $3
+          ORDER BY la.created_at DESC
+          LIMIT 1
+          `,
+          [leadId, batchId, leadOrgId]
+        );
+        const activeAgendaRow = activeAgendaRes.rows[0] || null;
+        const hasActiveAgenda = Boolean(activeAgendaRow);
 
         const validationErrors = [];
 
@@ -20009,7 +20037,19 @@ export const handler = async (event) => {
 
         let effectiveResultado = resultadoInput;
         let nuevaOla = currentOla;
-        if (effectiveResultado === "no_contesta" && currentOla === 1) {
+        const agendaStateValues = ["rellamar", "seguimiento"];
+        const preservedAgendaEstado = agendaStateValues.includes(currentEstadoVenta)
+          ? currentEstadoVenta
+          : (agendaStateValues.includes(activeAgendaRow?.agenda_tipo) ? activeAgendaRow.agenda_tipo : null);
+        const shouldPreserveAgendaState =
+          effectiveResultado === "no_contesta" &&
+          (agendaStateValues.includes(currentEstadoVenta) || hasActiveAgenda) &&
+          Boolean(preservedAgendaEstado);
+        const nextEstadoVenta = shouldPreserveAgendaState ? preservedAgendaEstado : effectiveResultado;
+        const nextProximaAccion = shouldPreserveAgendaState
+          ? (currentProximaAccion || activeAgendaRow?.fecha_agenda || proximaAccion || null)
+          : proximaAccion;
+        if (effectiveResultado === "no_contesta" && !shouldPreserveAgendaState && currentOla === 1) {
           nuevaOla = 2;
         }
 
@@ -20051,8 +20091,8 @@ export const handler = async (event) => {
           RETURNING id
           `,
           hasMgmtOrganizationId
-            ? [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion, batchOrganizationId]
-            : [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, proximaAccion]
+            ? [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, nextProximaAccion, batchOrganizationId]
+            : [leadId, batchId, dbUser?.id || null, effectiveResultado, nota || null, nextProximaAccion]
         );
         const gestionId = mgmtResult.rows[0]?.id ?? null;
 
@@ -20070,7 +20110,7 @@ export const handler = async (event) => {
             AND batch_id = $5
           RETURNING contact_id
           `,
-          [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+          [leadId, nextEstadoVenta, nextAttempts, nextProximaAccion, batchId, assignedTo, nuevaOla]
         );
         if (!updateLeadStatus.rows.length) {
           const isBlocked = await isLeadBlockedInDpt(client, leadId);
@@ -20099,7 +20139,7 @@ export const handler = async (event) => {
               ultimo_intento_at = now(),
               updated_at = now()
             `,
-            [leadId, effectiveResultado, nextAttempts, proximaAccion, batchId, assignedTo, nuevaOla]
+            [leadId, nextEstadoVenta, nextAttempts, nextProximaAccion, batchId, assignedTo, nuevaOla]
           );
           }
         }
