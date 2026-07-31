@@ -10759,54 +10759,6 @@ export const handler = async (event) => {
     }
   }
 
-  // TEMP TEST ENDPOINT - remove after SMS validation testing is complete
-  if (method === "POST" && path.endsWith("/sms-test-send")) {
-    const body = safeParseBody(event);
-    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, ["superadministrador"]);
-      if (roleError) return roleError;
-
-      const requestedOrganizationId = normalizeText(body?.organization_id || "") || null;
-      const phone = normalizeText(body?.phone || "") || null;
-      const message = String(body?.message || "").trim();
-      if (!requestedOrganizationId || !phone || !message) {
-        return json(400, { ok: false, message: "organization_id, phone y message son requeridos" });
-      }
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const organizationId = await resolveOrganizationId(
-          client,
-          dbUser,
-          withOrganizationIdQuery(event, requestedOrganizationId)
-        );
-        if (!organizationId) {
-          return json(400, { ok: false, message: "organization_id requerido" });
-        }
-        const result = await sendSms(client, {
-          organizationId,
-          phone,
-          message,
-          encoding: "gsm-7bit"
-        });
-        return json(200, { ok: true, result });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, { ok: false, message: "Failed to send SMS test", error: error.message });
-    }
-  }
-
   if (method === "POST" && path.endsWith("/sms-connections")) {
     const body = safeParseBody(event);
     if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
