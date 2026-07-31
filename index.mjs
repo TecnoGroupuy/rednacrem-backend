@@ -6977,14 +6977,14 @@ async function sendSms(client, {
     let dinstarTaskId = null;
 
     try {
-      const session = await dinstarLogin(
+      const portIndex = resolveSmsPortIndex(connection.sim_ports);
+      let session = await dinstarLogin(
         connection.host,
         connection.port,
         connection.username,
         connection.password
       );
-      const portIndex = resolveSmsPortIndex(connection.sim_ports);
-      const result = await dinstarSendSmsForm(connection.host, connection.port, session, {
+      let result = await dinstarSendSmsForm(connection.host, connection.port, session, {
         phone: normalizedPhone,
         message: String(message),
         portIndex,
@@ -6993,7 +6993,30 @@ async function sendSms(client, {
       if (result.success) {
         status = "sent";
       } else {
-        errorDetail = `Unexpected response: status=${result.status} location=${result.location}`;
+        const firstAttemptError = `Unexpected response: status=${result.status} location=${result.location}`;
+        console.log("[sms] retry attempt", {
+          organizationId,
+          phone: normalizedPhone,
+          error_detail: firstAttemptError
+        });
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        session = await dinstarLogin(
+          connection.host,
+          connection.port,
+          connection.username,
+          connection.password
+        );
+        result = await dinstarSendSmsForm(connection.host, connection.port, session, {
+          phone: normalizedPhone,
+          message: String(message),
+          portIndex,
+          encoding
+        });
+        if (result.success) {
+          status = "sent";
+        } else {
+          errorDetail = `Unexpected response: status=${result.status} location=${result.location}`;
+        }
       }
     } catch (error) {
       errorDetail = error?.message || String(error);
