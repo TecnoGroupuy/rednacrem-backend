@@ -10890,6 +10890,66 @@ export const handler = async (event) => {
     }
   }
 
+  if (method === "POST" && path.endsWith("/sms-templates/test")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador", "supervisor"]);
+      if (roleError) return roleError;
+
+      const requestedOrganizationId = normalizeText(body?.organization_id || "") || null;
+      const template = String(body?.template || "");
+      const phone = normalizeText(body?.phone || "") || null;
+      const encoding = body?.encoding === "unicode" ? "unicode" : "gsm-7bit";
+      const productName = normalizeText(body?.product_name || "") || null;
+      if (!requestedOrganizationId || !template.trim() || !phone) {
+        return json(400, { ok: false, message: "organization_id, template y phone son requeridos" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(
+          client,
+          dbUser,
+          withOrganizationIdQuery(event, requestedOrganizationId)
+        );
+        if (!organizationId) {
+          return json(400, { ok: false, message: "organization_id requerido" });
+        }
+        const organizationRes = await client.query(
+          `SELECT nombre FROM organizations WHERE id = $1 LIMIT 1`,
+          [organizationId]
+        );
+        const organizationName = organizationRes.rows[0]?.nombre || "";
+        const renderedMessage = renderSmsTemplate(template, {
+          "#nombre#": "Cliente de prueba",
+          "#organizacion#": organizationName,
+          "#producto#": productName || "Producto de prueba",
+          "#telefono_contacto#": phone
+        });
+        const result = await sendSms(client, {
+          organizationId,
+          phone,
+          message: renderedMessage,
+          encoding
+        });
+        return json(200, { ok: true, result });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to send SMS template test", error: error.message });
+    }
+  }
+
   if (method === "POST" && (path.endsWith("/sms-templates") || path.endsWith("/sms-template"))) {
     const body = safeParseBody(event);
     if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
