@@ -1,6 +1,5 @@
 ﻿import fs from "node:fs";
 import crypto from "node:crypto";
-import { Agent } from "undici";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -6757,19 +6756,13 @@ function buildDigestAuthorizationHeader({ username, password, method, url, chall
 async function fetchWithGatewayAuth(url, { method = "GET", headers = {}, body, username, password }) {
   const requestHeaders = { ...headers };
   const basicToken = Buffer.from(`${username || ""}:${password || ""}`).toString("base64");
-  const gatewayDispatcher = new Agent({
-    connect: {
-      rejectUnauthorized: false
-    }
-  });
   let response = await fetch(url, {
     method,
     headers: {
       ...requestHeaders,
       Authorization: `Basic ${basicToken}`
     },
-    body,
-    dispatcher: gatewayDispatcher
+    body
   });
   if (response.status !== 401) {
     return response;
@@ -6794,8 +6787,7 @@ async function fetchWithGatewayAuth(url, { method = "GET", headers = {}, body, u
       ...requestHeaders,
       Authorization: digestHeader
     },
-    body,
-    dispatcher: gatewayDispatcher
+    body
   });
 }
 
