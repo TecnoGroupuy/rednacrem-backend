@@ -6718,6 +6718,9 @@ function createGatewayResponse(statusCode, headers, bodyBuffer) {
       get(name) {
         return normalizedHeaders.get(String(name || "").toLowerCase()) ?? null;
       },
+      entries() {
+        return normalizedHeaders.entries();
+      },
       getSetCookie() {
         const value = normalizedHeaders.get("set-cookie");
         if (Array.isArray(value)) {
@@ -6727,6 +6730,9 @@ function createGatewayResponse(statusCode, headers, bodyBuffer) {
           return [];
         }
         return [value];
+      },
+      toObject() {
+        return Object.fromEntries(normalizedHeaders.entries());
       }
     },
     async text() {
@@ -6787,7 +6793,8 @@ async function dinstarLogin(host, port, username, password) {
   );
   return {
     jsessionId: jsessionMatch[1],
-    devckie: resolvedDevckie
+    devckie: resolvedDevckie,
+    setCookieHeaders
   };
 }
 
@@ -6808,16 +6815,25 @@ async function dinstarSendSmsForm(host, port, session, { phone, message, portInd
     cookieParts.push(`devckie=${session.devckie}`);
   }
   cookieParts.push(`JSESSIONID=${session.jsessionId}`);
+  const cookieHeader = cookieParts.join("; ");
   const response = await gatewayRequest(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      Cookie: cookieParts.join("; ")
+      Cookie: cookieHeader
     },
     body
   });
   const location = response.headers.get("location") || "";
   const success = response.status === 302 && /enWIASendMsg/i.test(location);
+  if (!success) {
+    console.log("[sms] dinstar send failed detail", JSON.stringify({
+      loginSetCookieHeaders: Array.isArray(session?.setCookieHeaders) ? session.setCookieHeaders : [],
+      requestCookieHeader: cookieHeader,
+      responseHeaders: typeof response.headers.toObject === "function" ? response.headers.toObject() : {},
+      requestBody: body
+    }));
+  }
   return {
     success,
     status: response.status,
