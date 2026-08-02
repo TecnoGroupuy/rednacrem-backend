@@ -1,6 +1,6 @@
 ﻿import fs from "node:fs";
 import crypto from "node:crypto";
-import https from "node:https";
+import { dinstarSendSmsApi, dinstarTestConnectionApi } from "./src/lib/dinstarSms.mjs";
 import { Client } from "pg";
 import {
   CognitoIdentityProviderClient,
@@ -23,7 +23,6 @@ const s3Client = new S3Client({ region: "us-east-1" });
 const S3_BUCKET = "rednacrem-assets";
 const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
 const BATCH_TIPOS = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"];
-const DINSTAR_FALLBACK_DEVCKIE = "db32-0622-5072-0063";
 
 function getRequestId(event) {
   const headerId =
@@ -6703,144 +6702,6 @@ function withOrganizationIdQuery(event, organizationId) {
   };
 }
 
-function createGatewayResponse(statusCode, headers, bodyBuffer) {
-  const normalizedHeaders = new Map(
-    Object.entries(headers || {}).map(([key, value]) => [String(key).toLowerCase(), value])
-  );
-  const bodyText = Buffer.isBuffer(bodyBuffer)
-    ? bodyBuffer.toString("utf8")
-    : String(bodyBuffer || "");
-
-  return {
-    status: Number(statusCode) || 500,
-    ok: Number(statusCode) >= 200 && Number(statusCode) < 300,
-    headers: {
-      get(name) {
-        return normalizedHeaders.get(String(name || "").toLowerCase()) ?? null;
-      },
-      entries() {
-        return normalizedHeaders.entries();
-      },
-      getSetCookie() {
-        const value = normalizedHeaders.get("set-cookie");
-        if (Array.isArray(value)) {
-          return value;
-        }
-        if (value == null) {
-          return [];
-        }
-        return [value];
-      },
-      toObject() {
-        return Object.fromEntries(normalizedHeaders.entries());
-      }
-    },
-    async text() {
-      return bodyText;
-    },
-    async json() {
-      return JSON.parse(bodyText);
-    }
-  };
-}
-
-function gatewayRequest(url, { method = "GET", headers = {}, body }) {
-  const gatewayAgent = new https.Agent({ rejectUnauthorized: false });
-  const requestHeaders = { ...headers };
-  if (body !== undefined && body !== null) {
-    requestHeaders["Content-Length"] = Buffer.byteLength(body).toString();
-  }
-  return new Promise((resolve, reject) => {
-    const request = https.request(url, { method, headers: requestHeaders, agent: gatewayAgent }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => {
-        resolve(createGatewayResponse(response.statusCode, response.headers, Buffer.concat(chunks)));
-      });
-    });
-    request.on("error", reject);
-    if (body !== undefined && body !== null) {
-      request.write(body);
-    }
-    request.end();
-  });
-}
-
-async function dinstarLogin(host, port, username, password) {
-  const url = `https://${host}:${port}/goform/IADIdentityAuth`;
-  const body = `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
-  const response = await gatewayRequest(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body
-  });
-  const setCookieHeaders = response.headers.getSetCookie();
-  const jsessionMatch = setCookieHeaders
-    .map((header) => /JSESSIONID=([^;]+)/i.exec(String(header || "")))
-    .find(Boolean);
-  const devckieMatch = setCookieHeaders
-    .map((header) => /devckie=([^;]+)/i.exec(String(header || "")))
-    .find(Boolean);
-  if (!jsessionMatch) {
-    const detailText = await response.text().catch(() => "");
-    throw new Error(detailText || "Dinstar login failed: no JSESSIONID in response");
-  }
-  const resolvedDevckie = devckieMatch?.[1] || DINSTAR_FALLBACK_DEVCKIE;
-  console.log(
-    `[sms] dinstar login devckie_source=${devckieMatch ? "response" : "fallback"} jsession_prefix=${String(jsessionMatch[1] || "").slice(0, 8)}`
-  );
-  return {
-    jsessionId: jsessionMatch[1],
-    devckie: resolvedDevckie,
-    setCookieHeaders
-  };
-}
-
-async function dinstarSendSmsForm(host, port, session, { phone, message, portIndex = 0, encoding = "gsm-7bit" }) {
-  const url = `https://${host}:${port}/goform/WIAMsgSend`;
-  const params = new URLSearchParams();
-  params.set(`Index${portIndex}`, "on");
-  params.set("SendMode", "0");
-  params.set("NumbersFile", "");
-  params.set("Addressee", phone);
-  params.set("Encoding", encoding === "unicode" ? "1" : "0");
-  params.set("MsgInfo", message);
-  params.set("ok", "Send");
-  params.set("send_sms", "");
-  const body = params.toString();
-  const cookieParts = [];
-  if (session.devckie) {
-    cookieParts.push(`devckie=${session.devckie}`);
-  }
-  cookieParts.push(`JSESSIONID=${session.jsessionId}`);
-  const cookieHeader = cookieParts.join("; ");
-  const response = await gatewayRequest(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Cookie: cookieHeader
-    },
-    body
-  });
-  const location = response.headers.get("location") || "";
-  const success = response.status === 302 && /enWIASendMsg/i.test(location);
-  if (!success) {
-    console.log("[sms] dinstar send failed detail", JSON.stringify({
-      loginSetCookieHeaders: Array.isArray(session?.setCookieHeaders) ? session.setCookieHeaders : [],
-      requestCookieHeader: cookieHeader,
-      responseHeaders: typeof response.headers.toObject === "function" ? response.headers.toObject() : {},
-      requestBody: body
-    }));
-  }
-  return {
-    success,
-    status: response.status,
-    location
-  };
-}
-
 function resolveSmsPortIndex(simPorts) {
   if (!Array.isArray(simPorts) || simPorts.length === 0) {
     return 0;
@@ -6872,12 +6733,17 @@ async function testSmsGatewayConnection({ host, port, username, password }) {
     return { status: "error", detail: "host, port, username y password son requeridos" };
   }
   try {
-    const session = await dinstarLogin(safeHost, safePort, username, password);
+    const result = await dinstarTestConnectionApi({
+      host: safeHost,
+      port: safePort,
+      username,
+      password
+    });
     return {
-      status: "ok",
-      detail: session.devckie
-        ? `Conexión establecida (JSESSIONID recibido, devckie=${session.devckie})`
-        : "Conexión establecida (JSESSIONID recibido)"
+      status: result.ok ? "ok" : "error",
+      detail: result.ok
+        ? "Conexión establecida"
+        : JSON.stringify(result.raw ?? { statusCode: result.statusCode })
     };
   } catch (error) {
     return {
@@ -6978,44 +6844,46 @@ async function sendSms(client, {
 
     try {
       const portIndex = resolveSmsPortIndex(connection.sim_ports);
-      let session = await dinstarLogin(
-        connection.host,
-        connection.port,
-        connection.username,
-        connection.password
-      );
-      let result = await dinstarSendSmsForm(connection.host, connection.port, session, {
-        phone: normalizedPhone,
-        message: String(message),
+      const requestEncoding = encoding === "unicode" ? "unicode" : "gsm-7bit";
+      const requestUserId = Date.now();
+      let result = await dinstarSendSmsApi(
+        connection,
+        normalizedPhone,
+        String(message),
+        requestUserId,
         portIndex,
-        encoding
-      });
+        requestEncoding
+      );
       if (result.success) {
         status = "sent";
+        dinstarTaskId = result.taskId;
       } else {
-        const firstAttemptError = `Unexpected response: status=${result.status} location=${result.location}`;
+        const firstAttemptError = JSON.stringify(result.raw ?? {
+          errorCode: result.errorCode,
+          httpStatusCode: result.httpStatusCode
+        });
         console.log("[sms] retry attempt", {
           organizationId,
           phone: normalizedPhone,
           error_detail: firstAttemptError
         });
         await new Promise((resolve) => setTimeout(resolve, 3000));
-        session = await dinstarLogin(
-          connection.host,
-          connection.port,
-          connection.username,
-          connection.password
-        );
-        result = await dinstarSendSmsForm(connection.host, connection.port, session, {
-          phone: normalizedPhone,
-          message: String(message),
+        result = await dinstarSendSmsApi(
+          connection,
+          normalizedPhone,
+          String(message),
+          requestUserId,
           portIndex,
-          encoding
-        });
+          requestEncoding
+        );
         if (result.success) {
           status = "sent";
+          dinstarTaskId = result.taskId;
         } else {
-          errorDetail = `Unexpected response: status=${result.status} location=${result.location}`;
+          errorDetail = JSON.stringify(result.raw ?? {
+            errorCode: result.errorCode,
+            httpStatusCode: result.httpStatusCode
+          });
         }
       }
     } catch (error) {
