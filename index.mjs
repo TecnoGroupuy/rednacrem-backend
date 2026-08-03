@@ -2824,6 +2824,60 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
   const sellers = sellersRes.rows;
   const sellerIds = sellers.map((u) => u.id);
 
+  const salesAmountTeamRes = sellerIds.length
+    ? await client.query(
+      `
+      SELECT COALESCE(SUM(sale_amount), 0)::numeric AS monto_total
+      FROM (
+        SELECT
+          s.id AS sale_id,
+          MAX(COALESCE(cp.precio, 0))::numeric AS sale_amount
+        FROM sales s
+        JOIN contact_products cp ON cp.sale_id = s.id
+        WHERE s.fecha_venta = $1::date
+          AND ($2::uuid IS NULL OR s.organization_id = $2::uuid)
+          AND s.seller_user_id = ANY($3::uuid[])
+          AND cp.estado = 'alta'
+        GROUP BY s.id
+      ) dedup
+      `,
+      [fecha, organizationId, sellerIds]
+    )
+    : { rows: [{ monto_total: 0 }] };
+
+  const salesAmountBySellerRes = sellerIds.length
+    ? await client.query(
+      `
+      SELECT
+        seller_user_id AS user_id,
+        COALESCE(SUM(sale_amount), 0)::numeric AS monto_total
+      FROM (
+        SELECT
+          s.id AS sale_id,
+          s.seller_user_id,
+          MAX(COALESCE(cp.precio, 0))::numeric AS sale_amount
+        FROM sales s
+        JOIN contact_products cp ON cp.sale_id = s.id
+        WHERE s.fecha_venta = $1::date
+          AND ($2::uuid IS NULL OR s.organization_id = $2::uuid)
+          AND s.seller_user_id = ANY($3::uuid[])
+          AND cp.estado = 'alta'
+        GROUP BY s.id, s.seller_user_id
+      ) dedup
+      GROUP BY seller_user_id
+      `,
+      [fecha, organizationId, sellerIds]
+    )
+    : { rows: [] };
+
+  const teamSalesAmount = Number(salesAmountTeamRes.rows[0]?.monto_total || 0);
+  const salesAmountBySellerMap = new Map(
+    (salesAmountBySellerRes.rows || []).map((row) => [
+      row.user_id,
+      Number(row.monto_total || 0)
+    ])
+  );
+
   const callsRes = sellerIds.length
     ? await client.query(
       `
@@ -2898,6 +2952,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     totalLlamadas += callStats.total_llamadas;
     totalVentas += callStats.total_ventas;
     totalUtiles += callStats.total_utiles;
+    const montoTotal = salesAmountBySellerMap.get(seller.id) || 0;
 
     const eventStats = eventsMap.get(seller.id) || {
       login_time: null,
@@ -2931,6 +2986,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
       tiempo_conectado_minutos: tiempoConectadoMinutos,
       total_llamadas: callStats.total_llamadas,
       total_ventas: callStats.total_ventas,
+      monto_total: montoTotal,
       conversion,
       estado: "Activo",
       alerta: false,
@@ -2979,6 +3035,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     total_utiles: totalUtiles,
     meta_llamadas: config.meta_llamadas_dia * sellers.length,
     total_ventas: totalVentas,
+    monto_total: teamSalesAmount,
     meta_ventas: config.meta_ventas_dia * sellers.length,
     conversion_promedio: computeConversion(totalVentas, totalUtiles)
   };
@@ -2994,6 +3051,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     calls: resumen_equipo.total_llamadas,
     callsGoal: resumen_equipo.meta_llamadas,
     sales: resumen_equipo.total_ventas,
+    salesAmount: resumen_equipo.monto_total,
     salesGoal: resumen_equipo.meta_ventas,
     avgConversion: resumen_equipo.conversion_promedio,
     avgConversionNote: null,
@@ -3009,6 +3067,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     apellido: null,
     calls: agent.total_llamadas,
     sales: agent.total_ventas,
+    monto_total: agent.monto_total || 0,
     conversion: agent.conversion,
     status: agent.estado,
     pausesMinutes: agent.tiempo_total_pausas_minutos || 0,
