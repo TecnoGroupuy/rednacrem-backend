@@ -6673,6 +6673,7 @@ function sanitizeSmsConnectionRow(row) {
     organization_id: row.organization_id,
     host: row.host,
     port: row.port,
+    password: row.password || "",
     sim_ports: Array.isArray(row.sim_ports) ? row.sim_ports : [],
     username: row.username,
     enabled: row.enabled === true,
@@ -10602,7 +10603,7 @@ export const handler = async (event) => {
         }
         const result = await client.query(
           `
-          SELECT id, organization_id, host, port, sim_ports, username, enabled,
+          SELECT id, organization_id, host, port, sim_ports, username, password, enabled,
                  last_test_at, last_test_status, last_test_detail, created_at, updated_at
           FROM sms_connections
           WHERE organization_id = $1
