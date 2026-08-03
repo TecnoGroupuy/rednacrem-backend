@@ -11005,6 +11005,8 @@ export const handler = async (event) => {
         }
         const limitParam = Number.parseInt(String(getQueryParam(event, "limit") || "20"), 10);
         const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 20;
+        const offsetParam = Number.parseInt(String(getQueryParam(event, "offset") || "0"), 10);
+        const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
         const result = await client.query(
           `
           SELECT
@@ -11033,10 +11035,20 @@ export const handler = async (event) => {
           WHERE sl.organization_id = $1
           ORDER BY sl.created_at DESC
           LIMIT $2
+          OFFSET $3
           `,
-          [organizationId, limit]
+          [organizationId, limit, offset]
         );
-        return json(200, { ok: true, items: result.rows });
+        const totalResult = await client.query(
+          `
+          SELECT COUNT(*)::int AS total
+          FROM sms_log sl
+          WHERE sl.organization_id = $1
+          `,
+          [organizationId]
+        );
+        const totalCount = totalResult.rows[0]?.total || 0;
+        return json(200, { ok: true, items: result.rows, total: totalCount, limit, offset });
       } finally {
         await client.end();
       }
