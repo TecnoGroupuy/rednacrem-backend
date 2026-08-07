@@ -11403,6 +11403,7 @@ export const handler = async (event) => {
       const departamento = normalizeText(body?.departamento) || null;
       const fechaLead = parseDateFlexible(body?.fecha_lead) || null;
       const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato) || "facebook");
+      const campanaMeta = normalizeText(body?.campana_meta || body?.ad_name) || null;
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
       const sourceMeta = inferAutomatedHotLeadSource({
@@ -11466,6 +11467,7 @@ export const handler = async (event) => {
           "localidad",
           "departamento",
           "fecha_lead",
+          "campana_meta",
           "motivo_bloqueo",
           ...(hasMotivoBloqueoDetalle ? ["motivo_bloqueo_detalle"] : [])
         ];
@@ -11487,6 +11489,7 @@ export const handler = async (event) => {
           localidad,
           departamento,
           fechaLead,
+          campanaMeta,
           motivoBloqueo,
           ...(hasMotivoBloqueoDetalle ? [motivoBloqueoDetalle] : [])
         ];
@@ -11645,6 +11648,7 @@ export const handler = async (event) => {
       const departamento = normalizeText(body?.departamento) || null;
       const fechaLead = parseDateFlexible(body?.fecha_lead) || null;
       const origenDato = normalizarOrigenDato(normalizeText(body?.origen_dato) || "facebook");
+      const campanaMeta = normalizeText(body?.campana_meta || body?.ad_name) || null;
       const campana = normalizeText(body?.campaign_name || body?.campana) || null;
       const formulario = normalizeText(body?.form_name || body?.formulario) || null;
       const sourceMeta = inferAutomatedHotLeadSource({
@@ -11691,14 +11695,14 @@ export const handler = async (event) => {
             nombre, apellido, telefono, celular,
             email, fecha_nacimiento,
             origen_dato, source_family, source_channel, source_system, estado, organization_id,
-            nota, localidad, departamento, fecha_lead, motivo_bloqueo${
+            nota, localidad, departamento, fecha_lead, campana_meta, motivo_bloqueo${
               hasMotivoBloqueoDetalle ? ", motivo_bloqueo_detalle" : ""
             },
             campaign_name, form_name
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16${hasMotivoBloqueoDetalle ? ", $17" : ""},
-            $${hasMotivoBloqueoDetalle ? 18 : 17}, $${hasMotivoBloqueoDetalle ? 19 : 18}
+            $12, $13, $14, $15, $16, $17, $18${hasMotivoBloqueoDetalle ? ", $19" : ""},
+            $${hasMotivoBloqueoDetalle ? 20 : 19}, $${hasMotivoBloqueoDetalle ? 21 : 20}
           )
           RETURNING id`,
           hasMotivoBloqueoDetalle
@@ -11719,6 +11723,7 @@ export const handler = async (event) => {
                 localidad,
                 departamento,
                 fechaLead,
+                campanaMeta,
                 motivoBloqueo,
                 motivoBloqueoDetalle,
                 campana,
@@ -11741,6 +11746,7 @@ export const handler = async (event) => {
                 localidad,
                 departamento,
                 fechaLead,
+                campanaMeta,
                 motivoBloqueo,
                 campana,
                 formulario,
