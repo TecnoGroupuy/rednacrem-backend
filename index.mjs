@@ -25917,6 +25917,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             d.motivo_bloqueo,
             ${hasMotivoBloqueoDetalle ? "d.motivo_bloqueo_detalle" : "NULL::text AS motivo_bloqueo_detalle"},
             d.origen_dato,
+            d.campana_meta,
             d.source_channel,
             d.created_at,
             lcs.estado_venta,
