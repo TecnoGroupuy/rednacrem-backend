@@ -4269,7 +4269,34 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
     }
   }
 
-  // 2. Registro previo en datos_para_trabajar
+  // 2. Cliente activo en contacts/sales
+  if (tel || cel) {
+    const clienteRes = await client.query(
+      `
+      SELECT c.id
+      FROM contacts c
+      JOIN contact_products cp ON cp.contact_id = c.id
+      WHERE (
+          ($1::text IS NOT NULL AND (c.telefono = $1 OR c.celular = $1))
+       OR ($2::text IS NOT NULL AND (c.telefono = $2 OR c.celular = $2))
+      )
+        AND c.organization_id = $3
+        AND cp.estado = 'alta'
+      LIMIT 1
+      `,
+      [tel || null, cel || null, orgId]
+    );
+    if (clienteRes.rows.length) {
+      return {
+        estado: "bloqueado",
+        motivoBloqueo: "cliente_existente",
+        prevContactId: null,
+        prevAssignedTo: null
+      };
+    }
+  }
+
+  // 3. Registro previo en datos_para_trabajar
   if (tel || cel) {
     const prev = await client.query(
       `
@@ -4476,33 +4503,6 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
         motivoBloqueo: null,
         prevContactId: prevId,
         prevAssignedTo: mismoVendedor
-      };
-    }
-  }
-
-  // 3. Cliente activo en contacts/sales
-  if (tel || cel) {
-    const clienteRes = await client.query(
-      `
-      SELECT c.id
-      FROM contacts c
-      JOIN contact_products cp ON cp.contact_id = c.id
-      WHERE (
-          ($1::text IS NOT NULL AND (c.telefono = $1 OR c.celular = $1))
-       OR ($2::text IS NOT NULL AND (c.telefono = $2 OR c.celular = $2))
-      )
-        AND c.organization_id = $3
-        AND cp.estado = 'alta'
-      LIMIT 1
-      `,
-      [tel || null, cel || null, orgId]
-    );
-    if (clienteRes.rows.length) {
-      return {
-        estado: "bloqueado",
-        motivoBloqueo: "cliente_existente",
-        prevContactId: null,
-        prevAssignedTo: null
       };
     }
   }
