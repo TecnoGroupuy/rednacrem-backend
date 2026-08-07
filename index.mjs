@@ -25672,6 +25672,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       if (periodo === "este_mes") periodo = "mes";
       if (periodo === "ultimos_7_dias") periodo = "semana";
       if (periodo === "hoy") periodo = "dia";
+      const incluirReemplazados =
+        String(getQueryParam(event, "incluir_reemplazados") || "").trim().toLowerCase() === "true";
       const origenDatoRaw = getQueryParam(event, "origen_dato");
       const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
@@ -25844,6 +25846,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       if (periodo === "este_mes") periodo = "mes";
       if (periodo === "ultimos_7_dias") periodo = "semana";
       if (periodo === "hoy") periodo = "dia";
+      const incluirReemplazados =
+        String(getQueryParam(event, "incluir_reemplazados") || "").trim().toLowerCase() === "true";
       const origenDatoRaw = getQueryParam(event, "origen_dato");
       const origenDato = origenDatoRaw ? String(origenDatoRaw).trim().toLowerCase() : null;
       const origenDatoFilter = origenDato && origenDato !== "todos" ? origenDato : null;
@@ -25870,6 +25874,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         const filterValues = [];
         let filterIdx = 1;
         filters.push(`coalesce(d.source_family, '') = 'hot'`);
+        if (!incluirReemplazados) {
+          filters.push(`NOT (
+            coalesce(d.estado, '') = 'bloqueado'
+            AND coalesce(d.motivo_bloqueo, '') = 'reemplazado'
+          )`);
+        }
         if (origenDatoFilter) {
           filters.push(`coalesce(d.source_channel, '') = $${filterIdx}`);
           filterValues.push(origenDatoFilter);
