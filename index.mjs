@@ -4202,6 +4202,30 @@ async function fetchDatosTrabajarPreviewLookup(client, organizationId, numbers) 
   };
 }
 
+async function findMetaSheetIdempotentRetry(client, organizationId, telefono, celular, fechaLead) {
+  if (!organizationId || !fechaLead || (!telefono && !celular)) {
+    return null;
+  }
+
+  const existingRes = await client.query(
+    `
+    SELECT id, estado, motivo_bloqueo, created_at
+    FROM datos_para_trabajar
+    WHERE organization_id = $1
+      AND fecha_lead = $4::timestamptz
+      AND (
+        ($2::text IS NOT NULL AND (telefono = $2 OR celular = $2))
+        OR ($3::text IS NOT NULL AND (telefono = $3 OR celular = $3))
+      )
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [organizationId, telefono || null, celular || null, fechaLead]
+  );
+
+  return existingRes.rows[0] || null;
+}
+
 async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId, extra = {}) {
   const readOnly = extra?.readOnly === true;
   const isDuplicateInImport = extra?.isDuplicateInImport === true;
@@ -11432,6 +11456,31 @@ export const handler = async (event) => {
 
         const orgId = body?.organization_id || defaultOrgId;
         const batchName = body?.batch_name || "Meta";
+        const existingSameEvent = await findMetaSheetIdempotentRetry(
+          client,
+          orgId,
+          telefono || null,
+          celular || null,
+          fechaLead || null
+        );
+
+        if (existingSameEvent) {
+          console.log("META_SHEET_IDEMPOTENT_RETRY", JSON.stringify({
+            organization_id: orgId,
+            telefono: telefono || null,
+            celular: celular || null,
+            fecha_lead: fechaLead,
+            existing_id: existingSameEvent.id
+          }));
+          responseData = {
+            ok: true,
+            id: existingSameEvent.id,
+            estado: existingSameEvent.estado,
+            duplicate_event: true,
+            skipped: true
+          };
+          return json(200, responseData);
+        }
 
         const evalRes = await evaluarEstadoLead(
           client,
