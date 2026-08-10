@@ -7912,7 +7912,6 @@ async function listClientsDirectory({
             ORDER BY
               CASE mm.matched_via WHEN 'own_phone' THEN 0 WHEN 'family_relation' THEN 1 ELSE 2 END,
               CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
-              s.last_sale_at DESC NULLS LAST,
               s.created_at DESC,
               rp.fecha_alta DESC NULLS LAST
           ) AS rn
@@ -7961,7 +7960,6 @@ async function listClientsDirectory({
             ORDER BY
               CASE mm.matched_via WHEN 'own_phone' THEN 0 WHEN 'family_relation' THEN 1 ELSE 2 END,
               CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
-              s.last_sale_at DESC NULLS LAST,
               s.created_at DESC,
               rp.fecha_alta DESC NULLS LAST
           ) AS rn
@@ -7979,12 +7977,8 @@ async function listClientsDirectory({
         telefono,
         celular,
         documento,
-        etiquetas,
         created_at,
-        last_sale_at,
-        last_management_at,
         productos_total,
-        familiares_total,
         organization_id,
         product_row_id,
         nombre_producto,
@@ -8000,7 +7994,6 @@ async function listClientsDirectory({
       WHERE rn = 1
       ORDER BY
         CASE WHEN producto_estado = 'alta' THEN 0 ELSE 1 END,
-        last_sale_at DESC NULLS LAST,
         created_at DESC,
         nombre ASC,
         apellido ASC,
