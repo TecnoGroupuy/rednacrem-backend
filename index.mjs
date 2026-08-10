@@ -7811,6 +7811,19 @@ async function listClientsDirectory({
 
     const whereParts = ["s.productos_total > 0"];
     const values = [];
+    let matchMetaCte = `
+      match_meta AS (
+        SELECT
+          s.id AS contact_id,
+          'own_phone'::text AS matched_via,
+          NULL::uuid AS matched_from_contact_id
+        FROM summary s
+      )
+    `;
+    let matchMetaJoin = `
+      LEFT JOIN match_meta mm ON mm.contact_id = s.id
+      LEFT JOIN contacts related ON related.id = mm.matched_from_contact_id
+    `;
 
     if (organizationId) {
       values.push(organizationId);
@@ -7820,12 +7833,59 @@ async function listClientsDirectory({
     if (searchText) {
       const digits = searchText.replace(/[^\d]/g, "");
       if (digits) {
-        values.push(`%${digits}%`);
+        values.push(digits);
         const idx = values.length;
-        const phoneClause = `(REPLACE(REPLACE(REPLACE(coalesce(s.telefono, ''), ' ', ''), '-', ''), '+', '') ILIKE $${idx} OR REPLACE(REPLACE(REPLACE(coalesce(s.celular, ''), ' ', ''), '-', ''), '+', '') ILIKE $${idx})`;
+        const orgParam = organizationId ? "$1" : "NULL::uuid";
         whereParts.push(
-          `(lower(s.nombre) LIKE $${idx} OR lower(s.apellido) LIKE $${idx} OR lower(coalesce(s.email, '')) LIKE $${idx} OR lower(coalesce(s.documento, '')) LIKE $${idx} OR ${phoneClause})`
+          `(
+            s.id IN (
+              SELECT dm.contact_id FROM direct_matches dm
+              UNION
+              SELECT rm.contact_id FROM relation_matches rm
+            )
+            OR lower(s.nombre) LIKE $${idx}
+            OR lower(s.apellido) LIKE $${idx}
+            OR lower(coalesce(s.email, '')) LIKE $${idx}
+            OR lower(coalesce(s.documento, '')) LIKE $${idx}
+          )`
         );
+        matchMetaCte = `
+          direct_matches AS (
+            SELECT
+              s.id AS contact_id
+            FROM summary s
+            WHERE (${orgParam}::uuid IS NULL OR s.organization_id = ${orgParam})
+              AND (
+                ${buildNormalizedPhoneSql("s.telefono")} = $${idx}
+                OR ${buildNormalizedPhoneSql("s.celular")} = $${idx}
+              )
+          ),
+          relation_matches AS (
+            SELECT DISTINCT
+              CASE
+                WHEN cr.contact_id_a = dm.contact_id THEN cr.contact_id_b
+                ELSE cr.contact_id_a
+              END AS contact_id,
+              dm.contact_id AS matched_from_contact_id
+            FROM direct_matches dm
+            JOIN contact_relations cr
+              ON cr.contact_id_a = dm.contact_id
+              OR cr.contact_id_b = dm.contact_id
+          ),
+          match_meta AS (
+            SELECT
+              dm.contact_id,
+              'own_phone'::text AS matched_via,
+              NULL::uuid AS matched_from_contact_id
+            FROM direct_matches dm
+            UNION
+            SELECT
+              rm.contact_id,
+              'family_relation'::text AS matched_via,
+              rm.matched_from_contact_id
+            FROM relation_matches rm
+          )
+        `;
       } else {
         values.push(`%${searchText}%`);
         const idx = values.length;
@@ -7841,12 +7901,30 @@ async function listClientsDirectory({
       `
       WITH summary AS (
         ${buildContactSummarySelect()}
+      ),
+      ${matchMetaCte},
+      ranked AS (
+        SELECT
+          s.id,
+          rp.id AS product_row_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY s.id, rp.id
+            ORDER BY
+              CASE mm.matched_via WHEN 'own_phone' THEN 0 WHEN 'family_relation' THEN 1 ELSE 2 END,
+              CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
+              s.last_sale_at DESC NULLS LAST,
+              s.created_at DESC,
+              rp.fecha_alta DESC NULLS LAST
+          ) AS rn
+        FROM summary s
+        ${matchMetaJoin}
+        JOIN contact_products rp
+          ON rp.contact_id = s.id
+        ${whereClause}
       )
       SELECT COUNT(*)::int AS total
-      FROM summary s
-      JOIN contact_products rp
-        ON rp.contact_id = s.id
-      ${whereClause}
+      FROM ranked
+      WHERE rn = 1
       `,
       values
     );
@@ -7862,34 +7940,89 @@ async function listClientsDirectory({
       `
       WITH summary AS (
         ${buildContactSummarySelect()}
+      ),
+      ${matchMetaCte},
+      ranked AS (
+        SELECT
+          s.*,
+          rp.id AS product_row_id,
+          rp.nombre_producto,
+          rp.plan,
+          rp.precio,
+          rp.estado AS producto_estado,
+          rp.fecha_alta,
+          rp.cuotas_pagas,
+          rp.carencia_cuotas,
+          mm.matched_via,
+          mm.matched_from_contact_id,
+          trim(concat_ws(' ', related.nombre, related.apellido)) AS matched_from_name,
+          ROW_NUMBER() OVER (
+            PARTITION BY s.id, rp.id
+            ORDER BY
+              CASE mm.matched_via WHEN 'own_phone' THEN 0 WHEN 'family_relation' THEN 1 ELSE 2 END,
+              CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
+              s.last_sale_at DESC NULLS LAST,
+              s.created_at DESC,
+              rp.fecha_alta DESC NULLS LAST
+          ) AS rn
+        FROM summary s
+        ${matchMetaJoin}
+        JOIN contact_products rp
+          ON rp.contact_id = s.id
+        ${whereClause}
       )
       SELECT
-        s.*,
-        rp.id AS product_row_id,
-        rp.nombre_producto,
-        rp.plan,
-        rp.precio,
-        rp.estado AS producto_estado,
-        rp.fecha_alta,
-        rp.cuotas_pagas,
-        rp.carencia_cuotas
-      FROM summary s
-      JOIN contact_products rp
-        ON rp.contact_id = s.id
-      ${whereClause}
+        id,
+        nombre,
+        apellido,
+        email,
+        telefono,
+        celular,
+        documento,
+        etiquetas,
+        created_at,
+        last_sale_at,
+        last_management_at,
+        productos_total,
+        familiares_total,
+        organization_id,
+        product_row_id,
+        nombre_producto,
+        plan,
+        precio,
+        producto_estado,
+        fecha_alta,
+        cuotas_pagas,
+        carencia_cuotas,
+        matched_via,
+        matched_from_name
+      FROM ranked
+      WHERE rn = 1
       ORDER BY
-        CASE WHEN rp.estado = 'alta' THEN 0 ELSE 1 END,
-        s.created_at DESC,
-        s.nombre ASC,
-        s.apellido ASC,
-        rp.fecha_alta DESC NULLS LAST
+        CASE WHEN producto_estado = 'alta' THEN 0 ELSE 1 END,
+        last_sale_at DESC NULLS LAST,
+        created_at DESC,
+        nombre ASC,
+        apellido ASC,
+        fecha_alta DESC NULLS LAST
       LIMIT $${limitIdx} OFFSET $${offsetIdx}
       `,
       values
     );
 
     return {
-      items: result.rows.map(mapClientRowToApi),
+      items: result.rows.map((row) => ({
+        ...mapClientRowToApi(row),
+        productoActualNombre: row.nombre_producto || "",
+        productoActualPlan: row.plan || "",
+        productoActualPrecio: row.precio ?? null,
+        productoActualEstado: row.producto_estado || "",
+        productoActualFechaAlta: row.fecha_alta || null,
+        productoActualCuotasPagas: row.cuotas_pagas ?? null,
+        productoActualCarenciaCuotas: row.carencia_cuotas ?? null,
+        matched_via: row.matched_via || null,
+        matched_from_name: row.matched_from_name || null
+      })),
       total,
       page: safePage,
       limit: safeLimit
@@ -12445,10 +12578,19 @@ export const handler = async (event) => {
 
         const createManagementInContacts = false;
 
-        const upsertContact = async (payload) => {
+        const upsertContact = async (payload, options = {}) => {
+          const matchByDocumentoOnly = options?.matchByDocumentoOnly === true;
+          const requireDocumento = options?.requireDocumento === true;
           const fields = buildContactFields(payload || {});
           if (!fields.nombre || !fields.apellido) {
             return { id: null, fields };
+          }
+          if (requireDocumento && !fields.documento) {
+            return {
+              id: null,
+              fields,
+              error: { status: 400, message: "Documento obligatorio para familiar con productos" }
+            };
           }
 
           const isValidUuid = (value) =>
@@ -12461,6 +12603,7 @@ export const handler = async (event) => {
               SELECT id FROM contacts
               WHERE documento = $1
               ${organizationId ? "AND organization_id = $2" : ""}
+              ORDER BY updated_at DESC NULLS LAST, created_at DESC
               LIMIT 1
               `,
               organizationId ? [fields.documento, organizationId] : [fields.documento]
@@ -12468,7 +12611,7 @@ export const handler = async (event) => {
             existingId = existingRes.rows[0]?.id || null;
           }
 
-          if (!existingId) {
+          if (!existingId && !matchByDocumentoOnly) {
             const telDigits = normalizePhoneDigits(fields.telefono || "");
             const celDigits = normalizePhoneDigits(fields.celular || "");
             if (telDigits || celDigits) {
@@ -12600,6 +12743,28 @@ export const handler = async (event) => {
             ]
           );
           return { id: insertRes.rows[0]?.id || null, fields };
+        };
+
+        const findExistingContactByDocumento = async (payload) => {
+          const fields = buildContactFields(payload || {});
+          if (!fields.documento) {
+            return { id: null, fields };
+          }
+          const existingRes = await client.query(
+            `
+            SELECT id
+            FROM contacts
+            WHERE documento = $1
+              ${organizationId ? "AND organization_id = $2" : ""}
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            `,
+            organizationId ? [fields.documento, organizationId] : [fields.documento]
+          );
+          return {
+            id: existingRes.rows[0]?.id || null,
+            fields
+          };
         };
 
         const insertSale = async ({
@@ -13348,23 +13513,71 @@ export const handler = async (event) => {
           return Boolean(nombre || apellido || documento || telefono || celular);
         };
 
+        for (let familyIndex = 0; familyIndex < familySales.length; familyIndex += 1) {
+          const familySale = familySales[familyIndex];
+          const famProducts = Array.isArray(familySale?.products) ? familySale.products : [];
+          const hasAssignedProducts = famProducts.length > 0;
+          const hasAnyFamilySignal = Boolean(
+            familySale?.contact && hasAnyContactSignal(familySale.contact)
+          ) || hasAssignedProducts;
+          if (!hasAnyFamilySignal) continue;
+
+          if (!hasAssignedProducts) continue;
+
+          const famFields = buildContactFields(familySale?.contact || {});
+          const familyLabel =
+            [famFields.nombre, famFields.apellido].filter(Boolean).join(" ").trim() ||
+            `#${familyIndex + 1}`;
+
+          if (!famFields.nombre || !famFields.apellido || !famFields.documento) {
+            await client.query("ROLLBACK");
+            return json(400, {
+              ok: false,
+              message: `Familiar inválido (${familyLabel}): nombre, apellido y documento son obligatorios`,
+              family_index: familyIndex
+            });
+          }
+        }
+
         for (const familySale of familySales) {
-          if (!familySale?.contact || !hasAnyContactSignal(familySale.contact)) {
+          const famProducts = Array.isArray(familySale?.products) ? familySale.products : [];
+          const hasAssignedProducts = famProducts.length > 0;
+          const hasSignal = Boolean(
+            familySale?.contact && hasAnyContactSignal(familySale.contact)
+          );
+          if (!hasSignal && !hasAssignedProducts) {
             continue;
           }
-          const famContact = await upsertContact(familySale?.contact || {});
-          if (!famContact.id) continue;
-          const famProducts = Array.isArray(familySale?.products) ? familySale.products : [];
-          for (const product of famProducts) {
-            await createProductAndSale({
-              contactId: famContact.id,
-              product,
-              medioPagoOverride: familySale?.medioPago || null,
-              parentSaleId: mainSaleId || null,
-              gestionId: gestId,
-              titularContactId: famContact.id,
-              relation: familySale?.relation ?? "familiar"
+
+          const famContact = hasAssignedProducts
+            ? await upsertContact(familySale?.contact || {}, {
+                matchByDocumentoOnly: true,
+                requireDocumento: true
+              })
+            : await findExistingContactByDocumento(familySale?.contact || {});
+
+          if (famContact?.error) {
+            await client.query("ROLLBACK");
+            return json(famContact.error.status || 400, {
+              ok: false,
+              message: famContact.error.message
             });
+          }
+
+          if (!famContact.id) continue;
+
+          if (hasAssignedProducts) {
+            for (const product of famProducts) {
+              await createProductAndSale({
+                contactId: famContact.id,
+                product,
+                medioPagoOverride: familySale?.medioPago || null,
+                parentSaleId: mainSaleId || null,
+                gestionId: gestId,
+                titularContactId: famContact.id,
+                relation: familySale?.relation ?? "familiar"
+              });
+            }
           }
           await client.query(
             `
@@ -13382,12 +13595,14 @@ export const handler = async (event) => {
             `,
             [main.id, famContact.id, familySale?.relation || "familiar"]
           );
-          const familyMgmt = await linkLeadSaleFromPrincipal({
-            contactId: famContact.id,
-            fields: famContact.fields,
-            sellerId
-          });
-          if (familyMgmt) managementLog.push({ scope: "family", ...familyMgmt });
+          if (hasAssignedProducts) {
+            const familyMgmt = await linkLeadSaleFromPrincipal({
+              contactId: famContact.id,
+              fields: famContact.fields,
+              sellerId
+            });
+            if (familyMgmt) managementLog.push({ scope: "family", ...familyMgmt });
+          }
         }
 
         const linkedToPrincipal = await linkLeadSaleFromPrincipal({
