@@ -10028,6 +10028,22 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
 
       const telefonoCheck = body.telefono || body.celular;
       if (telefonoCheck) {
+        const contactCols = await getTableColumns(client, "contacts");
+        const cpCols = await getTableColumns(client, "contact_products");
+        const hasContactsOrgId = contactCols.has("organization_id");
+        const hasCpOrgId = cpCols.has("organization_id");
+
+        const values = [telefonoCheck];
+        let orgClause = "";
+        if (hasContactsOrgId) {
+          values.push(organizationId);
+          orgClause += ` AND c.organization_id = $${values.length}`;
+        }
+        if (hasCpOrgId) {
+          values.push(organizationId);
+          orgClause += ` AND cp.organization_id = $${values.length}`;
+        }
+
         const clienteActivoResult = await client.query(
           `
           SELECT c.id, c.nombre, c.apellido
@@ -10035,9 +10051,10 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
           JOIN contact_products cp ON cp.contact_id = c.id
           WHERE (c.celular = $1 OR c.telefono = $1)
             AND cp.estado = 'alta'
+            ${orgClause}
           LIMIT 1
           `,
-          [telefonoCheck]
+          values
         );
 
         if (clienteActivoResult.rows.length > 0) {
