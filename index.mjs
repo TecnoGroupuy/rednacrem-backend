@@ -20436,7 +20436,8 @@ export const handler = async (event) => {
           let ventaContactMatchedExisting = false;
           const contactCols = await getTableColumns(client, "contacts");
 
-          const resolveExistingContactId = async (payload, orgId, preferredContactId = null) => {
+          const resolveExistingContactId = async (payload, orgId, preferredContactId = null, options = {}) => {
+            const skipPhoneMatch = options?.skipPhoneMatch === true;
             const normalizedDocumento = normalizeDocumento(payload?.documento || "");
             const normalizedEmail = normalizeEmail(payload?.email || payload?.correo_electronico || "");
             const phoneDigits = Array.from(
@@ -20504,28 +20505,30 @@ export const handler = async (event) => {
               if (emailRes.rows[0]?.id) return emailRes.rows[0].id;
             }
 
-            for (const phoneDigitsValue of phoneDigits) {
-              const phoneValues = [phoneDigitsValue];
-              const phoneOrgClause = contactCols.has("organization_id")
-                ? "AND ($1::uuid IS NULL OR organization_id = $1)"
-                : "";
-              if (contactCols.has("organization_id")) phoneValues.unshift(orgId);
-              const phoneRes = await client.query(
-                `
-                SELECT id
-                FROM contacts
-                WHERE 1=1
-                  ${phoneOrgClause}
-                  AND (
-                    regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $${phoneValues.length}
-                    OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $${phoneValues.length}
-                  )
-                ORDER BY updated_at DESC NULLS LAST, created_at DESC
-                LIMIT 1
-                `,
-                phoneValues
-              );
-              if (phoneRes.rows[0]?.id) return phoneRes.rows[0].id;
+            if (!skipPhoneMatch) {
+              for (const phoneDigitsValue of phoneDigits) {
+                const phoneValues = [phoneDigitsValue];
+                const phoneOrgClause = contactCols.has("organization_id")
+                  ? "AND ($1::uuid IS NULL OR organization_id = $1)"
+                  : "";
+                if (contactCols.has("organization_id")) phoneValues.unshift(orgId);
+                const phoneRes = await client.query(
+                  `
+                  SELECT id
+                  FROM contacts
+                  WHERE 1=1
+                    ${phoneOrgClause}
+                    AND (
+                      regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $${phoneValues.length}
+                      OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $${phoneValues.length}
+                    )
+                  ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                  LIMIT 1
+                  `,
+                  phoneValues
+                );
+                if (phoneRes.rows[0]?.id) return phoneRes.rows[0].id;
+              }
             }
 
             return null;
@@ -20774,7 +20777,13 @@ export const handler = async (event) => {
               `,
               existingProductValues
             );
-            if (existingProductRes.rows.length) return;
+            if (existingProductRes.rows.length) {
+              console.warn('[venta-product] contact already has active product, skipping insert', {
+                contactId,
+                productName
+              });
+              return;
+            }
 
             const resolvedProductId = await resolveProductId(productName, precioVal, orgId, explicitId);
 
@@ -20880,9 +20889,19 @@ export const handler = async (event) => {
           };
 
           // Find-or-create a contact from a payload (used for family sales).
-          const findOrCreateContact = async (payload, orgId) => {
-            const cid = await resolveExistingContactId(payload, orgId, payload?.contact_id || null);
+          const findOrCreateContact = async (payload, orgId, options = {}) => {
+            const normalizedDocumento = normalizeDocumento(payload?.documento || "");
+            const preferredContactId = payload?.contact_id || null;
+            const cid = await resolveExistingContactId(
+              payload,
+              orgId,
+              preferredContactId,
+              options
+            );
             if (cid) return cid;
+            if (options?.skipPhoneMatch === true && !normalizedDocumento) {
+              return null;
+            }
             const familyContactCols = [
               "nombre",
               "apellido",
@@ -20935,14 +20954,73 @@ export const handler = async (event) => {
 
           // Family sales: create a contact and its product(s) for each item.
           const familySales = Array.isArray(body.familySales) ? body.familySales : [];
+          for (let familyIndex = 0; familyIndex < familySales.length; familyIndex += 1) {
+            const fam = familySales[familyIndex];
+            const famProducts = Array.isArray(fam?.products) ? fam.products : [];
+            const hasAssignedProducts = famProducts.length > 0;
+            if (!hasAssignedProducts) continue;
+
+            const famNombre = normalizeText(fam?.contact?.nombre || "");
+            const famApellido = normalizeText(fam?.contact?.apellido || "");
+            const famDocumento = normalizeDocumento(fam?.contact?.documento || "");
+            const familyLabel =
+              [famNombre, famApellido].filter(Boolean).join(" ").trim() ||
+              `#${familyIndex + 1}`;
+
+            if (!famNombre || !famApellido || !famDocumento) {
+              await client.query("ROLLBACK");
+              return json(400, {
+                ok: false,
+                message: `Familiar inválido (${familyLabel}): nombre, apellido y documento son obligatorios`,
+                family_index: familyIndex
+              });
+            }
+          }
+
           for (const fam of familySales) {
             const famContactPayload = fam?.contact || {};
-            const famContactId = await findOrCreateContact(famContactPayload, ventaOrganizationId);
-            if (!famContactId) continue;
-            const famMedioPago = fam?.medio_pago || fam?.medioPago || medioPago || null;
             const famProducts = Array.isArray(fam?.products) ? fam.products : [];
-            for (const famProduct of (famProducts.length ? famProducts : [{}])) {
-              await insertContactProduct(famContactId, ventaOrganizationId, famProduct, famMedioPago);
+            const hasAssignedProducts = famProducts.length > 0;
+
+            let famContactId = null;
+            if (hasAssignedProducts) {
+              famContactId = await findOrCreateContact(
+                famContactPayload,
+                ventaOrganizationId,
+                { skipPhoneMatch: true }
+              );
+            } else {
+              famContactId = await resolveExistingContactId(
+                famContactPayload,
+                ventaOrganizationId,
+                famContactPayload?.contact_id || null,
+                { skipPhoneMatch: true }
+              );
+            }
+
+            if (!famContactId) continue;
+
+            const famMedioPago = fam?.medio_pago || fam?.medioPago || medioPago || null;
+            if (hasAssignedProducts) {
+              for (const famProduct of famProducts) {
+                await insertContactProduct(famContactId, ventaOrganizationId, famProduct, famMedioPago);
+              }
+            }
+
+            if (ventaContactId && famContactId !== ventaContactId) {
+              await client.query(
+                `
+                INSERT INTO contact_relations (contact_id_a, contact_id_b, relation, source)
+                VALUES ($1, $2, $3, 'venta')
+                ON CONFLICT (contact_id_a, contact_id_b)
+                DO UPDATE SET relation = EXCLUDED.relation, updated_at = NOW()
+                `,
+                [
+                  ventaContactId,
+                  famContactId,
+                  normalizeText(fam?.relation || fam?.relationship || fam?.parentesco) || "familiar"
+                ]
+              );
             }
           }
         }
