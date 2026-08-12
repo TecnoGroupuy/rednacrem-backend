@@ -25712,6 +25712,96 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     }
   }
 
+  const noLlamarAuthorizeMatch = path.match(/\/no-llamar\/([^/]+)\/authorize$/);
+  if (method === "POST" && noLlamarAuthorizeMatch) {
+    const numeroRaw = noLlamarAuthorizeMatch?.[1] || null;
+    const numero = normalizeText(numeroRaw || "").replace(/[\s\-]/g, "").trim();
+    if (!numero) {
+      return json(400, { ok: false, message: "numero requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+
+      const motivo = normalizeText(body?.motivo || "");
+      if (!motivo) {
+        return json(400, { ok: false, message: "motivo requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const noCallRes = await client.query(
+          `
+          SELECT id, numero
+          FROM no_call_entries
+          WHERE numero = $1
+          LIMIT 1
+          `,
+          [numero]
+        );
+        const entry = noCallRes.rows[0] || null;
+        if (!entry) {
+          return json(404, { ok: false, message: "Número no encontrado en no-llamar" });
+        }
+
+        const auditRes = await client.query(
+          `
+          INSERT INTO no_call_entries_audit (
+            no_call_entry_id,
+            numero,
+            authorized_by,
+            motivo,
+            organization_id
+          )
+          VALUES ($1, $2, $3, $4, $5)
+          RETURNING created_at
+          `,
+          [entry.id, entry.numero, dbUser.id, motivo, organizationId]
+        );
+
+        return json(200, {
+          ok: true,
+          authorized_at: auditRes.rows[0]?.created_at || null
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to authorize no-llamar number",
+        error: error.message
+      });
+    }
+  }
+
   if (method === "POST" && path.endsWith("/imports/no-llamar/jobs")) {
     const contentType = event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "";
     const fileName =
@@ -26931,13 +27021,28 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
-        // 1) no_call_entries (schema real no tiene "motivo", lo devolvemos como null)
+        // 1) no_call_entries + última autorización si existe
         {
           const res = await client.query(
             `
-            SELECT NULL::text AS motivo, fecha_carga
-            FROM no_call_entries
-            WHERE numero = $1
+            SELECT
+              nce.id AS no_call_entry_id,
+              nce.fecha_carga,
+              audit.authorized_by,
+              audit.motivo AS authorized_motivo,
+              audit.created_at AS authorized_at,
+              u.nombre AS authorized_by_nombre,
+              u.apellido AS authorized_by_apellido
+            FROM no_call_entries nce
+            LEFT JOIN LATERAL (
+              SELECT *
+              FROM no_call_entries_audit
+              WHERE no_call_entry_id = nce.id
+              ORDER BY created_at DESC
+              LIMIT 1
+            ) audit ON true
+            LEFT JOIN users u ON u.id = audit.authorized_by
+            WHERE nce.numero = $1
             LIMIT 1
             `,
             [tel]
@@ -26946,8 +27051,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           if (res.rows.length) {
             advertencias.push({
               tipo: "no_llamar",
-              motivo: res.rows[0]?.motivo ?? null,
-              fecha_carga: res.rows[0]?.fecha_carga ?? null
+              numero: tel,
+              no_call_entry_id: res.rows[0]?.no_call_entry_id ?? null,
+              fecha_carga: res.rows[0]?.fecha_carga ?? null,
+              autorizado: Boolean(res.rows[0]?.authorized_at),
+              autorizado_por: [res.rows[0]?.authorized_by_nombre, res.rows[0]?.authorized_by_apellido].filter(Boolean).join(" ") || null,
+              autorizado_motivo: res.rows[0]?.authorized_motivo ?? null,
+              autorizado_at: res.rows[0]?.authorized_at ?? null
             });
           }
         }
