@@ -30679,18 +30679,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           ? formatDateYmd(new Date(bajaRes.rows[0].changed_at))
           : null;
 
-        const primeraGestionRes = await client.query(
-          `
-          SELECT MIN((fecha_gestion AT TIME ZONE 'America/Montevideo')::date) AS primera
-          FROM lead_management_history
-          WHERE user_id = $1
-          `,
-          [sellerId]
-        );
-        const primeraRaw = primeraGestionRes.rows[0]?.primera || null;
-        const primera = primeraRaw ? formatDateYmd(new Date(primeraRaw)) : null;
         const today = formatDateYmd(new Date());
-        desde = fechaDesdeParsed || primera || today;
+        desde = fechaDesdeParsed || today;
         hasta = fechaHastaParsed || fechaBajaReal || today;
 
         const hasDptContactId = await columnExists(client, "datos_para_trabajar", "contact_id");
@@ -30783,21 +30773,21 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           jornada: jornadaReport,
           pendientes_count,
           pendientes_by_estado,
-          resumen: {
-            ventas: groupBy("venta").length,
-            rechazos: groupBy("rechazo").length,
-            seguimientos: groupBy("seguimiento").length,
-            rellamar: groupBy("rellamar").length,
-            no_contesta: groupBy("no_contesta").length,
-            dato_erroneo: groupBy("dato_erroneo").length
-          },
-          detalle: {
-            ventas: groupBy("venta"),
-            rechazos: groupBy("rechazo"),
-            seguimientos: groupBy("seguimiento"),
-            rellamar: groupBy("rellamar"),
-            no_contesta: groupBy("no_contesta")
-          }
+        resumen: {
+          ventas: groupBy("venta").length,
+          rechazos: groupBy("rechazo").length,
+          seguimiento: groupBy("seguimiento").length,
+          rellamar: groupBy("rellamar").length,
+          no_contesta: groupBy("no_contesta").length,
+          dato_erroneo: groupBy("dato_erroneo").length
+        },
+        detalle: {
+          ventas: groupBy("venta"),
+          rechazos: groupBy("rechazo"),
+          seguimiento: groupBy("seguimiento"),
+          rellamar: groupBy("rellamar"),
+          no_contesta: groupBy("no_contesta")
+        }
         });
       } finally {
         await client.end();
