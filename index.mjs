@@ -20739,15 +20739,15 @@ export const handler = async (event) => {
           };
 
           // Insert a contact_products row for a contact from a product spec.
-          const insertContactProduct = async (contactId, orgId, prod, medioPagoVal) => {
-            if (!contactId) return;
+          const insertContactProduct = async (contactId, orgId, prod, medioPagoVal, saleOptions = {}) => {
+            if (!contactId) return null;
             console.log('[venta-product] prod data:', JSON.stringify(prod));
             // Only insert if we have real product data — avoids creating
             // "Sin producto" / precio=0 rows on the first management POST
             // (before the product modal has sent anything).
             if (!prod || (!prod.nombre_producto && !prod.nombre && !prod.name && !prod.product_id && !prod.id)) {
               console.log('[venta-product] skipping contact_products insert — no product data in body');
-              return;
+              return null;
             }
             const productName = normalizeText(
               prod?.nombre_producto || prod?.nombre || prod?.name
@@ -20782,7 +20782,7 @@ export const handler = async (event) => {
                 contactId,
                 productName
               });
-              return;
+              return null;
             }
 
             const resolvedProductId = await resolveProductId(productName, precioVal, orgId, explicitId);
@@ -20861,11 +20861,11 @@ export const handler = async (event) => {
               sellerOrigin: "interno",
               fechaVenta: fechaAlta,
               documentoCobranza: cobranzaDocumento,
-              saleGroupId: null,
-              parentSaleId: null,
-              gestionId: null,
-              titularContactId: contactId,
-              relation: null
+              saleGroupId: saleOptions?.saleGroupId ?? null,
+              parentSaleId: saleOptions?.parentSaleId ?? null,
+              gestionId: gestionId ?? null,
+              titularContactId: saleOptions?.titularContactId ?? contactId,
+              relation: saleOptions?.relation ?? null
             }, orgId);
 
             if (contactId === ventaContactId && !ventaSmsProductId) {
@@ -20886,6 +20886,8 @@ export const handler = async (event) => {
                 [saleId, contactProductId]
               );
             }
+
+            return saleId || null;
           };
 
           // Find-or-create a contact from a payload (used for family sales).
@@ -20948,8 +20950,21 @@ export const handler = async (event) => {
           };
 
           // Main sale product.
+          let mainSaleId = null;
+          let ventaSaleGroupId = null;
           if (leadData && ventaContactId) {
-            await insertContactProduct(ventaContactId, ventaOrganizationId, productData, medioPago);
+            ventaSaleGroupId = crypto.randomUUID();
+            mainSaleId = await insertContactProduct(
+              ventaContactId,
+              ventaOrganizationId,
+              productData,
+              medioPago,
+              {
+                saleGroupId: ventaSaleGroupId,
+                titularContactId: ventaContactId,
+                relation: "titular"
+              }
+            );
           }
 
           // Family sales: create a contact and its product(s) for each item.
@@ -21002,8 +21017,22 @@ export const handler = async (event) => {
 
             const famMedioPago = fam?.medio_pago || fam?.medioPago || medioPago || null;
             if (hasAssignedProducts) {
+              if (!ventaSaleGroupId) {
+                ventaSaleGroupId = crypto.randomUUID();
+              }
               for (const famProduct of famProducts) {
-                await insertContactProduct(famContactId, ventaOrganizationId, famProduct, famMedioPago);
+                await insertContactProduct(
+                  famContactId,
+                  ventaOrganizationId,
+                  famProduct,
+                  famMedioPago,
+                  {
+                    saleGroupId: ventaSaleGroupId,
+                    parentSaleId: mainSaleId,
+                    titularContactId: famContactId,
+                    relation: fam?.relation || fam?.relationship || fam?.parentesco || "familiar"
+                  }
+                );
               }
             }
 
