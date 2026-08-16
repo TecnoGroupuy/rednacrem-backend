@@ -138,7 +138,8 @@ export async function createManualUser(input, actor) {
   }
 
   const existingUser = await findUserByEmail(input.email);
-  if (existingUser) {
+  const isReactivation = existingUser && existingUser.status === "inactive";
+  if (existingUser && !isReactivation) {
     throw conflict("A user with that email already exists");
   }
 
@@ -151,30 +152,48 @@ export async function createManualUser(input, actor) {
     const cognitoSub = extractCognitoSub(cognitoUser);
 
     return await withTransaction(async (client) => {
-      const user = await insertUser(
-        {
-          cognitoSub,
-          email: input.email,
-          nombre: input.nombre,
-          apellido: input.apellido,
-          telefono: input.telefono,
-          roleKey: input.role,
-          status: input.status,
-          createdBy: actor.id,
-          approvedBy: input.status === "approved" ? actor.id : null,
-          approvedAt: input.status === "approved" ? new Date() : null,
-          rejectedBy: input.status === "rejected" ? actor.id : null,
-          rejectedAt: input.status === "rejected" ? new Date() : null,
-          rejectionReason: input.status === "rejected" ? input.reason || "Rejected at creation" : null,
-          lastLoginAt: null,
-        },
-        client,
-      );
+      const userInput = {
+        cognitoSub,
+        email: input.email,
+        nombre: input.nombre,
+        apellido: input.apellido,
+        telefono: input.telefono,
+        roleKey: input.role,
+        status: input.status,
+        createdBy: actor.id,
+        approvedBy: input.status === "approved" ? actor.id : null,
+        approvedAt: input.status === "approved" ? new Date() : null,
+        rejectedBy: input.status === "rejected" ? actor.id : null,
+        rejectedAt: input.status === "rejected" ? new Date() : null,
+        rejectionReason: input.status === "rejected" ? input.reason || "Rejected at creation" : null,
+        lastLoginAt: null,
+      };
+      const user = isReactivation
+        ? await updateUserById(
+            existingUser.id,
+            {
+              cognito_sub: userInput.cognitoSub,
+              email: userInput.email,
+              nombre: userInput.nombre,
+              apellido: userInput.apellido,
+              telefono: userInput.telefono,
+              role_key: userInput.roleKey,
+              status: userInput.status,
+              approved_by: userInput.approvedBy,
+              approved_at: userInput.approvedAt,
+              rejected_by: userInput.rejectedBy,
+              rejected_at: userInput.rejectedAt,
+              rejection_reason: userInput.rejectionReason,
+              last_login_at: userInput.lastLoginAt,
+            },
+            client,
+          )
+        : await insertUser(userInput, client);
 
       await insertRoleHistory(
         {
           userId: user.id,
-          oldRole: null,
+          oldRole: isReactivation ? existingUser.role_key : null,
           newRole: input.role,
           changedBy: actor.id,
           reason: input.reason || "Manual user creation",
@@ -185,7 +204,7 @@ export async function createManualUser(input, actor) {
       await insertStatusHistory(
         {
           userId: user.id,
-          oldStatus: null,
+          oldStatus: isReactivation ? existingUser.status : null,
           newStatus: input.status,
           changedBy: actor.id,
           reason: input.reason || "Manual user creation",
