@@ -32553,6 +32553,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
            FROM organization_users ou
            JOIN users u ON u.id = ou.user_id
            WHERE ou.organization_id = $1
+             AND ou.activo = true
            ORDER BY u.nombre ASC`,
           [orgId]
         );
