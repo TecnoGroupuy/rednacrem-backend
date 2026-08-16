@@ -14,6 +14,7 @@ import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
 import { normalizePhone as normalizePhoneValidation } from "./src/lib/validation.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
+import { deleteUser as deleteCognitoUser } from "./src/services/cognitoService.js";
 import { emitRealtime } from "./src/monitoring/realtimeBus.js";
 import { findCurrentUserFromClaims } from "./src/services/userService.js";
 import { generateCertificatePdf, buildClientDocumentFilename } from "./src/lib/certificatePdf.js";
@@ -32621,6 +32622,96 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to assign user to org", error: error.message });
+    }
+  }
+
+  const orgUserFullDeleteMatch = path.match(/\/organizations\/([^/]+)\/users\/([^/]+)\/full$/);
+
+  if (method === "DELETE" && orgUserFullDeleteMatch) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, ["superadministrador"]);
+      if (roleError) return roleError;
+
+      const orgId = orgUserFullDeleteMatch[1];
+      const targetUserId = orgUserFullDeleteMatch[2];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+
+        const userRes = await client.query(
+          `
+          SELECT email
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [targetUserId]
+        );
+
+        if (!userRes.rows.length) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Usuario no encontrado" });
+        }
+
+        const email = userRes.rows[0]?.email || null;
+
+        if (email) {
+          try {
+            await deleteCognitoUser(email);
+          } catch (error) {
+            const errorName = String(error?.name || error?.Code || error?.code || "");
+            const errorMessage = String(error?.message || "");
+            const isUserNotFound =
+              errorName === "UserNotFoundException" ||
+              /UserNotFoundException/i.test(errorName) ||
+              /user.*not.*found/i.test(errorMessage);
+
+            if (!isUserNotFound) {
+              await client.query("ROLLBACK");
+              throw error;
+            }
+          }
+        }
+
+        await client.query(
+          `
+          UPDATE users
+          SET status = 'inactive'
+          WHERE id = $1
+          `,
+          [targetUserId]
+        );
+
+        await client.query(
+          `
+          UPDATE organization_users
+          SET activo = false
+          WHERE user_id = $1
+          `,
+          [targetUserId]
+        );
+
+        await client.query("COMMIT");
+        return json(200, { ok: true });
+      } catch (error) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {}
+        throw error;
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to fully remove user from org", error: error.message });
     }
   }
 
