@@ -2225,7 +2225,7 @@ function getClientUiStatus(row) {
     : "Control";
 }
 
-function buildContactSummarySelect(whereClause = "") {
+function buildContactSummarySelect(whereClause = "", contactProductsJoinClause = "") {
   return `
     SELECT
       c.id,
@@ -2250,6 +2250,7 @@ function buildContactSummarySelect(whereClause = "") {
     FROM contacts c
     LEFT JOIN contact_products cp
       ON cp.contact_id = c.id
+      ${contactProductsJoinClause}
     ${whereClause}
     GROUP BY
       c.id,
@@ -7776,13 +7777,17 @@ async function listContacts(organizationId) {
 
   try {
     await client.connect();
+    const contactProductsColumns = await getTableColumns(client, "contact_products");
     const values = [];
     const whereClause = organizationId ? "WHERE c.organization_id = $1" : "";
+    const contactProductsJoinClause = organizationId && contactProductsColumns.has("organization_id")
+      ? "AND cp.organization_id = $1"
+      : "";
     if (organizationId) values.push(organizationId);
 
     const result = await client.query(
       `
-      ${buildContactSummarySelect(whereClause)}
+      ${buildContactSummarySelect(whereClause, contactProductsJoinClause)}
       ORDER BY created_at DESC, nombre ASC, apellido ASC
       `,
       values
@@ -7804,6 +7809,8 @@ async function listClientsDirectory({
 
   try {
     await client.connect();
+    const contactProductsColumns = await getTableColumns(client, "contact_products");
+    const contactRelationsColumns = await getTableColumns(client, "contact_relations");
 
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(200, Math.max(1, Number(limit) || 50));
@@ -7830,6 +7837,12 @@ async function listClientsDirectory({
       values.push(organizationId);
       whereParts.push(`s.organization_id = $${values.length}`);
     }
+    const summaryContactProductsJoinClause = organizationId && contactProductsColumns.has("organization_id")
+      ? "AND cp.organization_id = $1"
+      : "";
+    const rankedContactProductsJoinClause = organizationId && contactProductsColumns.has("organization_id")
+      ? "AND rp.organization_id = $1"
+      : "";
 
     if (searchText) {
       const digits = searchText.replace(/[^\d]/g, "");
@@ -7872,6 +7885,7 @@ async function listClientsDirectory({
             JOIN contact_relations cr
               ON cr.contact_id_a = dm.contact_id
               OR cr.contact_id_b = dm.contact_id
+              ${organizationId && contactRelationsColumns.has("organization_id") ? `AND cr.organization_id = ${orgParam}` : ""}
           ),
           match_meta AS (
             SELECT
@@ -7901,7 +7915,7 @@ async function listClientsDirectory({
     const countResult = await client.query(
       `
       WITH summary AS (
-        ${buildContactSummarySelect()}
+        ${buildContactSummarySelect("", summaryContactProductsJoinClause)}
       ),
       ${matchMetaCte},
       ranked AS (
@@ -7920,6 +7934,7 @@ async function listClientsDirectory({
         ${matchMetaJoin}
         JOIN contact_products rp
           ON rp.contact_id = s.id
+          ${rankedContactProductsJoinClause}
         ${whereClause}
       )
       SELECT COUNT(*)::int AS total
@@ -7939,7 +7954,7 @@ async function listClientsDirectory({
     const result = await client.query(
       `
       WITH summary AS (
-        ${buildContactSummarySelect()}
+        ${buildContactSummarySelect("", summaryContactProductsJoinClause)}
       ),
       ${matchMetaCte},
       ranked AS (
@@ -7968,6 +7983,7 @@ async function listClientsDirectory({
         ${matchMetaJoin}
         JOIN contact_products rp
           ON rp.contact_id = s.id
+          ${rankedContactProductsJoinClause}
         ${whereClause}
       )
       SELECT
@@ -8198,15 +8214,19 @@ async function getClientMetrics(organizationId) {
 
   try {
     await client.connect();
+    const contactProductsColumns = await getTableColumns(client, "contact_products");
     const values = [];
     const summaryWhere = organizationId ? "WHERE c.organization_id = $1" : "";
     const productWhere = organizationId ? "AND organization_id = $1" : "";
+    const summaryContactProductsJoinClause = organizationId && contactProductsColumns.has("organization_id")
+      ? "AND cp.organization_id = $1"
+      : "";
     if (organizationId) values.push(organizationId);
 
     const result = await client.query(
       `
       WITH summary AS (
-        ${buildContactSummarySelect(summaryWhere)}
+        ${buildContactSummarySelect(summaryWhere, summaryContactProductsJoinClause)}
       ),
       active_products AS (
         SELECT precio
@@ -20258,6 +20278,41 @@ export const handler = async (event) => {
 
         let effectiveResultado = resultadoInput;
         let nuevaOla = currentOla;
+        if (effectiveResultado === "no_contesta") {
+          let incontactableEnabled = false;
+          try {
+            const batchConfigRes = await client.query(
+              `
+              SELECT incontactable_enabled
+              FROM lead_batches
+              WHERE id = $1
+              LIMIT 1
+              `,
+              [batchId]
+            );
+            incontactableEnabled = batchConfigRes.rows[0]?.incontactable_enabled === true;
+          } catch {}
+
+          if (incontactableEnabled) {
+            const noContactaRes = await client.query(
+              `
+              SELECT COUNT(*)::int AS total
+              FROM lead_management_history
+              WHERE contact_id = $1
+                AND batch_id = $2
+                AND resultado = 'no_contesta'
+              `,
+              [leadId, batchId]
+            );
+            const noContactaCount = Number(noContactaRes.rows[0]?.total || 0);
+            if (noContactaCount >= 4) {
+              const incontactableCatalog = await getLeadStatusCatalogEntry(client, "incontactable");
+              if (incontactableCatalog) {
+                effectiveResultado = "incontactable";
+              }
+            }
+          }
+        }
         const agendaStateValues = ["rellamar", "seguimiento"];
         const preservedAgendaEstado = agendaStateValues.includes(currentEstadoVenta)
           ? currentEstadoVenta
@@ -21682,6 +21737,7 @@ export const handler = async (event) => {
             estado: row.estado,
             seller_id: row.seller_id,
             max_intentos: row.max_intentos,
+            incontactable_enabled: row.incontactable_enabled === true,
             fecha_vencimiento: row.fecha_vencimiento,
             criterios: row.criterios,
             franja_ola1_inicio: row.franja_ola1_inicio,
@@ -23064,6 +23120,12 @@ export const handler = async (event) => {
       const maxIntentos = Number.isFinite(Number(maxIntentosRaw))
         ? Math.max(1, Number(maxIntentosRaw))
         : 3;
+      const incontactableEnabled =
+        body?.incontactable_enabled !== undefined
+          ? Boolean(body.incontactable_enabled)
+          : body?.incontactableEnabled !== undefined
+            ? Boolean(body.incontactableEnabled)
+            : false;
       const fechaVencimiento = body?.fecha_vencimiento || body?.fechaVencimiento || null;
       let criteriosJson = body?.criterios ?? null;
       if (typeof criteriosJson === "string") {
@@ -23096,6 +23158,7 @@ export const handler = async (event) => {
             seller_id,
             asignado_a,
             max_intentos,
+            incontactable_enabled,
             fecha_vencimiento,
             criterios,
             franja_ola1_inicio,
@@ -23105,7 +23168,7 @@ export const handler = async (event) => {
             dias_entre_olas,
             organization_id
           )
-          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
           RETURNING *
           `,
           [
@@ -23114,6 +23177,7 @@ export const handler = async (event) => {
             dbUser?.id || null,
             sellerIds[0] || null,
             maxIntentos,
+            incontactableEnabled,
             fechaVencimiento,
             criterios,
             franjaOla1Inicio,
@@ -23203,6 +23267,16 @@ export const handler = async (event) => {
       if (body?.estado) {
         updates.push(`estado = $${idx}`);
         values.push(body.estado);
+        idx += 1;
+      }
+
+      if (body?.incontactable_enabled !== undefined || body?.incontactableEnabled !== undefined) {
+        updates.push(`incontactable_enabled = $${idx}`);
+        values.push(
+          body?.incontactable_enabled !== undefined
+            ? Boolean(body.incontactable_enabled)
+            : Boolean(body.incontactableEnabled)
+        );
         idx += 1;
       }
 
@@ -25725,6 +25799,74 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, {
         ok: false,
         message: "Failed to list no-llamar entries",
+        error: error.message
+      });
+    }
+  }
+
+  const leadReactivateMatch = path.match(/\/leads\/([^/]+)\/reactivate$/);
+  if (method === "POST" && leadReactivateMatch) {
+    const leadId = leadReactivateMatch?.[1];
+    if (!leadId || !isValidUuid(leadId)) {
+      return json(400, { ok: false, message: "Lead id requerido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const values = [leadId];
+        let orgClause = "";
+        if (organizationId) {
+          values.push(organizationId);
+          orgClause = ` AND organization_id = $2`;
+        }
+        const updateRes = await client.query(
+          `
+          UPDATE lead_contact_status
+          SET estado_venta = 'nuevo',
+              intentos = 0,
+              ultimo_intento_at = NULL,
+              updated_at = now()
+          WHERE contact_id = $1${orgClause}
+          RETURNING contact_id
+          `,
+          values
+        );
+        if (!updateRes.rows.length) {
+          return json(404, { ok: false, message: "Lead no encontrado" });
+        }
+        return json(200, { ok: true, reactivated: true, contact_id: leadId });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to reactivate lead",
         error: error.message
       });
     }
