@@ -20383,19 +20383,10 @@ export const handler = async (event) => {
             }
           }
         }
-        const agendaStateValues = ["rellamar", "seguimiento"];
-        const preservedAgendaEstado = agendaStateValues.includes(currentEstadoVenta)
-          ? currentEstadoVenta
-          : (agendaStateValues.includes(activeAgendaRow?.agenda_tipo) ? activeAgendaRow.agenda_tipo : null);
-        const shouldPreserveAgendaState =
-          effectiveResultado === "no_contesta" &&
-          (agendaStateValues.includes(currentEstadoVenta) || hasActiveAgenda) &&
-          Boolean(preservedAgendaEstado);
-        const nextEstadoVenta = shouldPreserveAgendaState ? preservedAgendaEstado : effectiveResultado;
-        const nextProximaAccion = shouldPreserveAgendaState
-          ? (currentProximaAccion || activeAgendaRow?.fecha_agenda || proximaAccion || null)
-          : proximaAccion;
-        if (effectiveResultado === "no_contesta" && !shouldPreserveAgendaState && currentOla === 1) {
+        const shouldPreserveAgendaState = false;
+        const nextEstadoVenta = effectiveResultado;
+        const nextProximaAccion = proximaAccion;
+        if (effectiveResultado === "no_contesta" && currentOla === 1) {
           nuevaOla = 2;
         }
 
@@ -21197,7 +21188,7 @@ export const handler = async (event) => {
           }
         }
 
-        if (["rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
+        if (["no_contesta", "incontactable", "rechazo", "venta", "dato_erroneo"].includes(effectiveResultado)) {
           await client.query(
             `
             UPDATE lead_agenda
