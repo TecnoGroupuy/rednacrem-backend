@@ -1009,6 +1009,65 @@ async function findDuplicateContactByDocumentoInOrganization(
   return duplicateRes.rows[0]?.id || null;
 }
 
+async function resolveLeadOrContactId(client, rawId, organizationId, options = {}) {
+  const requestedId = String(rawId || "").trim();
+  if (!requestedId || !isValidUuid(requestedId)) {
+    return { requestedId: null, lead: null, contactId: null, found: false };
+  }
+
+  const includeLeadPhones = options?.includeLeadPhones === true;
+  const leadCols = await getLeadContactColumns(client);
+  const dCols = leadCols?.d || new Set();
+  const hasContactIdCol = dCols.has("contact_id");
+  const leadPhoneSelect = includeLeadPhones
+    ? `, telefono, celular`
+    : "";
+  const leadRes = await client.query(
+    `
+    SELECT id${leadPhoneSelect}, ${hasContactIdCol ? "contact_id" : "NULL::uuid AS contact_id"}
+    FROM datos_para_trabajar
+    WHERE id = $1
+      AND ($2::uuid IS NULL OR organization_id = $2)
+    LIMIT 1
+    `,
+    [requestedId, organizationId]
+  );
+
+  const lead = leadRes.rows[0] || null;
+  if (lead) {
+    return {
+      requestedId,
+      lead,
+      contactId: lead.contact_id || null,
+      found: true,
+      foundVia: "lead"
+    };
+  }
+
+  const contactRes = await client.query(
+    `
+    SELECT id
+    FROM contacts
+    WHERE id = $1
+      AND ($2::uuid IS NULL OR organization_id = $2)
+    LIMIT 1
+    `,
+    [requestedId, organizationId]
+  );
+  const contactId = contactRes.rows[0]?.id || null;
+  if (!contactId) {
+    return { requestedId, lead: null, contactId: null, found: false, foundVia: null };
+  }
+
+  return {
+    requestedId,
+    lead: null,
+    contactId,
+    found: true,
+    foundVia: "contact"
+  };
+}
+
 const recuperoSearchCache = new Map();
 const recuperoSearchInflight = new Map();
 
@@ -19613,27 +19672,12 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
-        const leadCols = await getLeadContactColumns(client);
-        const dCols = leadCols?.d || new Set();
-        const hasContactIdCol = dCols.has("contact_id");
-
-        const leadRes = await client.query(
-          `
-          SELECT id, nombre, apellido, telefono, celular, ${hasContactIdCol ? "contact_id" : "NULL::uuid AS contact_id"}
-          FROM datos_para_trabajar
-          WHERE id = $1
-            AND ($2::uuid IS NULL OR organization_id = $2)
-          LIMIT 1
-          `,
-          [leadId, organizationId]
-        );
-
-        const lead = leadRes.rows[0];
-        if (!lead) {
+        const resolvedLead = await resolveLeadOrContactId(client, leadId, organizationId);
+        if (!resolvedLead.found) {
           return json(404, { ok: false, message: "Lead not found" });
         }
 
-        const contactId = lead.contact_id || null;
+        const contactId = resolvedLead.contactId || null;
 
         const normalizeDigits = (value) => String(value || "").replace(/\D/g, "");
         const isDummyNumber = (value) => {
@@ -20005,8 +20049,8 @@ export const handler = async (event) => {
     const match =
       path.match(/\/leads\/([^/]+)\/management-history$/) ||
       path.match(/\/leads\/([^/]+)\/history$/);
-    const contactId = match?.[1];
-    if (!contactId || !isValidUuid(contactId)) {
+    const requestedId = match?.[1];
+    if (!requestedId || !isValidUuid(requestedId)) {
       return json(400, { ok: false, message: "Contact id requerido" });
     }
     try {
@@ -20037,6 +20081,12 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const resolvedLead = await resolveLeadOrContactId(client, requestedId, organizationId);
+        if (!resolvedLead.found || !resolvedLead.contactId) {
+          return json(404, { ok: false, message: "Lead not found" });
+        }
+        const contactId = resolvedLead.contactId;
+
         const hasMgmtId = await columnExists(client, "lead_management_history", "id");
         const hasMgmtOrgId = await columnExists(client, "lead_management_history", "organization_id");
         const hasSupervisorCorrectionColumn = await columnExists(
