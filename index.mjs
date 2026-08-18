@@ -975,6 +975,40 @@ function buildNormalizedPhoneSql(columnRef) {
   `;
 }
 
+const DUPLICATE_DOCUMENT_MESSAGE =
+  "El documento ya pertenece a otro cliente. Si es un familiar, verificá que tenga su propio documento, o dejalo vacío para completarlo después.";
+
+async function findDuplicateContactByDocumentoInOrganization(
+  client,
+  documento,
+  organizationId,
+  excludeContactId = null
+) {
+  const normalizedDocumento = normalizeText(documento) || null;
+  if (!normalizedDocumento || !organizationId) return null;
+
+  const values = [normalizedDocumento, organizationId];
+  let excludeClause = "";
+  if (excludeContactId) {
+    values.push(excludeContactId);
+    excludeClause = `AND id != $${values.length}`;
+  }
+
+  const duplicateRes = await client.query(
+    `
+    SELECT id
+    FROM contacts
+    WHERE documento = $1
+      AND organization_id = $2
+      ${excludeClause}
+    LIMIT 1
+    `,
+    values
+  );
+
+  return duplicateRes.rows[0]?.id || null;
+}
+
 const recuperoSearchCache = new Map();
 const recuperoSearchInflight = new Map();
 
@@ -12695,6 +12729,23 @@ export const handler = async (event) => {
             }
           }
 
+          const duplicateDocumentoId = await findDuplicateContactByDocumentoInOrganization(
+            client,
+            fields.documento,
+            organizationId,
+            existingId || null
+          );
+          if (duplicateDocumentoId) {
+            return {
+              id: null,
+              fields,
+              error: {
+                status: 409,
+                message: DUPLICATE_DOCUMENT_MESSAGE
+              }
+            };
+          }
+
           if (existingId) {
             const updates = [];
             const values = [];
@@ -14100,6 +14151,17 @@ export const handler = async (event) => {
       await client.connect();
       try {
         await client.query("BEGIN");
+
+        const duplicateDocumentoId = await findDuplicateContactByDocumentoInOrganization(
+          client,
+          documento,
+          organizationId,
+          contactId
+        );
+        if (duplicateDocumentoId) {
+          await client.query("ROLLBACK");
+          return json(409, { ok: false, message: DUPLICATE_DOCUMENT_MESSAGE });
+        }
 
         const contactRes = await client.query(
           `
@@ -17033,6 +17095,23 @@ export const handler = async (event) => {
             }
           }
 
+          const duplicateDocumentoId = await findDuplicateContactByDocumentoInOrganization(
+            client,
+            fields.documento,
+            organizationId,
+            existingId || null
+          );
+          if (duplicateDocumentoId) {
+            return {
+              id: null,
+              fields,
+              error: {
+                status: 409,
+                message: DUPLICATE_DOCUMENT_MESSAGE
+              }
+            };
+          }
+
           if (existingId) {
             await client.query(
               `
@@ -19841,6 +19920,32 @@ export const handler = async (event) => {
           }
 
           if (contactWhere) {
+            let targetContactId = hasContactIdCol && existing.contact_id ? existing.contact_id : null;
+            const documentoToSync = hasField("documento") ? normTextOrNull(body?.documento) : existing.documento;
+            if (!targetContactId && documentoToSync) {
+              const targetContactRes = await client.query(
+                `
+                SELECT id
+                FROM contacts
+                WHERE documento = $1
+                  AND organization_id = $2
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                `,
+                [documentoToSync, organizationId]
+              );
+              targetContactId = targetContactRes.rows[0]?.id || null;
+            }
+            const duplicateDocumentoId = await findDuplicateContactByDocumentoInOrganization(
+              client,
+              documentoToSync,
+              organizationId,
+              targetContactId
+            );
+            if (duplicateDocumentoId) {
+              return json(409, { ok: false, message: DUPLICATE_DOCUMENT_MESSAGE });
+            }
+
             const contactUpdates = [];
             const contactSetValues = [];
             let sIdx = cIdx;
@@ -20698,6 +20803,17 @@ export const handler = async (event) => {
             }
           }
 
+          const duplicateVentaDocumentoId = await findDuplicateContactByDocumentoInOrganization(
+            client,
+            candidateDocumento,
+            ventaOrganizationId,
+            ventaContactId || null
+          );
+          if (duplicateVentaDocumentoId) {
+            await client.query("ROLLBACK");
+            return json(409, { ok: false, message: DUPLICATE_DOCUMENT_MESSAGE });
+          }
+
           const cpCols = await getTableColumns(client, "contact_products");
           if (ventaContactId) {
             await ensureNoActiveAlta(ventaContactId, ventaOrganizationId);
@@ -21095,6 +21211,30 @@ export const handler = async (event) => {
               return json(400, {
                 ok: false,
                 message: `Familiar inválido (${familyLabel}): nombre, apellido y documento son obligatorios`,
+                family_index: familyIndex
+              });
+            }
+
+            const famPreferredContactId = isValidUuid(String(fam?.contact?.contact_id || ""))
+              ? String(fam.contact.contact_id)
+              : null;
+            const famResolvedContactId = await resolveExistingContactId(
+              fam?.contact || {},
+              ventaOrganizationId,
+              famPreferredContactId,
+              { skipPhoneMatch: true }
+            );
+            const duplicateFamDocumentoId = await findDuplicateContactByDocumentoInOrganization(
+              client,
+              famDocumento,
+              ventaOrganizationId,
+              famResolvedContactId || famPreferredContactId
+            );
+            if (duplicateFamDocumentoId) {
+              await client.query("ROLLBACK");
+              return json(409, {
+                ok: false,
+                message: `${DUPLICATE_DOCUMENT_MESSAGE} (${familyLabel})`,
                 family_index: familyIndex
               });
             }
