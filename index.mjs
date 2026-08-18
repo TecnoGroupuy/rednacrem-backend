@@ -18160,11 +18160,11 @@ export const handler = async (event) => {
       } else if (tabNormalized === "recuperado") {
         tabWhere = "AND lcs.estado_venta IN ('venta')";
       } else {
-        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')";
+        tabWhere = "AND lcs.estado_venta NOT IN ('dato_erroneo')";
       }
       const tabWhereCount = tabWhere.replace(/^AND\s+/, "");
       const countExtra =
-        tabWhereCount && tabWhereCount !== "lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')"
+        tabWhereCount && tabWhereCount !== "lcs.estado_venta NOT IN ('dato_erroneo')"
           ? `AND ${tabWhereCount}`
           : "";
 
@@ -18257,7 +18257,7 @@ export const handler = async (event) => {
           WHERE lcs.assigned_to = $1
             AND COALESCE(lcs.estado_venta, '') != 'bloqueado'
             AND lb.estado IN ('activo', 'asignado')
-            AND lcs.estado_venta NOT IN ('dato_erroneo', 'incontactable')
+            AND lcs.estado_venta NOT IN ('dato_erroneo')
             AND ($2::text IS NULL OR lb.tipo = $2)
             AND ($5::text IS NULL OR lb.tipo != $5)
             AND ($6::uuid IS NULL OR lb.organization_id = $6)
@@ -20348,41 +20348,6 @@ export const handler = async (event) => {
 
         let effectiveResultado = resultadoInput;
         let nuevaOla = currentOla;
-        if (effectiveResultado === "no_contesta") {
-          let incontactableEnabled = false;
-          try {
-            const batchConfigRes = await client.query(
-              `
-              SELECT incontactable_enabled
-              FROM lead_batches
-              WHERE id = $1
-              LIMIT 1
-              `,
-              [batchId]
-            );
-            incontactableEnabled = batchConfigRes.rows[0]?.incontactable_enabled === true;
-          } catch {}
-
-          if (incontactableEnabled) {
-            const noContactaRes = await client.query(
-              `
-              SELECT COUNT(*)::int AS total
-              FROM lead_management_history
-              WHERE contact_id = $1
-                AND batch_id = $2
-                AND resultado = 'no_contesta'
-              `,
-              [leadId, batchId]
-            );
-            const noContactaCount = Number(noContactaRes.rows[0]?.total || 0);
-            if (noContactaCount >= 4) {
-              const incontactableCatalog = await getLeadStatusCatalogEntry(client, "incontactable");
-              if (incontactableCatalog) {
-                effectiveResultado = "incontactable";
-              }
-            }
-          }
-        }
         const agendaStateValues = ["rellamar", "seguimiento"];
         const preservedAgendaEstado = agendaStateValues.includes(currentEstadoVenta)
           ? currentEstadoVenta
@@ -21807,7 +21772,6 @@ export const handler = async (event) => {
             estado: row.estado,
             seller_id: row.seller_id,
             max_intentos: row.max_intentos,
-            incontactable_enabled: row.incontactable_enabled === true,
             fecha_vencimiento: row.fecha_vencimiento,
             criterios: row.criterios,
             franja_ola1_inicio: row.franja_ola1_inicio,
@@ -21898,23 +21862,6 @@ export const handler = async (event) => {
           [batchId, organizationId]
         );
 
-        const sellerIncontactableRes = await client.query(
-          `
-          SELECT
-            lcs.assigned_to,
-            u.nombre,
-            u.apellido,
-            COUNT(*)::int AS incontactables
-          FROM lead_contact_status lcs
-          LEFT JOIN users u ON u.id = lcs.assigned_to
-          WHERE lcs.batch_id = $1
-            AND lcs.estado_venta = 'incontactable'
-            AND lcs.organization_id = $2
-          GROUP BY lcs.assigned_to, u.nombre, u.apellido
-          `,
-          [batchId, organizationId]
-        );
-
         const totalValues = [batchId];
         const totalOrgClause = organizationId ? "AND organization_id = $2" : "";
         if (organizationId) totalValues.push(organizationId);
@@ -21975,7 +21922,6 @@ export const handler = async (event) => {
         );
         const totalVendidos = getTotal("venta");
         const totalNoContesta = getTotal("no_contesta");
-        const totalIncontactables = getTotal("incontactable");
         const totalRechazos = getTotal("rechazo");
         const totalDatoErroneo = getTotal("dato_erroneo");
         const totalNuevos = getTotal("nuevo");
@@ -21999,23 +21945,12 @@ export const handler = async (event) => {
           data: {
             total_contactos: totalContactos,
             estados: statusRes.rows,
-            incontactables_total: (sellerIncontactableRes.rows || []).reduce(
-              (sum, r) => sum + Number(r.incontactables || 0),
-              0
-            ),
-            incontactables_por_vendedor: (sellerIncontactableRes.rows || []).map((r) => ({
-              seller_id: r.assigned_to,
-              nombre: r.nombre,
-              apellido: r.apellido,
-              total: Number(r.incontactables || 0)
-            })),
             informe: {
               total_contactos: totalContactos,
               total_gestionados: totalGestionados,
               total_nuevos: totalNuevos,
               total_vendidos: totalVendidos,
               total_no_contesta: totalNoContesta,
-              total_incontactables: totalIncontactables,
               total_rechazos: totalRechazos,
               total_dato_erroneo: totalDatoErroneo,
               total_en_proceso: totalEnProceso,
@@ -23190,12 +23125,6 @@ export const handler = async (event) => {
       const maxIntentos = Number.isFinite(Number(maxIntentosRaw))
         ? Math.max(1, Number(maxIntentosRaw))
         : 3;
-      const incontactableEnabled =
-        body?.incontactable_enabled !== undefined
-          ? Boolean(body.incontactable_enabled)
-          : body?.incontactableEnabled !== undefined
-            ? Boolean(body.incontactableEnabled)
-            : false;
       const fechaVencimiento = body?.fecha_vencimiento || body?.fechaVencimiento || null;
       let criteriosJson = body?.criterios ?? null;
       if (typeof criteriosJson === "string") {
@@ -23228,7 +23157,6 @@ export const handler = async (event) => {
             seller_id,
             asignado_a,
             max_intentos,
-            incontactable_enabled,
             fecha_vencimiento,
             criterios,
             franja_ola1_inicio,
@@ -23238,7 +23166,7 @@ export const handler = async (event) => {
             dias_entre_olas,
             organization_id
           )
-          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           RETURNING *
           `,
           [
@@ -23247,7 +23175,6 @@ export const handler = async (event) => {
             dbUser?.id || null,
             sellerIds[0] || null,
             maxIntentos,
-            incontactableEnabled,
             fechaVencimiento,
             criterios,
             franjaOla1Inicio,
@@ -23337,16 +23264,6 @@ export const handler = async (event) => {
       if (body?.estado) {
         updates.push(`estado = $${idx}`);
         values.push(body.estado);
-        idx += 1;
-      }
-
-      if (body?.incontactable_enabled !== undefined || body?.incontactableEnabled !== undefined) {
-        updates.push(`incontactable_enabled = $${idx}`);
-        values.push(
-          body?.incontactable_enabled !== undefined
-            ? Boolean(body.incontactable_enabled)
-            : Boolean(body.incontactableEnabled)
-        );
         idx += 1;
       }
 
@@ -25869,74 +25786,6 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, {
         ok: false,
         message: "Failed to list no-llamar entries",
-        error: error.message
-      });
-    }
-  }
-
-  const leadReactivateMatch = path.match(/\/leads\/([^/]+)\/reactivate$/);
-  if (method === "POST" && leadReactivateMatch) {
-    const leadId = leadReactivateMatch?.[1];
-    if (!leadId || !isValidUuid(leadId)) {
-      return json(400, { ok: false, message: "Lead id requerido" });
-    }
-    try {
-      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
-
-      let authError = requireAuthenticated(event, authUser);
-      if (authError) return authError;
-
-      let dbError = requireDbUser(event, dbUser);
-      if (dbError) return dbError;
-
-      let statusError = requireApproved(event, dbUser);
-      if (statusError) return statusError;
-
-      let roleError = requireRole(event, dbUser, ["supervisor", "director", "superadministrador"]);
-      if (roleError) return roleError;
-
-      let organizationId = null;
-      try {
-        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
-      } catch (error) {
-        if (error?.status) {
-          return json(error.status, { ok: false, message: error.message });
-        }
-        throw error;
-      }
-
-      const client = createDbClient();
-      await client.connect();
-      try {
-        const values = [leadId];
-        let orgClause = "";
-        if (organizationId) {
-          values.push(organizationId);
-          orgClause = ` AND organization_id = $2`;
-        }
-        const updateRes = await client.query(
-          `
-          UPDATE lead_contact_status
-          SET estado_venta = 'nuevo',
-              intentos = 0,
-              ultimo_intento_at = NULL,
-              updated_at = now()
-          WHERE contact_id = $1${orgClause}
-          RETURNING contact_id
-          `,
-          values
-        );
-        if (!updateRes.rows.length) {
-          return json(404, { ok: false, message: "Lead no encontrado" });
-        }
-        return json(200, { ok: true, reactivated: true, contact_id: leadId });
-      } finally {
-        await client.end();
-      }
-    } catch (error) {
-      return json(500, {
-        ok: false,
-        message: "Failed to reactivate lead",
         error: error.message
       });
     }
