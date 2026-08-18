@@ -19613,6 +19613,41 @@ export const handler = async (event) => {
           phoneFallback = fallbackRes.rows || [];
         }
 
+        const contactProductsColumns = await getTableColumns(client, "contact_products");
+        const relatedProductByContactId = new Map();
+        const mergedCandidates = [...relatedContacts, ...phoneFallback];
+        const productContactIds = Array.from(new Set(mergedCandidates.map((row) => row.id).filter(Boolean)));
+        if (productContactIds.length) {
+          const productValues = [productContactIds];
+          let productOrgClause = "";
+          if (organizationId && contactProductsColumns.has("organization_id")) {
+            productValues.push(organizationId);
+            productOrgClause = `AND cp.organization_id = $2`;
+          }
+          const relatedProductsRes = await client.query(
+            `
+            SELECT
+              cp.contact_id,
+              cp.nombre_producto,
+              ROW_NUMBER() OVER (
+                PARTITION BY cp.contact_id
+                ORDER BY
+                  CASE WHEN cp.estado = 'alta' THEN 0 ELSE 1 END,
+                  cp.fecha_alta DESC NULLS LAST,
+                  cp.created_at DESC NULLS LAST
+              ) AS rn
+            FROM contact_products cp
+            WHERE cp.contact_id = ANY($1::uuid[])
+              ${productOrgClause}
+            `,
+            productValues
+          );
+          for (const row of relatedProductsRes.rows || []) {
+            if (Number(row.rn) !== 1) continue;
+            relatedProductByContactId.set(row.contact_id, row.nombre_producto || null);
+          }
+        }
+
         const items = [];
         const seen = new Set();
         const pushUnique = (row) => {
@@ -19625,6 +19660,7 @@ export const handler = async (event) => {
           ].join("|");
           if (seen.has(key)) return;
           seen.add(key);
+          const productName = relatedProductByContactId.get(row.id) || null;
           items.push({
             id: row.id,
             nombre: row.nombre || null,
@@ -19632,7 +19668,12 @@ export const handler = async (event) => {
             telefono: row.telefono || null,
             celular: row.celular || null,
             documento: row.documento || null,
-            relation: relationByContactId.get(row.id) || null
+            relation: relationByContactId.get(row.id) || null,
+            nombre_producto: productName,
+            producto: productName,
+            nombreProducto: productName,
+            producto_nombre: productName,
+            servicio: productName
           });
         };
 
