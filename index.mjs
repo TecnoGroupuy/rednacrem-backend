@@ -12724,7 +12724,7 @@ export const handler = async (event) => {
                 updateValues.push(organizationId);
                 orgClause = `AND organization_id = $${updateValues.length}`;
               }
-              await client.query(
+              const updateRes = await client.query(
                 `
                 UPDATE contacts
                 SET ${updates.join(", ")}, updated_at = now()
@@ -12733,6 +12733,31 @@ export const handler = async (event) => {
                 `,
                 updateValues
               );
+              if (!updateRes.rowCount) {
+                return {
+                  id: null,
+                  fields,
+                  error: { status: 403, message: "contact_id no pertenece a esta organización" }
+                };
+              }
+            } else if (organizationId) {
+              const ownershipRes = await client.query(
+                `
+                SELECT 1
+                FROM contacts
+                WHERE id = $1
+                  AND organization_id = $2
+                LIMIT 1
+                `,
+                [existingId, organizationId]
+              );
+              if (!ownershipRes.rows.length) {
+                return {
+                  id: null,
+                  fields,
+                  error: { status: 403, message: "contact_id no pertenece a esta organización" }
+                };
+              }
             }
             return { id: existingId, fields };
           }
@@ -17240,6 +17265,10 @@ export const handler = async (event) => {
         };
 
         const main = await upsertContact(contactPayload);
+        if (main?.error) {
+          await client.query("ROLLBACK");
+          return json(main.error.status || 400, { ok: false, message: main.error.message });
+        }
         if (!main?.id) {
           await client.query("ROLLBACK");
           return json(422, { ok: false, message: "No se pudo crear o actualizar el contacto" });
