@@ -356,7 +356,7 @@ export function generateCertificatePdf(payload) {
     cursorY = logoY - 18;
   }
 
-  const title = "CERTIFICADO DE COBERTURA - CREMACION FUNERARIA";
+  const title = "CERTIFICADO DE CONTRATACION DE CREMACION";
   const titleFontSize = 13;
   const titleWidth = estimateTextWidth(title, titleFontSize);
   contentLines.push(`BT /F2 ${titleFontSize} Tf ${((PAGE_WIDTH - titleWidth) / 2).toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(title)}) Tj ET`);
@@ -374,7 +374,7 @@ export function generateCertificatePdf(payload) {
 
   const body1 = [
     "A quien corresponda:",
-    `Por medio de la presente se deja constancia que ${[client.nombre, client.apellido].filter(Boolean).join(" ")} poseedor del documento de identidad ${client.documento || "-"} con la cobertura de la Red Nacional de Crematorios vigente al dia de la fecha, tras corroborar por su afiliacion no existe atrasos en los pagos mensualidad. La contratacion de la cobertura se produjo ${saleDateLabel} con un plazo de carencia de ${carenciaMeses} meses para la adquisicion de derechos. Una vez transcurrido este periodo de tiempo, el cliente contara con los derechos de cobertura transferibles del servicio de cremacion funeraria de restos de la Red Nacional de Crematorios. La misma incluye traslado de restos, urna cineraria, servicios notariales y sala de cremacion privada, a coordinarse por RED.NA.CREM dentro de los limites del territorio nacional, siempre y cuando el titular del servicio se encuentre al dia con las cuotas de la afiliacion.`
+    `Por medio de la presente se deja constancia que ${[client.nombre, client.apellido].filter(Boolean).join(" ")} poseedor del documento de identidad ${client.documento || "-"} ha contratado el servicio de la Red Nacional de Crematorios con fecha ${saleDateLabel}, encontrandose al dia con los pagos de su mensualidad. La cobertura contara con un plazo de carencia de ${carenciaMeses} meses para la adquisicion de derechos. Una vez transcurrido este periodo, el cliente contara con los derechos del servicio de cremacion funeraria de restos de la Red Nacional de Crematorios, transferibles conforme a las condiciones de afiliacion. La misma incluye traslado de restos, urna cineraria, servicios notariales y sala de cremacion privada, a coordinarse por RED.NA.CREM dentro de los limites del territorio nacional, siempre y cuando el titular del servicio se encuentre al dia con las cuotas de la afiliacion.`
   ];
 
   for (const paragraph of body1) {
