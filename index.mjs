@@ -2621,6 +2621,17 @@ function parseDate(str) {
   if (!str?.trim()) return null;
   if (str.includes(";")) return null;
   const datePart = str.trim().split(" ")[0];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    const [year, month, day] = datePart.split("-");
+    const d = parseInt(day, 10);
+    const m = parseInt(month, 10);
+    const y = parseInt(year, 10);
+    if (!Number.isFinite(d) || !Number.isFinite(m) || !Number.isFinite(y)) return null;
+    if (d < 1 || d > 31) return null;
+    if (m < 1 || m > 12) return null;
+    if (y < 1900 || y > 2100) return null;
+    return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  }
   const parts = datePart.split("/");
   if (parts.length !== 3) return null;
   let [day, month, year] = parts;
