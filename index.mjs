@@ -14904,6 +14904,13 @@ export const handler = async (event) => {
         throw error;
       }
 
+      if (organizationId !== "9223d62d-f558-4f4c-b9bd-9dcea9888a0e") {
+        return json(501, {
+          ok: false,
+          message: "Certificado no disponible para esta organización todavía"
+        });
+      }
+
       const clientId = clientDocumentMatch[1];
       const data = await getClientDocumentData(clientId, organizationId);
 
