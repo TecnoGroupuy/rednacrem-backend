@@ -386,29 +386,6 @@ export function generateCertificatePdf(payload) {
     cursorY -= 7;
   }
 
-  const noteTitle = "Nota Importante:";
-  contentLines.push(`BT /F2 ${bodyFontSize} Tf ${margin.toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(noteTitle)}) Tj ET`);
-  const noteText = `Recuerde que el servicio a partir de la contratacion estara presente en su factura de ${medioPago} con un valor de $ ${Number(productPrice || 0).toLocaleString("es-UY")} mensuales con el detalle "ISMO.ASOCIACION DE CREMATORIOS".`;
-  const noteLines = wrapText(noteText, maxWidth - estimateTextWidth(noteTitle, bodyFontSize) - 6, bodyFontSize);
-  let noteX = margin + estimateTextWidth(noteTitle, bodyFontSize) + 6;
-  let first = true;
-  for (const line of noteLines) {
-    const x = first ? noteX : margin;
-    contentLines.push(`BT /F1 ${bodyFontSize} Tf ${x.toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(line)}) Tj ET`);
-    cursorY -= lineHeight;
-    first = false;
-  }
-  cursorY -= 7;
-
-  const medioPagoLabel = medioPago || "medio de pago";
-  const noteText2 = `${medioPagoLabel} es un medio de cobranza descentralizado y no tiene relacion alguna con el servicio contratado, no gestiona, no coordina, ni opera para dar servicios crematorios a traves de la Red Nacional de Crematorios.`;
-  const noteLines2 = wrapText(noteText2, maxWidth, bodyFontSize);
-  for (const line of noteLines2) {
-    contentLines.push(`BT /F1 ${bodyFontSize} Tf ${margin.toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(line)}) Tj ET`);
-    cursorY -= lineHeight;
-  }
-  cursorY -= 10;
-
   const contactLine = "Por gestiones comerciales o solicitudes de asistencia debe comunicarse al 08001106";
   const contactLines = wrapText(contactLine, maxWidth, bodyFontSize);
   for (const line of contactLines) {
