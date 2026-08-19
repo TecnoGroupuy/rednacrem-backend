@@ -18,6 +18,7 @@ export const CORS_HEADERS = {
   "Access-Control-Allow-Headers":
     "Authorization, Content-Type, x-file-name, x-filename, x-amz-date, x-api-key, x-amz-security-token, x-amz-user-agent",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+  "Access-Control-Expose-Headers": "Content-Disposition",
   "Access-Control-Allow-Credentials": "true",
 };
 

@@ -357,10 +357,10 @@ export function generateCertificatePdf(payload) {
   }
 
   const title = "CERTIFICADO DE COBERTURA - CREMACION FUNERARIA";
-  const titleFontSize = 11;
+  const titleFontSize = 13;
   const titleWidth = estimateTextWidth(title, titleFontSize);
   contentLines.push(`BT /F2 ${titleFontSize} Tf ${((PAGE_WIDTH - titleWidth) / 2).toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(title)}) Tj ET`);
-  cursorY -= 22;
+  cursorY -= 26;
 
   const cityDate = `Montevideo, ${saleDateLabel}.`;
   const dateFontSize = 10;
@@ -368,8 +368,8 @@ export function generateCertificatePdf(payload) {
   contentLines.push(`BT /F1 ${dateFontSize} Tf ${(PAGE_WIDTH - margin - dateWidth).toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(cityDate)}) Tj ET`);
   cursorY -= 20;
 
-  const lineHeight = 12;
-  const bodyFontSize = 10;
+  const lineHeight = 14;
+  const bodyFontSize = 11;
   const maxWidth = PAGE_WIDTH - margin * 2;
 
   const body1 = [
@@ -383,7 +383,7 @@ export function generateCertificatePdf(payload) {
       contentLines.push(`BT /F1 ${bodyFontSize} Tf ${margin.toFixed(2)} ${cursorY.toFixed(2)} Td (${escapePdfText(line)}) Tj ET`);
       cursorY -= lineHeight;
     }
-    cursorY -= 6;
+    cursorY -= 7;
   }
 
   const noteTitle = "Nota Importante:";
@@ -398,7 +398,7 @@ export function generateCertificatePdf(payload) {
     cursorY -= lineHeight;
     first = false;
   }
-  cursorY -= 6;
+  cursorY -= 7;
 
   const medioPagoLabel = medioPago || "medio de pago";
   const noteText2 = `${medioPagoLabel} es un medio de cobranza descentralizado y no tiene relacion alguna con el servicio contratado, no gestiona, no coordina, ni opera para dar servicios crematorios a traves de la Red Nacional de Crematorios.`;
@@ -453,8 +453,8 @@ export function generateCertificatePdf(payload) {
 
   const footerLine1 = "Red Nacional de Crematorios - Juncal 1437 Of 101 - Montevideo Uruguay";
   const footerLine2 = "Tel: 0800 1106 - Mail: contacto@rednacrem.com";
-  contentLines.push(`BT /F1 8 Tf ${((PAGE_WIDTH - estimateTextWidth(footerLine1, 8)) / 2).toFixed(2)} 34 Td (${escapePdfText(footerLine1)}) Tj ET`);
-  contentLines.push(`BT /F1 8 Tf ${((PAGE_WIDTH - estimateTextWidth(footerLine2, 8)) / 2).toFixed(2)} 22 Td (${escapePdfText(footerLine2)}) Tj ET`);
+  contentLines.push(`BT /F1 9 Tf ${((PAGE_WIDTH - estimateTextWidth(footerLine1, 9)) / 2).toFixed(2)} 34 Td (${escapePdfText(footerLine1)}) Tj ET`);
+  contentLines.push(`BT /F1 9 Tf ${((PAGE_WIDTH - estimateTextWidth(footerLine2, 9)) / 2).toFixed(2)} 22 Td (${escapePdfText(footerLine2)}) Tj ET`);
 
   const contentStream = contentLines.join("\n");
   const contentObj = addPdfObject(
