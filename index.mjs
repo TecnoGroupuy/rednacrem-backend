@@ -15416,23 +15416,111 @@ export const handler = async (event) => {
       if (bodyRaw === null) return json(400, { ok: false, message: "Invalid JSON body" });
       const body = normalizeEmptyStringsToNull(sanitizeUuidFields(bodyRaw));
       const productId = String(body?.product_id || "").trim();
+      const contactProductId = String(body?.contact_product_id || "").trim();
       if (!productId) return json(400, { ok: false, message: "product_id requerido" });
       if (!isValidUuid(productId)) return json(400, { ok: false, message: "product_id inválido" });
+      if (!contactProductId) {
+        return json(400, { ok: false, message: "contact_product_id requerido" });
+      }
+      if (!isValidUuid(contactProductId)) {
+        return json(400, { ok: false, message: "contact_product_id inválido" });
+      }
 
       const contactId = clientProductoMatch[1];
       const client = createDbClient();
       await client.connect();
       try {
         const cpCols = await getTableColumns(client, "contact_products");
-        const values = [productId, contactId];
+        const productCols = await getTableColumns(client, "products");
+        const productValues = [productId];
+        const productOrgClause =
+          organizationId && productCols.has("organization_id")
+            ? ` AND organization_id = $${productValues.length + 1}`
+            : "";
+        if (productOrgClause) productValues.push(organizationId);
+
+        const productRes = await client.query(
+          `
+          SELECT
+            id,
+            nombre,
+            precio
+            ${productCols.has("categoria") ? ", categoria" : ""}
+          FROM products
+          WHERE id = $1
+            ${productOrgClause}
+          LIMIT 1
+          `,
+          productValues
+        );
+
+        const productRow = productRes.rows[0];
+        if (!productRow) {
+          return json(404, { ok: false, message: "Producto no encontrado" });
+        }
+
+        const values = [];
+        const setParts = [];
+        let nextParam = 1;
+
+        values.push(productRow.id);
+        setParts.push(`product_id = $${nextParam}`);
+        nextParam += 1;
+
+        if (cpCols.has("nombre_producto")) {
+          values.push(productRow.nombre ?? null);
+          setParts.push(`nombre_producto = $${nextParam}`);
+          nextParam += 1;
+        }
+
+        if (cpCols.has("precio")) {
+          values.push(productRow.precio ?? null);
+          setParts.push(`precio = $${nextParam}`);
+          nextParam += 1;
+        }
+
+        if (cpCols.has("plan")) {
+          values.push(productCols.has("categoria") ? productRow.categoria ?? null : null);
+          setParts.push(`plan = $${nextParam}`);
+          nextParam += 1;
+        }
+
+        if (cpCols.has("updated_at")) {
+          setParts.push("updated_at = now()");
+        }
+
+        values.push(contactProductId);
+        const contactProductIdParam = nextParam;
+        nextParam += 1;
+
+        values.push(contactId);
+        const contactIdParam = nextParam;
+        nextParam += 1;
+
         const orgClause =
-          organizationId && cpCols.has("organization_id") ? " AND organization_id = $3" : "";
+          organizationId && cpCols.has("organization_id")
+            ? ` AND organization_id = $${nextParam}`
+            : "";
         if (orgClause) values.push(organizationId);
 
         const result = await client.query(
-          `UPDATE contact_products SET product_id = $1 WHERE contact_id = $2${orgClause}`,
+          `
+          UPDATE contact_products
+          SET ${setParts.join(", ")}
+          WHERE id = $${contactProductIdParam}
+            AND contact_id = $${contactIdParam}
+            ${orgClause}
+          RETURNING id
+          `,
           values
         );
+
+        if (!result.rows[0]) {
+          return json(404, {
+            ok: false,
+            message: "Producto del cliente no encontrado para este contacto"
+          });
+        }
 
         return json(200, { ok: true, updated: result.rowCount });
       } finally {
