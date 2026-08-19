@@ -28,7 +28,7 @@ export function buildClientDocumentFilename(client) {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return `Certificado_De_Cremación_${documento}.pdf`;
+  return `Certificado_De_Cremacion_${documento}.pdf`;
 }
 
 function estimateTextWidth(text, fontSize) {
