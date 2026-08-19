@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 
-const DEFAULT_LOGO_PATH = "Logo_certificado_rednacrem.png";
-const DEFAULT_STAMP_PATH = "Firma_certificado.png";
+const DEFAULT_LOGO_PATH = "src/assets/certificates/Logo_certificado_rednacrem.png";
+const DEFAULT_STAMP_PATH = "src/assets/certificates/Firma_certificado.png";
 
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
@@ -23,18 +23,12 @@ function formatDateEs(date) {
 }
 
 export function buildClientDocumentFilename(client) {
-  const rawName = [client?.nombre, client?.apellido].filter(Boolean).join(" ").trim() || "Cliente";
-  const name = rawName
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
   const documento = String(client?.documento || "Documento")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return `Certificado_Cremacion_${name}_${documento}.pdf`;
+  return `Certificado_De_Cremación_${documento}.pdf`;
 }
 
 function estimateTextWidth(text, fontSize) {
@@ -315,7 +309,8 @@ export function generateCertificatePdf(payload) {
       const png = parsePng(fs.readFileSync(resolvedLogo));
       logoImage = decodePngRgba(png);
     }
-  } catch {
+  } catch (error) {
+    console.warn(`No se pudo cargar el logo del certificado: ${error?.message || error}`);
     logoImage = null;
   }
 
@@ -327,7 +322,8 @@ export function generateCertificatePdf(payload) {
       const png = parsePng(fs.readFileSync(resolvedStamp));
       stampImage = decodePngRgba(png);
     }
-  } catch {
+  } catch (error) {
+    console.warn(`No se pudo cargar la firma del certificado: ${error?.message || error}`);
     stampImage = null;
   }
 
@@ -455,7 +451,7 @@ export function generateCertificatePdf(payload) {
     currentSigY -= signatureLineHeight;
   });
 
-  const footerLine1 = "Red Nacional de Crematorios - Torre de los Profesionales of. 702 - Montevideo Uruguay";
+  const footerLine1 = "Red Nacional de Crematorios - Juncal 1437 Of 101 - Montevideo Uruguay";
   const footerLine2 = "Tel: 0800 1106 - Mail: contacto@rednacrem.com";
   contentLines.push(`BT /F1 8 Tf ${((PAGE_WIDTH - estimateTextWidth(footerLine1, 8)) / 2).toFixed(2)} 34 Td (${escapePdfText(footerLine1)}) Tj ET`);
   contentLines.push(`BT /F1 8 Tf ${((PAGE_WIDTH - estimateTextWidth(footerLine2, 8)) / 2).toFixed(2)} 22 Td (${escapePdfText(footerLine2)}) Tj ET`);
