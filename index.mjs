@@ -1387,6 +1387,7 @@ async function fetchRecuperoContactos({
       rc.departamento,
       rc.producto_anterior AS nombre_producto,
       rc.precio_anterior AS precio,
+      rc.requiere_revision,
       rc.fecha_baja,
       rc.motivo_baja,
       rc.motivo_baja_detalle,
@@ -1856,7 +1857,53 @@ function normalizeImportValue(value) {
 }
 
 function normalizeDocumento(value) {
-  return String(value || "").replace(/[^0-9]/g, "");
+  const normalized = normalizeImportValue(value);
+  if (!normalized || normalized === "no") return "";
+  const digits = String(value || "").replace(/[^0-9]/g, "");
+  if (!digits) return "";
+  if (/^(\d)\1{5,}$/.test(digits)) return "";
+  return digits;
+}
+
+function normalizeRecuperoNamePart(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function buildRecuperoNameKey(nombre, apellido) {
+  return `${normalizeRecuperoNamePart(nombre)}|${normalizeRecuperoNamePart(apellido)}`;
+}
+
+function getRecuperoPhoneVariants(value) {
+  const digits = normalizePhoneDigits(value || "");
+  const variants = new Set();
+  if (!digits) return variants;
+  variants.add(digits);
+  if (/^9\d{7}$/.test(digits)) variants.add(`0${digits}`);
+  if (/^09\d{7}$/.test(digits)) variants.add(digits.slice(1));
+  if (/^5989\d{7}$/.test(digits)) {
+    variants.add(digits.slice(3));
+    variants.add(`0${digits.slice(3)}`);
+  }
+  if (/^59809\d{7}$/.test(digits)) {
+    variants.add(digits.slice(4));
+    variants.add(`0${digits.slice(4)}`);
+  }
+  return variants;
+}
+
+function normalizeRecuperoPhone(value) {
+  const variants = Array.from(getRecuperoPhoneVariants(value));
+  if (!variants.length) return "";
+  return variants.find((item) => /^09\d{7}$/.test(item)) || variants[0];
+}
+
+function hasSharedRecuperoPhone(entryA, entryB) {
+  if (!entryA || !entryB) return false;
+  return entryA.phone_variants.some((phone) => entryB.phone_variant_set.has(phone));
+}
+
+function buildRecuperoExistingKey(documento, nombre, apellido) {
+  return `${documento || ""}|${buildRecuperoNameKey(nombre, apellido)}`;
 }
 
 function normalizeRecuperoEstado(value) {
@@ -1919,6 +1966,371 @@ function detectCsvDelimiter(headerLine) {
   const commaCount = (headerLine.match(/,/g) || []).length;
   const semicolonCount = (headerLine.match(/;/g) || []).length;
   return semicolonCount > commaCount ? ";" : ",";
+}
+
+async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDelimiter = null, organizationId = null }) {
+  const totalRows = Math.max(0, countCsvRows(csvText) - 1);
+  const iterator = iterateCsvLines(String(csvText || "").replace(/^\uFEFF/, ""));
+  const headerResult = iterator.next();
+  const headerLine = headerResult.done ? "" : headerResult.value || "";
+  const delimiter = forcedDelimiter || detectCsvDelimiter(headerLine);
+  const headers = parseCsvLine(headerLine, delimiter).map((h) => normalizeImportValue(h));
+
+  const col = (names) => {
+    const values = Array.isArray(names) ? names : [names];
+    return headers.findIndex((h) => values.some((name) => h === name || h.includes(name)));
+  };
+
+  const idxNombre = col(["nombres", "nombre"]);
+  const idxApellido = col(["apellidos", "apellido"]);
+  const idxDocumento = col("documento");
+  const idxTelefono = col("telefono");
+  const idxCelular = col("celular");
+  const idxVendedor = col("vendedor");
+  const idxMedioPago = col("medio de pago");
+  const idxEstado = col(["estado", "ultimo estado"]);
+  const idxFechaBaja = col("fecha de baja");
+  const idxObservacion = col(["observacion", "observacion"]);
+  const idxFechaNac = col(["fecha de nacimiento", "fecha nacimiento"]);
+  const idxDepartamento = col("departamento");
+  const idxDireccion = col(["direccion", "direccion"]);
+  const idxPlan = col(["plan contratado", "plan"]);
+  const idxPrecio = col("precio");
+  const idxFechaVenta = col("fecha de venta");
+
+  if (idxDocumento === -1 && idxTelefono === -1) {
+    return {
+      ok: false,
+      totalRows,
+      delimiter,
+      errorMessage: "Se requiere columna documento o telefono"
+    };
+  }
+
+  const parseDate = (val) => {
+    if (!val) return null;
+    const clean = String(val).trim();
+    const match = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (match) return `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+    return null;
+  };
+
+  const entries = [];
+  const rowDetails = [];
+  const errors = [];
+  let invalidRows = 0;
+  let rowNumber = 1;
+
+  for (const line of iterator) {
+    rowNumber += 1;
+    if (!line.trim()) continue;
+    const cells = parseCsvLine(line, delimiter);
+    const get = (idx) => (idx >= 0 ? String(cells[idx] || "").trim() : "");
+
+    const nombre = get(idxNombre);
+    const apellido = get(idxApellido);
+    const documentoRaw = get(idxDocumento);
+    const documento = normalizeDocumento(documentoRaw);
+    const telefono = normalizeRecuperoPhone(get(idxTelefono));
+    const celular = normalizeRecuperoPhone(get(idxCelular));
+    const vendedor = get(idxVendedor);
+    const medioPago = get(idxMedioPago);
+    const estadoRaw = get(idxEstado);
+    const fechaBaja = parseDate(get(idxFechaBaja));
+    const observacion = get(idxObservacion);
+    const fechaNac = parseDate(get(idxFechaNac));
+    const departamento = get(idxDepartamento);
+    const direccion = get(idxDireccion);
+    const plan = get(idxPlan);
+    const precio = parseFloat(get(idxPrecio)) || null;
+    const fechaVenta = parseDate(get(idxFechaVenta));
+    const nameKey = buildRecuperoNameKey(nombre, apellido);
+    const phoneVariantSet = new Set([
+      ...getRecuperoPhoneVariants(telefono),
+      ...getRecuperoPhoneVariants(celular)
+    ]);
+    const phoneVariants = Array.from(phoneVariantSet);
+    const detail = {
+      row: rowNumber,
+      nombre,
+      apellido,
+      documento: documento || null,
+      telefono: telefono || null,
+      celular: celular || null,
+      medio_pago: medioPago || null,
+      motivo_baja: normalizeMotivoBaja(estadoRaw),
+      ultimo_estado: estadoRaw || null,
+      sin_documento: !documento,
+      duplicate_real: false,
+      grupo_familiar: false,
+      requiere_revision: false,
+      cliente_activo: false,
+      ya_en_recupero: false,
+      importable: false,
+      classification: "pendiente",
+      message: null
+    };
+
+    if (!nombre && !apellido) {
+      invalidRows += 1;
+      detail.classification = "invalido";
+      detail.message = "Nombre y apellido requeridos";
+      rowDetails.push(detail);
+      errors.push({
+        row: rowNumber,
+        documento: documentoRaw,
+        motivo_baja: detail.motivo_baja,
+        ultimo_estado: estadoRaw || null,
+        code: "MISSING_FIELD",
+        message: detail.message
+      });
+      continue;
+    }
+
+    const entry = {
+      nombre,
+      apellido,
+      documento: documento || null,
+      telefono: telefono || null,
+      celular: celular || null,
+      vendedor_origen: vendedor || null,
+      medio_pago: medioPago || null,
+      motivo_baja: detail.motivo_baja,
+      motivo_baja_detalle: estadoRaw || null,
+      fecha_baja: fechaBaja,
+      observacion: observacion || null,
+      fecha_nacimiento: fechaNac,
+      departamento: departamento || null,
+      direccion: direccion || null,
+      producto_anterior: plan || null,
+      precio_anterior: precio,
+      fecha_venta: fechaVenta,
+      row: rowNumber,
+      name_key: nameKey,
+      phone_variants: phoneVariants,
+      phone_variant_set: phoneVariantSet,
+      detail
+    };
+
+    detail.entry = entry;
+    entries.push(entry);
+    rowDetails.push(detail);
+  }
+
+  const groupedByDocumento = new Map();
+  for (const entry of entries) {
+    if (!entry.documento) continue;
+    const bucket = groupedByDocumento.get(entry.documento) || [];
+    bucket.push(entry);
+    groupedByDocumento.set(entry.documento, bucket);
+  }
+
+  let duplicateRows = 0;
+  let duplicateRealRows = 0;
+  let existingDuplicateRows = 0;
+  for (const group of groupedByDocumento.values()) {
+    const byName = new Map();
+    for (const entry of group) {
+      const bucket = byName.get(entry.name_key) || [];
+      bucket.push(entry);
+      byName.set(entry.name_key, bucket);
+    }
+
+    const survivors = [];
+    for (const bucket of byName.values()) {
+      survivors.push(bucket[0]);
+      for (let i = 1; i < bucket.length; i += 1) {
+        const duplicate = bucket[i];
+        duplicate.importable = false;
+        duplicate.detail.duplicate_real = true;
+        duplicate.detail.classification = "duplicado_real";
+        duplicate.detail.message = "Duplicado real en el archivo";
+        duplicateRows += 1;
+        duplicateRealRows += 1;
+        errors.push({
+          row: duplicate.row,
+          documento: duplicate.documento,
+          motivo_baja: duplicate.motivo_baja,
+          ultimo_estado: duplicate.motivo_baja_detalle,
+          code: "DUPLICATE_REAL",
+          message: duplicate.detail.message
+        });
+      }
+    }
+
+    if (survivors.length <= 1) continue;
+
+    for (const entry of survivors) {
+      const others = survivors.filter((candidate) => candidate !== entry);
+      const sharedWithSomeone = others.some((candidate) => hasSharedRecuperoPhone(entry, candidate));
+      if (sharedWithSomeone) {
+        entry.detail.grupo_familiar = true;
+        entry.detail.classification = "grupo_familiar";
+      } else {
+        entry.detail.requiere_revision = true;
+        entry.detail.classification = "requiere_revision";
+      }
+    }
+  }
+
+  const activeDocumentos = new Set();
+  const activePhones = new Set();
+  const existingCompositeKeys = new Set();
+
+  if (organizationId) {
+    const documentosValidos = Array.from(new Set(entries.map((entry) => entry.documento).filter(Boolean)));
+    const phoneVariants = Array.from(
+      new Set(entries.flatMap((entry) => entry.phone_variants).filter(Boolean))
+    );
+
+    if (documentosValidos.length || phoneVariants.length) {
+      const activosRes = await client.query(
+        `
+        SELECT DISTINCT
+          regexp_replace(coalesce(c.documento, ''), '\\D', '', 'g') AS documento,
+          regexp_replace(coalesce(c.telefono, ''), '\\D', '', 'g') AS telefono,
+          regexp_replace(coalesce(c.celular, ''), '\\D', '', 'g') AS celular
+        FROM contacts c
+        JOIN contact_products cp ON cp.contact_id = c.id
+        WHERE cp.estado = 'alta'
+          AND cp.organization_id = $1
+          AND (
+            ($2::text[] <> '{}'::text[] AND regexp_replace(coalesce(c.documento, ''), '\\D', '', 'g') = ANY($2))
+            OR ($3::text[] <> '{}'::text[] AND regexp_replace(coalesce(c.telefono, ''), '\\D', '', 'g') = ANY($3))
+            OR ($3::text[] <> '{}'::text[] AND regexp_replace(coalesce(c.celular, ''), '\\D', '', 'g') = ANY($3))
+          )
+        `,
+        [organizationId, documentosValidos, phoneVariants]
+      );
+      for (const row of activosRes.rows) {
+        if (row.documento) activeDocumentos.add(row.documento);
+        for (const variant of getRecuperoPhoneVariants(row.telefono || "")) activePhones.add(variant);
+        for (const variant of getRecuperoPhoneVariants(row.celular || "")) activePhones.add(variant);
+      }
+    }
+
+    if (documentosValidos.length) {
+      const existentesRes = await client.query(
+        `
+        SELECT
+          regexp_replace(coalesce(documento, ''), '\\D', '', 'g') AS documento,
+          lower(trim(coalesce(nombre, ''))) AS nombre_norm,
+          lower(trim(coalesce(apellido, ''))) AS apellido_norm
+        FROM recupero_candidatos
+        WHERE organization_id = $1
+          AND regexp_replace(coalesce(documento, ''), '\\D', '', 'g') = ANY($2)
+          AND estado != 'recuperado'
+        `,
+        [organizationId, documentosValidos]
+      );
+      for (const row of existentesRes.rows) {
+        existingCompositeKeys.add(buildRecuperoExistingKey(row.documento, row.nombre_norm, row.apellido_norm));
+      }
+    }
+  }
+
+  const toInsert = [];
+  let clientesActivosRows = 0;
+  let requiereRevisionRows = 0;
+  let grupoFamiliarRows = 0;
+  let sinDocumentoRows = 0;
+
+  for (const entry of entries) {
+    if (entry.detail.sin_documento) sinDocumentoRows += 1;
+    if (entry.detail.duplicate_real) continue;
+
+    const isActiveByDocumento = Boolean(entry.documento) && activeDocumentos.has(entry.documento);
+    const isActiveByPhone = entry.phone_variants.some((phone) => activePhones.has(phone));
+    if (isActiveByDocumento || isActiveByPhone) {
+      entry.importable = false;
+      entry.detail.cliente_activo = true;
+      entry.detail.classification = "cliente_activo";
+      entry.detail.message = "Es cliente activo - excluido";
+      clientesActivosRows += 1;
+      errors.push({
+        row: entry.row,
+        documento: entry.documento,
+        motivo_baja: entry.motivo_baja,
+        ultimo_estado: entry.motivo_baja_detalle,
+        code: "CLIENTE_ACTIVO",
+        message: entry.detail.message
+      });
+      continue;
+    }
+
+    const existingKey = entry.documento
+      ? buildRecuperoExistingKey(entry.documento, entry.nombre, entry.apellido)
+      : null;
+    if (existingKey && existingCompositeKeys.has(existingKey)) {
+      entry.importable = false;
+      entry.detail.ya_en_recupero = true;
+      entry.detail.classification = "ya_en_recupero";
+      entry.detail.message = "Ya existe en recupero";
+      duplicateRows += 1;
+      existingDuplicateRows += 1;
+      errors.push({
+        row: entry.row,
+        documento: entry.documento,
+        motivo_baja: entry.motivo_baja,
+        ultimo_estado: entry.motivo_baja_detalle,
+        code: "YA_EN_RECUPERO",
+        message: entry.detail.message
+      });
+      continue;
+    }
+
+    if (entry.detail.requiere_revision) {
+      requiereRevisionRows += 1;
+    } else if (entry.detail.grupo_familiar) {
+      grupoFamiliarRows += 1;
+    }
+
+    entry.importable = true;
+    if (entry.detail.classification === "pendiente") {
+      entry.detail.classification = entry.detail.sin_documento ? "sin_documento" : "valido";
+    }
+    toInsert.push(entry);
+  }
+
+  return {
+    ok: true,
+    totalRows,
+    delimiter,
+    errors,
+    toInsert,
+    rowDetails: rowDetails.map((detail) => ({
+      row: detail.row,
+      nombre: detail.nombre,
+      apellido: detail.apellido,
+      documento: detail.documento,
+      telefono: detail.telefono,
+      celular: detail.celular,
+      medio_pago: detail.medio_pago,
+      motivo_baja: detail.motivo_baja,
+      ultimo_estado: detail.ultimo_estado,
+      sin_documento: detail.sin_documento,
+      duplicate_real: detail.duplicate_real,
+      grupo_familiar: detail.grupo_familiar,
+      requiere_revision: detail.requiere_revision,
+      cliente_activo: detail.cliente_activo,
+      ya_en_recupero: detail.ya_en_recupero,
+      importable: detail.entry?.importable ?? false,
+      classification: detail.classification,
+      message: detail.message
+    })),
+    summary: {
+      total: totalRows,
+      invalid_rows: invalidRows,
+      duplicate_rows: duplicateRows,
+      duplicate_real_rows: duplicateRealRows,
+      existing_duplicate_rows: existingDuplicateRows,
+      clientes_activos_rows: clientesActivosRows,
+      requiere_revision_rows: requiereRevisionRows,
+      grupo_familiar_rows: grupoFamiliarRows,
+      sin_documento_rows: sinDocumentoRows
+    }
+  };
 }
 
 function countCsvRows(csvText) {
@@ -4646,6 +5058,11 @@ export async function processRecuperoImportJob(jobId) {
   await client.connect();
 
   try {
+    const jobCols = await getTableColumns(client, "recupero_import_jobs");
+    const recuperoCols = await getTableColumns(client, "recupero_candidatos");
+    const hasClientesActivosRows = jobCols.has("clientes_activos_rows");
+    const hasRequiresRevisionRows = jobCols.has("requiere_revision_rows");
+    const hasRecuperoRequiresRevision = recuperoCols.has("requiere_revision");
     const jobRes = await client.query(
       `SELECT id, csv_text, status, total_rows, processed_rows,
               updated_rows, error_rows, delimiter, created_by, organization_id
@@ -4689,280 +5106,170 @@ export async function processRecuperoImportJob(jobId) {
       return;
     }
 
-    const iterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
-    const headerResult = iterator.next();
-    const headerLine = headerResult.done ? "" : headerResult.value || "";
-    const delimiter = job.delimiter || detectCsvDelimiter(headerLine);
-    const headers = parseCsvLine(headerLine, delimiter).map((h) => normalizeImportValue(h));
-
-    const col = (names) => {
-      const n = Array.isArray(names) ? names : [names];
-      return headers.findIndex((h) => n.some((name) => h === name || h.includes(name)));
-    };
-
-    const idxNombre = col(["nombres", "nombre"]);
-    const idxApellido = col(["apellidos", "apellido"]);
-    const idxDocumento = col("documento");
-    const idxTelefono = col("telefono");
-    const idxCelular = col("celular");
-    const idxVendedor = col("vendedor");
-    const idxMedioPago = col("medio de pago");
-    const idxEstado = col(["estado", "ultimo estado"]);
-    const idxFechaBaja = col("fecha de baja");
-    const idxObservacion = col(["observacion", "observacion"]);
-    const idxFechaNac = col(["fecha de nacimiento", "fecha nacimiento"]);
-    const idxDepartamento = col("departamento");
-    const idxDireccion = col(["direccion", "direccion"]);
-    const idxPlan = col(["plan contratado", "plan"]);
-    const idxPrecio = col("precio");
-    const idxFechaVenta = col("fecha de venta");
-
-    if (idxDocumento === -1 && idxTelefono === -1) {
+    const analysis = await analyzeRecuperoImportCsv(client, {
+      csvText,
+      delimiter: job.delimiter || null,
+      organizationId
+    });
+    if (!analysis.ok) {
       await client.query(
         `UPDATE recupero_import_jobs SET status = 'failed',
-         error_message = 'Se requiere columna documento o telefono',
+         error_message = $2,
          finished_at = now(), updated_at = now() WHERE id = $1`,
-        [jobId]
+        [jobId, analysis.errorMessage]
       );
       return;
     }
+    const { summary, errors, toInsert } = analysis;
 
-    const entries = [];
-    const errors = [];
-    let duplicateRows = 0;
-    let invalidRows = 0;
-    let activosRows = 0;
-    let rowNumber = 1;
-    const seenDocumentos = new Set();
-
-    const parseDate = (val) => {
-      if (!val) return null;
-      const clean = String(val).trim();
-      const m = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-      if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
-      return null;
-    };
-
-    for (const line of iterator) {
-      rowNumber += 1;
-      if (!line.trim()) continue;
-      const cells = parseCsvLine(line, delimiter);
-      const get = (idx) => (idx >= 0 ? String(cells[idx] || "").trim() : "");
-
-      const nombre = get(idxNombre);
-      const apellido = get(idxApellido);
-      const documentoRaw = get(idxDocumento);
-      const documento = normalizeDocumento(documentoRaw);
-      const normalizarCelularUy = (value) => {
-        const digits = String(value || "").replace(/\D/g, "");
-        if (/^9\d{7}$/.test(digits)) return `0${digits}`;
-        return digits;
-      };
-      const telefono = normalizarCelularUy(get(idxTelefono));
-      const celular = normalizarCelularUy(get(idxCelular));
-      const vendedor = get(idxVendedor);
-      const medioPago = get(idxMedioPago);
-      const estadoRaw = get(idxEstado);
-      const fechaBaja = parseDate(get(idxFechaBaja));
-      const observacion = get(idxObservacion);
-      const fechaNac = parseDate(get(idxFechaNac));
-      const departamento = get(idxDepartamento);
-      const direccion = get(idxDireccion);
-      const plan = get(idxPlan);
-      const precio = parseFloat(get(idxPrecio)) || null;
-      const fechaVenta = parseDate(get(idxFechaVenta));
-
-      if (!nombre && !apellido) {
-        invalidRows += 1;
-        errors.push({
-          row: rowNumber,
-          documento: documentoRaw,
-          code: "MISSING_FIELD",
-          message: "Nombre y apellido requeridos"
-        });
-        continue;
+    if (!toInsert.length) {
+      const extraSets = [];
+      const extraParams = [];
+      if (hasClientesActivosRows) {
+        extraParams.push(summary.clientes_activos_rows);
+        extraSets.push(`clientes_activos_rows = $${7 + extraParams.length}`);
       }
-
-      const motivoBaja = normalizeMotivoBaja(estadoRaw);
-
-      if (documento && seenDocumentos.has(documento)) {
-        duplicateRows += 1;
-        continue;
+      if (hasRequiresRevisionRows) {
+        extraParams.push(summary.requiere_revision_rows);
+        extraSets.push(`requiere_revision_rows = $${7 + extraParams.length}`);
       }
-      if (documento) seenDocumentos.add(documento);
-
-      entries.push({
-        nombre,
-        apellido,
-        documento: documento || null,
-        telefono: telefono || null,
-        celular: celular || null,
-        vendedor_origen: vendedor || null,
-        medio_pago: medioPago || null,
-        motivo_baja: motivoBaja,
-        motivo_baja_detalle: estadoRaw || null,
-        fecha_baja: fechaBaja,
-        observacion: observacion || null,
-        fecha_nacimiento: fechaNac,
-        departamento: departamento || null,
-        direccion: direccion || null,
-        producto_anterior: plan || null,
-        precio_anterior: precio,
-        fecha_venta: fechaVenta,
-        row: rowNumber
-      });
-    }
-
-    if (!entries.length) {
       await client.query(
         `UPDATE recupero_import_jobs SET status = 'done',
          total_rows = $1, processed_rows = $1, updated_rows = 0,
          error_rows = $2, duplicate_rows = $3, invalid_rows = $4,
-         not_found_rows = 0, error_rows_detail = $5, error_report_csv = $6,
+         not_found_rows = 0,
+         ${extraSets.length ? `${extraSets.join(", ")},` : ""}
+         error_rows_detail = $5, error_report_csv = $6,
          finished_at = now(), updated_at = now() WHERE id = $7`,
         [
-          totalRows,
+          analysis.totalRows,
           errors.length,
-          duplicateRows,
-          invalidRows,
+          summary.duplicate_rows,
+          summary.invalid_rows,
           errors.length ? JSON.stringify(errors.slice(0, 200)) : null,
           errors.length ? buildRecuperoErrorCsv(errors) : null,
-          jobId
+          jobId,
+          ...extraParams
         ]
       );
       return;
-    }
-
-    const documentosValidos = entries.map((e) => e.documento).filter(Boolean);
-    const telefonosValidos = entries.map((e) => e.telefono).filter(Boolean);
-
-    const activosRes = await client.query(
-      `SELECT DISTINCT c.documento, c.telefono
-       FROM contacts c
-       JOIN contact_products cp ON cp.contact_id = c.id
-       WHERE cp.estado = 'alta'
-         AND cp.organization_id = $1
-         AND (
-           (c.documento = ANY($2) AND c.documento IS NOT NULL)
-           OR (c.telefono = ANY($3) AND c.telefono IS NOT NULL)
-         )`,
-      [organizationId, documentosValidos, telefonosValidos]
-    );
-    const activosDocumentos = new Set(activosRes.rows.map((r) => r.documento).filter(Boolean));
-    const activosTelefonos = new Set(activosRes.rows.map((r) => r.telefono).filter(Boolean));
-
-    const existentesRes = await client.query(
-      `SELECT documento FROM recupero_candidatos
-       WHERE organization_id = $1
-         AND documento = ANY($2)
-         AND estado != 'recuperado'`,
-      [organizationId, documentosValidos]
-    );
-    const existentesDocumentos = new Set(existentesRes.rows.map((r) => r.documento));
-
-    const toInsert = [];
-    for (const entry of entries) {
-      if (activosDocumentos.has(entry.documento) || activosTelefonos.has(entry.telefono)) {
-        activosRows += 1;
-        errors.push({
-          row: entry.row,
-          documento: entry.documento,
-          code: "CLIENTE_ACTIVO",
-          message: "Es cliente activo - excluido"
-        });
-        continue;
-      }
-      if (existentesDocumentos.has(entry.documento)) {
-        duplicateRows += 1;
-        errors.push({
-          row: entry.row,
-          documento: entry.documento,
-          code: "YA_EN_RECUPERO",
-          message: "Ya existe en recupero"
-        });
-        continue;
-      }
-      toInsert.push(entry);
     }
 
     const chunkSize = 500;
     let insertedRows = 0;
     for (let i = 0; i < toInsert.length; i += chunkSize) {
       const chunk = toInsert.slice(i, i + chunkSize);
-      await client.query(
+      const insertColumns = [
+        "organization_id", "nombre", "apellido", "documento", "telefono", "celular",
+        "vendedor_origen", "medio_pago", "motivo_baja", "motivo_baja_detalle",
+        "fecha_baja", "observacion", "fecha_nacimiento", "departamento", "direccion",
+        "producto_anterior", "precio_anterior", "fecha_venta", "estado", "importado_por", "importado_at"
+      ];
+      const selectColumns = [
+        "$1", "t.nombre", "t.apellido", "t.documento", "t.telefono", "t.celular",
+        "t.vendedor_origen", "t.medio_pago", "t.motivo_baja", "t.motivo_baja_detalle",
+        "t.fecha_baja::date", "t.observacion", "t.fecha_nacimiento::date", "t.departamento", "t.direccion",
+        "t.producto_anterior", "t.precio_anterior::numeric", "t.fecha_venta::date", "'disponible'", "$2", "now()"
+      ];
+      const unnestTypeColumns = [
+        "$3::text[]", "$4::text[]", "$5::text[]", "$6::text[]", "$7::text[]", "$8::text[]",
+        "$9::text[]", "$10::text[]", "$11::text[]", "$12::text[]", "$13::text[]", "$14::text[]",
+        "$15::text[]", "$16::text[]", "$17::text[]", "$18::text[]", "$19::text[]", "$20::text[]"
+      ];
+      const unnestAliasColumns = [
+        "nombre", "apellido", "documento", "telefono", "celular", "vendedor_origen",
+        "medio_pago", "motivo_baja", "motivo_baja_detalle", "fecha_baja", "observacion",
+        "fecha_nacimiento", "departamento", "direccion", "producto_anterior",
+        "precio_anterior", "fecha_venta", "_dummy"
+      ];
+      const values = [
+        organizationId,
+        createdBy,
+        chunk.map((r) => r.nombre),
+        chunk.map((r) => r.apellido),
+        chunk.map((r) => r.documento),
+        chunk.map((r) => r.telefono),
+        chunk.map((r) => r.celular),
+        chunk.map((r) => r.vendedor_origen),
+        chunk.map((r) => r.medio_pago),
+        chunk.map((r) => r.motivo_baja),
+        chunk.map((r) => r.motivo_baja_detalle),
+        chunk.map((r) => r.fecha_baja),
+        chunk.map((r) => r.observacion),
+        chunk.map((r) => r.fecha_nacimiento),
+        chunk.map((r) => r.departamento),
+        chunk.map((r) => r.direccion),
+        chunk.map((r) => r.producto_anterior),
+        chunk.map((r) => r.precio_anterior?.toString()),
+        chunk.map((r) => r.fecha_venta),
+        chunk.map(() => null)
+      ];
+      if (hasRecuperoRequiresRevision) {
+        insertColumns.splice(18, 0, "requiere_revision");
+        selectColumns.splice(18, 0, "t.requiere_revision");
+        unnestTypeColumns.splice(20, 0, "$21::boolean[]");
+        unnestAliasColumns.splice(18, 0, "requiere_revision");
+        values.push(chunk.map((r) => Boolean(r.detail?.requiere_revision)));
+      }
+      const insertRes = await client.query(
         `INSERT INTO recupero_candidatos (
-          organization_id, nombre, apellido, documento, telefono, celular,
-          vendedor_origen, medio_pago, motivo_baja, motivo_baja_detalle,
-          fecha_baja, observacion, fecha_nacimiento, departamento, direccion,
-          producto_anterior, precio_anterior, fecha_venta,
-          estado, importado_por, importado_at
+          ${insertColumns.join(", ")}
         )
         SELECT
-          $1, t.nombre, t.apellido, t.documento, t.telefono, t.celular,
-          t.vendedor_origen, t.medio_pago, t.motivo_baja, t.motivo_baja_detalle,
-          t.fecha_baja::date, t.observacion, t.fecha_nacimiento::date,
-          t.departamento, t.direccion, t.producto_anterior, t.precio_anterior::numeric,
-          t.fecha_venta::date, 'disponible', $2, now()
+          ${selectColumns.join(", ")}
         FROM UNNEST(
-          $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[],
-          $9::text[], $10::text[], $11::text[], $12::text[],
-          $13::text[], $14::text[], $15::text[], $16::text[], $17::text[],
-          $18::text[], $19::text[], $20::text[]
+          ${unnestTypeColumns.join(", ")}
         ) AS t(
-          nombre, apellido, documento, telefono, celular,
-          vendedor_origen, medio_pago, motivo_baja, motivo_baja_detalle,
-          fecha_baja, observacion, fecha_nacimiento,
-          departamento, direccion, producto_anterior, precio_anterior,
-          fecha_venta, _dummy
+          ${unnestAliasColumns.join(", ")}
         )
-        ON CONFLICT (organization_id, documento)
-        WHERE documento IS NOT NULL AND estado != 'recuperado'
-        DO NOTHING`,
-        [
-          organizationId,
-          createdBy,
-          chunk.map((r) => r.nombre),
-          chunk.map((r) => r.apellido),
-          chunk.map((r) => r.documento),
-          chunk.map((r) => r.telefono),
-          chunk.map((r) => r.celular),
-          chunk.map((r) => r.vendedor_origen),
-          chunk.map((r) => r.medio_pago),
-          chunk.map((r) => r.motivo_baja),
-          chunk.map((r) => r.motivo_baja_detalle),
-          chunk.map((r) => r.fecha_baja),
-          chunk.map((r) => r.observacion),
-          chunk.map((r) => r.fecha_nacimiento),
-          chunk.map((r) => r.departamento),
-          chunk.map((r) => r.direccion),
-          chunk.map((r) => r.producto_anterior),
-          chunk.map((r) => r.precio_anterior?.toString()),
-          chunk.map((r) => r.fecha_venta),
-          chunk.map(() => null)
-        ]
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM recupero_candidatos rc
+          WHERE rc.organization_id = $1
+            AND rc.estado != 'recuperado'
+            AND t.documento IS NOT NULL
+            AND regexp_replace(coalesce(rc.documento, ''), '\\D', '', 'g') = t.documento
+            AND lower(trim(coalesce(rc.nombre, ''))) = lower(trim(coalesce(t.nombre, '')))
+            AND lower(trim(coalesce(rc.apellido, ''))) = lower(trim(coalesce(t.apellido, '')))
+        )
+        RETURNING id`,
+        values
       );
-      insertedRows += chunk.length;
+      insertedRows += insertRes.rowCount || 0;
     }
 
+    const extraSets = [];
+    const extraParams = [];
+    let extraIndex = 8;
+    if (hasClientesActivosRows) {
+      extraIndex += 1;
+      extraSets.push(`clientes_activos_rows = $${extraIndex}`);
+      extraParams.push(summary.clientes_activos_rows);
+    }
+    if (hasRequiresRevisionRows) {
+      extraIndex += 1;
+      extraSets.push(`requiere_revision_rows = $${extraIndex}`);
+      extraParams.push(summary.requiere_revision_rows);
+    }
     await client.query(
       `UPDATE recupero_import_jobs
        SET status = 'done', total_rows = $1, processed_rows = $1,
            updated_rows = $2, error_rows = $3, duplicate_rows = $4,
-           invalid_rows = $5, not_found_rows = $6,
-           error_rows_detail = $7, error_report_csv = $8,
+           invalid_rows = $5, not_found_rows = 0,
+           ${extraSets.length ? `${extraSets.join(", ")},` : ""}
+           error_rows_detail = $6, error_report_csv = $7,
            finished_at = now(), updated_at = now()
-       WHERE id = $9`,
+       WHERE id = $8`,
       [
-        totalRows,
+        analysis.totalRows,
         insertedRows,
         errors.length,
-        duplicateRows,
-        invalidRows,
-        activosRows,
+        summary.duplicate_rows,
+        summary.invalid_rows,
         errors.length ? JSON.stringify(errors.slice(0, 200)) : null,
         errors.length ? buildRecuperoErrorCsv(errors) : null,
-        jobId
+        jobId,
+        ...extraParams
       ]
     );
   } catch (error) {
@@ -7702,17 +8009,36 @@ async function aplicarBajaContactProduct(client, {
   await client.query("SAVEPOINT recupero_candidato_insert");
   try {
     const fechaBajaValue = fechaBaja || null;
+    const recuperoCols = await getTableColumns(client, "recupero_candidatos");
+    const hasRecuperoRequiresRevision = recuperoCols.has("requiere_revision");
+    const documentoValue = normalizeDocumento(contactRow.documento || "");
+    const nombreNorm = normalizeRecuperoNamePart(contactRow.nombre || "");
+    const apellidoNorm = normalizeRecuperoNamePart(contactRow.apellido || "");
     const existingRecuperoRes = await client.query(
       `
       SELECT id
       FROM recupero_candidatos
-      WHERE contact_id = $1
-        AND organization_id = $2
+      WHERE organization_id = $2
         AND estado != 'recuperado'
+        AND (
+          contact_id = $1
+          OR (
+            $3::text IS NOT NULL
+            AND regexp_replace(coalesce(documento, ''), '\\D', '', 'g') = $3
+            AND lower(trim(coalesce(nombre, ''))) = $4
+            AND lower(trim(coalesce(apellido, ''))) = $5
+          )
+        )
       ORDER BY created_at DESC
       LIMIT 1
       `,
-      [contactId, organizationId]
+      [
+        contactId,
+        organizationId,
+        documentoValue || null,
+        nombreNorm,
+        apellidoNorm
+      ]
     );
     const existingRecuperoId = existingRecuperoRes.rows[0]?.id || null;
 
@@ -7738,6 +8064,7 @@ async function aplicarBajaContactProduct(client, {
           motivo_baja = $15,
           motivo_baja_detalle = $16,
           contact_id = $17,
+          ${hasRecuperoRequiresRevision ? "requiere_revision = false," : ""}
           estado = 'disponible',
           estado_administrativo = 'activo',
           resultado_gestion = 'nuevo',
@@ -7749,7 +8076,7 @@ async function aplicarBajaContactProduct(client, {
         [
           contactRow.nombre || null,
           contactRow.apellido || null,
-          contactRow.documento || null,
+          documentoValue || null,
           contactRow.telefono || null,
           contactRow.celular || null,
           contactRow.fecha_nacimiento || null,
@@ -7789,6 +8116,7 @@ async function aplicarBajaContactProduct(client, {
           motivo_baja,
           motivo_baja_detalle,
           contact_id,
+          ${hasRecuperoRequiresRevision ? "requiere_revision," : ""}
           estado,
           estado_administrativo,
           resultado_gestion,
@@ -7798,14 +8126,14 @@ async function aplicarBajaContactProduct(client, {
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
           COALESCE($15::date, now()::date),
-          $16, $17, $18, 'disponible', 'activo', 'nuevo', $19, now()
+          $16, $17, $18, ${hasRecuperoRequiresRevision ? "false," : ""} 'disponible', 'activo', 'nuevo', $19, now()
         )
         `,
         [
           organizationId,
           contactRow.nombre || null,
           contactRow.apellido || null,
-          contactRow.documento || null,
+          documentoValue || null,
           contactRow.telefono || null,
           contactRow.celular || null,
           contactRow.fecha_nacimiento || null,
@@ -13652,6 +13980,9 @@ export const handler = async (event) => {
             mainSaleId = saleId;
 
             if (main?.fields?.documento || main?.fields?.telefono || main?.fields?.celular) {
+              const documentoValue = normalizeDocumento(main.fields?.documento || "");
+              const nombreNorm = normalizeRecuperoNamePart(main.fields?.nombre || "");
+              const apellidoNorm = normalizeRecuperoNamePart(main.fields?.apellido || "");
               const telDigits = normalizePhoneDigits(main.fields?.telefono || "");
               const celDigits = normalizePhoneDigits(main.fields?.celular || "");
               await client.query(
@@ -13664,7 +13995,12 @@ export const handler = async (event) => {
                 WHERE organization_id = $2
                   AND estado = 'en_gestion'
                   AND (
-                    ($3::text IS NOT NULL AND documento = $3)
+                    (
+                      $3::text IS NOT NULL
+                      AND regexp_replace(coalesce(documento,''), '\\D', '', 'g') = $3
+                      AND lower(trim(coalesce(nombre, ''))) = $6
+                      AND lower(trim(coalesce(apellido, ''))) = $7
+                    )
                     OR ($4::text <> '' AND (
                       regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $4
                       OR regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $4
@@ -13675,7 +14011,7 @@ export const handler = async (event) => {
                     ))
                   )
                 `,
-                [main.id, organizationId, main.fields?.documento || null, telDigits || "", celDigits || ""]
+                [main.id, organizationId, documentoValue || null, telDigits || "", celDigits || "", nombreNorm, apellidoNorm]
               );
             }
           }
@@ -17912,6 +18248,7 @@ export const handler = async (event) => {
             rc.direccion,
             rc.producto_anterior AS nombre_producto,
             rc.precio_anterior AS precio,
+            rc.requiere_revision,
             rc.fecha_venta,
             rc.medio_pago,
             rc.vendedor_origen,
@@ -26896,6 +27233,110 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
   }
   if (
     method === "POST" &&
+    path.endsWith("/api/recupero/importaciones/preview")
+  ) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const multipart = parseMultipartFormData(event, { encoding: "latin1" });
+      if (!multipart) {
+        return json(400, { ok: false, message: "Archivo invalido" });
+      }
+
+      const fileEntry =
+        multipart.files?.file ||
+        multipart.files?.archivo ||
+        Object.values(multipart.files || {})[0];
+      const fileNameHeader =
+        event?.headers?.["x-file-name"] ||
+        event?.headers?.["X-File-Name"] ||
+        event?.headers?.["x-filename"] ||
+        event?.headers?.["X-Filename"] ||
+        "recupero.csv";
+      const fileName = fileEntry?.filename || fileNameHeader || "recupero.csv";
+      const csvText = fileEntry?.content || "";
+
+      if (!fileName.toLowerCase().endsWith(".csv")) {
+        return json(400, { ok: false, message: "Formato invalido" });
+      }
+      if (!csvText || !csvText.trim()) {
+        return json(400, { ok: false, message: "CSV vacio" });
+      }
+
+      const sizeBytes = Buffer.byteLength(csvText, "utf8");
+      if (sizeBytes > 5 * 1024 * 1024) {
+        return json(400, { ok: false, message: "Archivo demasiado grande" });
+      }
+
+      const delimiterRaw = String(multipart.fields?.delimiter || "").trim();
+      const delimiter = delimiterRaw && delimiterRaw.length === 1 ? delimiterRaw : null;
+      const iterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+      const headerResult = iterator.next();
+      const headerLine = headerResult.done ? "" : headerResult.value || "";
+      const headerDelimiter = delimiter || detectCsvDelimiter(headerLine);
+      const headers = parseCsvLine(headerLine, headerDelimiter).map((h) => normalizeImportValue(h));
+      const hasNombre = headers.some((h) => h === "nombres" || h === "nombre");
+      const hasApellido = headers.some((h) => h === "apellidos" || h === "apellido");
+      const hasIdentificador =
+        headers.includes("documento") || headers.some((h) => h === "telefono" || h === "celular");
+      if (!hasNombre || !hasApellido || !hasIdentificador) {
+        return json(400, {
+          ok: false,
+          message: "El CSV debe tener columnas: Nombres, Apellidos y al menos Documento o Telefono"
+        });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const analysis = await analyzeRecuperoImportCsv(client, {
+          csvText,
+          delimiter: headerDelimiter,
+          organizationId
+        });
+        if (!analysis.ok) {
+          return json(400, { ok: false, message: analysis.errorMessage });
+        }
+        return json(200, {
+          ok: true,
+          total: analysis.summary.total,
+          summary: {
+            duplicado_real: analysis.summary.duplicate_real_rows,
+            ya_en_recupero: analysis.summary.existing_duplicate_rows,
+            grupo_familiar: analysis.summary.grupo_familiar_rows,
+            requiere_revision: analysis.summary.requiere_revision_rows,
+            cliente_activo: analysis.summary.clientes_activos_rows,
+            sin_documento: analysis.summary.sin_documento_rows,
+            invalidas: analysis.summary.invalid_rows
+          },
+          filas: analysis.rowDetails
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to preview recupero import",
+        error: error.message
+      });
+    }
+  }
+  if (
+    method === "POST" &&
     (path.endsWith("/api/recupero/importaciones") ||
       path.endsWith("/api/recupero/importar-bajas"))
   ) {
@@ -27139,6 +27580,9 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
+        const jobCols = await getTableColumns(client, "recupero_import_jobs");
+        const hasClientesActivosRows = jobCols.has("clientes_activos_rows");
+        const hasRequiresRevisionRows = jobCols.has("requiere_revision_rows");
         const jobRes = await client.query(
           `
           SELECT
@@ -27151,6 +27595,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             duplicate_rows,
             invalid_rows,
             not_found_rows,
+            ${hasClientesActivosRows ? "clientes_activos_rows," : ""}
+            ${hasRequiresRevisionRows ? "requiere_revision_rows," : ""}
             error_rows_detail,
             error_report_csv
           FROM recupero_import_jobs
@@ -27176,7 +27622,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           ok: true,
           job_id: row.id,
           status: row.status,
-          duplicate_policy: "last_wins",
+          duplicate_policy: "first_wins",
           progress: {
             processed_rows: processed,
             total_rows: total,
@@ -27186,8 +27632,10 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             total,
             actualizadas: Number(row.updated_rows || 0),
             no_encontradas: Number(row.not_found_rows || 0),
+            clientes_activos: hasClientesActivosRows ? Number(row.clientes_activos_rows || 0) : 0,
             duplicadas: Number(row.duplicate_rows || 0),
-            invalidas: Number(row.invalid_rows || 0)
+            invalidas: Number(row.invalid_rows || 0),
+            requieren_revision: hasRequiresRevisionRows ? Number(row.requiere_revision_rows || 0) : 0
           },
           errores: errors,
           error_report_url: row.error_report_csv
