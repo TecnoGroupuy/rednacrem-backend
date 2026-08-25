@@ -1263,6 +1263,13 @@ async function fetchRecuperoContactos({
   const conditions = [`rc.organization_id = $1`];
   const values = [organizationId];
   let idx = 2;
+  const recuperoCandidateCols = await getTableColumns(client, "recupero_candidatos");
+  const recuperoJobCols = await getTableColumns(client, "recupero_import_jobs");
+  const useDatasetStatusFilter =
+    recuperoCandidateCols.has("dataset_id") && recuperoJobCols.has("dataset_status");
+  if (useDatasetStatusFilter) {
+    conditions.push(`COALESCE(rij.dataset_status, 'activo') = 'activo'`);
+  }
 
   const tabKey = String(tab || '').trim().toLowerCase();
   if (tabKey === 'disponibles' || !tabKey) {
@@ -1407,6 +1414,7 @@ async function fetchRecuperoContactos({
     FROM recupero_candidatos rc
     LEFT JOIN users u ON u.id = rc.seller_id
     LEFT JOIN lead_batches lb ON lb.id = rc.batch_id
+    ${useDatasetStatusFilter ? "LEFT JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id" : ""}
     WHERE ${where}
     ORDER BY ${orderExpr} ${orderDir} NULLS LAST
     LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -1416,6 +1424,7 @@ async function fetchRecuperoContactos({
   const countRes = await client.query(
     `SELECT COUNT(*)::int AS total
      FROM recupero_candidatos rc
+     ${useDatasetStatusFilter ? "LEFT JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id" : ""}
      WHERE ${where}`,
     values
   );
@@ -1968,7 +1977,10 @@ function detectCsvDelimiter(headerLine) {
   return semicolonCount > commaCount ? ";" : ",";
 }
 
-async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDelimiter = null, organizationId = null }) {
+async function analyzeRecuperoImportCsv(
+  client,
+  { csvText, delimiter: forcedDelimiter = null, organizationId = null }
+) {
   const totalRows = Math.max(0, countCsvRows(csvText) - 1);
   const iterator = iterateCsvLines(String(csvText || "").replace(/^\uFEFF/, ""));
   const headerResult = iterator.next();
@@ -2175,7 +2187,7 @@ async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDeli
   }
 
   const activeDocumentos = new Set();
-  const activePhones = new Set();
+  const activeContactsByPhone = new Map();
   const existingCompositeKeys = new Set();
 
   if (organizationId) {
@@ -2190,7 +2202,9 @@ async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDeli
         SELECT DISTINCT
           regexp_replace(coalesce(c.documento, ''), '\\D', '', 'g') AS documento,
           regexp_replace(coalesce(c.telefono, ''), '\\D', '', 'g') AS telefono,
-          regexp_replace(coalesce(c.celular, ''), '\\D', '', 'g') AS celular
+          regexp_replace(coalesce(c.celular, ''), '\\D', '', 'g') AS celular,
+          lower(trim(coalesce(c.nombre, ''))) AS nombre_norm,
+          lower(trim(coalesce(c.apellido, ''))) AS apellido_norm
         FROM contacts c
         JOIN contact_products cp ON cp.contact_id = c.id
         WHERE cp.estado = 'alta'
@@ -2205,8 +2219,20 @@ async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDeli
       );
       for (const row of activosRes.rows) {
         if (row.documento) activeDocumentos.add(row.documento);
-        for (const variant of getRecuperoPhoneVariants(row.telefono || "")) activePhones.add(variant);
-        for (const variant of getRecuperoPhoneVariants(row.celular || "")) activePhones.add(variant);
+        const activeContact = {
+          documento: row.documento || null,
+          name_key: buildRecuperoNameKey(row.nombre_norm, row.apellido_norm)
+        };
+        for (const variant of getRecuperoPhoneVariants(row.telefono || "")) {
+          const bucket = activeContactsByPhone.get(variant) || [];
+          bucket.push(activeContact);
+          activeContactsByPhone.set(variant, bucket);
+        }
+        for (const variant of getRecuperoPhoneVariants(row.celular || "")) {
+          const bucket = activeContactsByPhone.get(variant) || [];
+          bucket.push(activeContact);
+          activeContactsByPhone.set(variant, bucket);
+        }
       }
     }
 
@@ -2218,7 +2244,7 @@ async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDeli
           lower(trim(coalesce(nombre, ''))) AS nombre_norm,
           lower(trim(coalesce(apellido, ''))) AS apellido_norm
         FROM recupero_candidatos
-        WHERE organization_id = $1
+        WHERE recupero_candidatos.organization_id = $1
           AND regexp_replace(coalesce(documento, ''), '\\D', '', 'g') = ANY($2)
           AND estado != 'recuperado'
         `,
@@ -2241,8 +2267,11 @@ async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDeli
     if (entry.detail.duplicate_real) continue;
 
     const isActiveByDocumento = Boolean(entry.documento) && activeDocumentos.has(entry.documento);
-    const isActiveByPhone = entry.phone_variants.some((phone) => activePhones.has(phone));
-    if (isActiveByDocumento || isActiveByPhone) {
+    const isActiveByPhoneIdentity = !isActiveByDocumento && entry.phone_variants.some((phone) => {
+      const candidates = activeContactsByPhone.get(phone) || [];
+      return candidates.some((candidate) => candidate.name_key === entry.name_key);
+    });
+    if (isActiveByDocumento || isActiveByPhoneIdentity) {
       entry.importable = false;
       entry.detail.cliente_activo = true;
       entry.detail.classification = "cliente_activo";
@@ -2331,6 +2360,171 @@ async function analyzeRecuperoImportCsv(client, { csvText, delimiter: forcedDeli
       sin_documento_rows: sinDocumentoRows
     }
   };
+}
+
+const RECUPERO_DATASET_SOURCE_DEFAULT = "clientes.bajas";
+const RECUPERO_DATASET_STATUSES = new Set(["activo", "pausado", "cerrado"]);
+
+function normalizeRecuperoDatasetStatus(value) {
+  const normalized = normalizeLowerValue(value);
+  if (!normalized) return "activo";
+  if (RECUPERO_DATASET_STATUSES.has(normalized)) return normalized;
+  return "activo";
+}
+
+function getRecuperoCollapsedStatus(estado, resultadoGestion) {
+  const resultado = String(resultadoGestion || "").trim().toLowerCase();
+  const estadoValue = String(estado || "").trim().toLowerCase();
+  if (resultado === "venta") return "recuperado";
+  if (resultado === "rechazo") return "rechazado";
+  if (estadoValue === "en_gestion") return "en_gestion";
+  return "pendiente";
+}
+
+function buildRecuperoCollapsedStatusSql(alias = "rc") {
+  return `
+    CASE
+      WHEN ${alias}.resultado_gestion = 'venta' THEN 'recuperado'
+      WHEN ${alias}.resultado_gestion = 'rechazo' THEN 'rechazado'
+      WHEN ${alias}.estado = 'en_gestion' THEN 'en_gestion'
+      ELSE 'pendiente'
+    END
+  `;
+}
+
+function buildRecuperoCountsSelect(alias = "rc") {
+  return `
+    COUNT(*)::int AS total,
+    COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'venta')::int AS recovered,
+    COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'rechazo')::int AS rejected,
+    COUNT(*) FILTER (
+      WHERE ${alias}.resultado_gestion NOT IN ('venta', 'rechazo')
+        AND ${alias}.estado = 'en_gestion'
+    )::int AS in_progress,
+    COUNT(*) FILTER (
+      WHERE ${alias}.resultado_gestion NOT IN ('venta', 'rechazo')
+        AND ${alias}.estado = 'disponible'
+    )::int AS pending,
+    COUNT(*) FILTER (WHERE ${alias}.seller_id IS NOT NULL)::int AS assigned,
+    COUNT(*) FILTER (WHERE ${alias}.seller_id IS NULL)::int AS unassigned,
+    ROUND(
+      100.0
+      * COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'venta')
+      / NULLIF(COUNT(*) FILTER (WHERE ${alias}.resultado_gestion IN ('venta', 'rechazo')), 0),
+      0
+    )::int AS effectiveness_pct
+  `;
+}
+
+function mapRecuperoCounts(row = {}) {
+  return {
+    total: Number(row.total || 0),
+    recovered: Number(row.recovered || 0),
+    rejected: Number(row.rejected || 0),
+    in_progress: Number(row.in_progress || 0),
+    pending: Number(row.pending || 0),
+    assigned: Number(row.assigned || 0),
+    unassigned: Number(row.unassigned || 0),
+    effectiveness_pct: Number(row.effectiveness_pct || 0)
+  };
+}
+
+function buildRecuperoDatasetPayload(row = {}) {
+  return {
+    id: row.id,
+    name: row.dataset_name || row.file_name || null,
+    source_file: row.file_name || null,
+    imported_at: row.imported_at || row.finished_at || row.created_at || null,
+    source: row.dataset_source || RECUPERO_DATASET_SOURCE_DEFAULT,
+    churn_window_from: row.churn_window_from || null,
+    churn_window_to: row.churn_window_to || null,
+    total_rows: Number(row.total_rows || 0),
+    duplicates_discarded: Number(row.duplicate_rows || 0),
+    max_attempts: row.max_attempts || { calls: 3, whatsapp: 1 },
+    offer: row.offer || null,
+    expires_on: row.expires_on || null,
+    status: normalizeRecuperoDatasetStatus(row.dataset_status),
+    goal: Number(row.goal || 0),
+    clientes_sync_at: row.clientes_sync_at || null
+  };
+}
+
+async function getRecuperoDatasetSchema(client) {
+  const [jobCols, candidateCols, assignmentTableRes] = await Promise.all([
+    getTableColumns(client, "recupero_import_jobs"),
+    getTableColumns(client, "recupero_candidatos"),
+    client.query(`SELECT to_regclass('public.recupero_asignaciones_rango') AS table_name`)
+  ]);
+  return {
+    jobCols,
+    candidateCols,
+    hasAssignmentsTable: Boolean(assignmentTableRes.rows[0]?.table_name)
+  };
+}
+
+function getRecuperoDatasetSchemaMissing(schema, { requireAssignments = true } = {}) {
+  const missing = [];
+  for (const col of [
+    "dataset_name",
+    "dataset_source",
+    "dataset_status",
+    "goal",
+    "clientes_sync_at"
+  ]) {
+    if (!schema.jobCols.has(col)) missing.push(`recupero_import_jobs.${col}`);
+  }
+  for (const col of ["dataset_id", "row_number"]) {
+    if (!schema.candidateCols.has(col)) missing.push(`recupero_candidatos.${col}`);
+  }
+  if (requireAssignments && !schema.hasAssignmentsTable) {
+    missing.push("recupero_asignaciones_rango");
+  }
+  return missing;
+}
+
+async function loadRecuperoDatasetCounts(client, datasetId, organizationId) {
+  const countsRes = await client.query(
+    `
+    SELECT ${buildRecuperoCountsSelect("rc")}
+    FROM recupero_candidatos rc
+    WHERE rc.dataset_id = $1
+      AND rc.organization_id = $2
+    `,
+    [datasetId, organizationId]
+  );
+  return mapRecuperoCounts(countsRes.rows[0] || {});
+}
+
+async function loadRecuperoDatasetRow(client, { datasetId, organizationId }) {
+  const values = [datasetId, organizationId];
+  const res = await client.query(
+    `
+    SELECT
+      id,
+      file_name,
+      dataset_name,
+      dataset_source,
+      churn_window_from,
+      churn_window_to,
+      total_rows,
+      duplicate_rows,
+      max_attempts,
+      offer,
+      expires_on,
+      dataset_status,
+      goal,
+      clientes_sync_at,
+      created_at,
+      finished_at,
+      COALESCE(finished_at, created_at) AS imported_at
+    FROM recupero_import_jobs
+    WHERE id = $1
+      AND organization_id = $2
+    LIMIT 1
+    `,
+    values
+  );
+  return res.rows[0] || null;
 }
 
 function countCsvRows(csvText) {
@@ -5063,6 +5257,8 @@ export async function processRecuperoImportJob(jobId) {
     const hasClientesActivosRows = jobCols.has("clientes_activos_rows");
     const hasRequiresRevisionRows = jobCols.has("requiere_revision_rows");
     const hasRecuperoRequiresRevision = recuperoCols.has("requiere_revision");
+    const hasDatasetId = recuperoCols.has("dataset_id");
+    const hasRowNumber = recuperoCols.has("row_number");
     const jobRes = await client.query(
       `SELECT id, csv_text, status, total_rows, processed_rows,
               updated_rows, error_rows, delimiter, created_by, organization_id
@@ -5159,58 +5355,67 @@ export async function processRecuperoImportJob(jobId) {
     let insertedRows = 0;
     for (let i = 0; i < toInsert.length; i += chunkSize) {
       const chunk = toInsert.slice(i, i + chunkSize);
-      const insertColumns = [
-        "organization_id", "nombre", "apellido", "documento", "telefono", "celular",
-        "vendedor_origen", "medio_pago", "motivo_baja", "motivo_baja_detalle",
-        "fecha_baja", "observacion", "fecha_nacimiento", "departamento", "direccion",
-        "producto_anterior", "precio_anterior", "fecha_venta", "estado", "importado_por", "importado_at"
-      ];
-      const selectColumns = [
-        "$1", "t.nombre", "t.apellido", "t.documento", "t.telefono", "t.celular",
-        "t.vendedor_origen", "t.medio_pago", "t.motivo_baja", "t.motivo_baja_detalle",
-        "t.fecha_baja::date", "t.observacion", "t.fecha_nacimiento::date", "t.departamento", "t.direccion",
-        "t.producto_anterior", "t.precio_anterior::numeric", "t.fecha_venta::date", "'disponible'", "$2", "now()"
-      ];
-      const unnestTypeColumns = [
-        "$3::text[]", "$4::text[]", "$5::text[]", "$6::text[]", "$7::text[]", "$8::text[]",
-        "$9::text[]", "$10::text[]", "$11::text[]", "$12::text[]", "$13::text[]", "$14::text[]",
-        "$15::text[]", "$16::text[]", "$17::text[]", "$18::text[]", "$19::text[]", "$20::text[]"
-      ];
-      const unnestAliasColumns = [
-        "nombre", "apellido", "documento", "telefono", "celular", "vendedor_origen",
-        "medio_pago", "motivo_baja", "motivo_baja_detalle", "fecha_baja", "observacion",
-        "fecha_nacimiento", "departamento", "direccion", "producto_anterior",
-        "precio_anterior", "fecha_venta", "_dummy"
-      ];
-      const values = [
-        organizationId,
-        createdBy,
-        chunk.map((r) => r.nombre),
-        chunk.map((r) => r.apellido),
-        chunk.map((r) => r.documento),
-        chunk.map((r) => r.telefono),
-        chunk.map((r) => r.celular),
-        chunk.map((r) => r.vendedor_origen),
-        chunk.map((r) => r.medio_pago),
-        chunk.map((r) => r.motivo_baja),
-        chunk.map((r) => r.motivo_baja_detalle),
-        chunk.map((r) => r.fecha_baja),
-        chunk.map((r) => r.observacion),
-        chunk.map((r) => r.fecha_nacimiento),
-        chunk.map((r) => r.departamento),
-        chunk.map((r) => r.direccion),
-        chunk.map((r) => r.producto_anterior),
-        chunk.map((r) => r.precio_anterior?.toString()),
-        chunk.map((r) => r.fecha_venta),
-        chunk.map(() => null)
-      ];
-      if (hasRecuperoRequiresRevision) {
-        insertColumns.splice(18, 0, "requiere_revision");
-        selectColumns.splice(18, 0, "t.requiere_revision");
-        unnestTypeColumns.splice(20, 0, "$21::boolean[]");
-        unnestAliasColumns.splice(18, 0, "requiere_revision");
-        values.push(chunk.map((r) => Boolean(r.detail?.requiere_revision)));
+      const insertColumns = ["organization_id"];
+      const selectColumns = ["$1"];
+      const values = [organizationId];
+      let nextParam = 2;
+
+      const pushStaticColumn = (insertColumn, selectExpr) => {
+        insertColumns.push(insertColumn);
+        selectColumns.push(selectExpr);
+      };
+      const unnestColumns = [];
+      const pushUnnestColumn = (alias, type, chunkValues, selectExpr = null, insertColumn = null) => {
+        const finalInsertColumn = insertColumn || alias;
+        insertColumns.push(finalInsertColumn);
+        unnestColumns.push({
+          alias,
+          type,
+          param: `$${nextParam}::${type}`,
+          values: chunkValues
+        });
+        selectColumns.push(selectExpr || `t.${alias}`);
+        values.push(chunkValues);
+        nextParam += 1;
+      };
+
+      pushUnnestColumn("nombre", "text[]", chunk.map((r) => r.nombre));
+      pushUnnestColumn("apellido", "text[]", chunk.map((r) => r.apellido));
+      pushUnnestColumn("documento", "text[]", chunk.map((r) => r.documento));
+      pushUnnestColumn("telefono", "text[]", chunk.map((r) => r.telefono));
+      pushUnnestColumn("celular", "text[]", chunk.map((r) => r.celular));
+      pushUnnestColumn("vendedor_origen", "text[]", chunk.map((r) => r.vendedor_origen));
+      pushUnnestColumn("medio_pago", "text[]", chunk.map((r) => r.medio_pago));
+      pushUnnestColumn("motivo_baja", "text[]", chunk.map((r) => r.motivo_baja));
+      pushUnnestColumn("motivo_baja_detalle", "text[]", chunk.map((r) => r.motivo_baja_detalle));
+      pushUnnestColumn("fecha_baja", "text[]", chunk.map((r) => r.fecha_baja), "t.fecha_baja::date");
+      pushUnnestColumn("observacion", "text[]", chunk.map((r) => r.observacion));
+      pushUnnestColumn("fecha_nacimiento", "text[]", chunk.map((r) => r.fecha_nacimiento), "t.fecha_nacimiento::date");
+      pushUnnestColumn("departamento", "text[]", chunk.map((r) => r.departamento));
+      pushUnnestColumn("direccion", "text[]", chunk.map((r) => r.direccion));
+      pushUnnestColumn("producto_anterior", "text[]", chunk.map((r) => r.producto_anterior));
+      pushUnnestColumn("precio_anterior", "text[]", chunk.map((r) => r.precio_anterior?.toString()), "t.precio_anterior::numeric");
+      pushUnnestColumn("fecha_venta", "text[]", chunk.map((r) => r.fecha_venta), "t.fecha_venta::date");
+      if (hasDatasetId) {
+        pushStaticColumn("dataset_id", `$${nextParam}`);
+        values.push(jobId);
+        nextParam += 1;
       }
+      if (hasRowNumber) {
+        pushUnnestColumn("row_number", "text[]", chunk.map((r) => String(r.row || "")), "t.row_number::integer");
+      }
+      if (hasRecuperoRequiresRevision) {
+        pushUnnestColumn(
+          "requiere_revision",
+          "boolean[]",
+          chunk.map((r) => Boolean(r.detail?.requiere_revision))
+        );
+      }
+      pushStaticColumn("estado", "'disponible'");
+      pushStaticColumn("importado_por", `$${nextParam}`);
+      values.push(createdBy);
+      nextParam += 1;
+      pushStaticColumn("importado_at", "now()");
       const insertRes = await client.query(
         `INSERT INTO recupero_candidatos (
           ${insertColumns.join(", ")}
@@ -5218,9 +5423,9 @@ export async function processRecuperoImportJob(jobId) {
         SELECT
           ${selectColumns.join(", ")}
         FROM UNNEST(
-          ${unnestTypeColumns.join(", ")}
+          ${unnestColumns.map((col) => col.param).join(", ")}
         ) AS t(
-          ${unnestAliasColumns.join(", ")}
+          ${unnestColumns.map((col) => col.alias).join(", ")}
         )
         WHERE NOT EXISTS (
           SELECT 1
@@ -17401,6 +17606,10 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const recuperoCandidateCols = await getTableColumns(client, "recupero_candidatos");
+        const recuperoJobCols = await getTableColumns(client, "recupero_import_jobs");
+        const useDatasetStatusFilter =
+          recuperoCandidateCols.has("dataset_id") && recuperoJobCols.has("dataset_status");
         await client.query("BEGIN");
 
         const updateRes = await client.query(
@@ -17413,6 +17622,16 @@ export const handler = async (event) => {
           WHERE id = ANY($2::uuid[])
             AND organization_id = $3
             AND estado = 'disponible'
+            ${useDatasetStatusFilter ? `
+            AND (
+              dataset_id IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM recupero_import_jobs rij
+                WHERE rij.id = recupero_candidatos.dataset_id
+                  AND COALESCE(rij.dataset_status, 'activo') = 'activo'
+              )
+            )` : ""}
           RETURNING id
           `,
           [sellerId, candidatoIds, organizationId]
@@ -18233,6 +18452,16 @@ export const handler = async (event) => {
       const client = createDbClient();
       await client.connect();
       try {
+        const recuperoCandidateCols = await getTableColumns(client, "recupero_candidatos");
+        const recuperoJobCols = await getTableColumns(client, "recupero_import_jobs");
+        const useDatasetStatusFilter =
+          recuperoCandidateCols.has("dataset_id") && recuperoJobCols.has("dataset_status");
+        const datasetJoin = useDatasetStatusFilter
+          ? "LEFT JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id"
+          : "";
+        const datasetWhere = useDatasetStatusFilter
+          ? "AND COALESCE(rij.dataset_status, 'activo') = 'activo'"
+          : "";
         const itemsSearch = buildSearchFilter(searchRaw, searchDigits, 5);
         const itemsRes = await client.query(
           `
@@ -18265,9 +18494,11 @@ export const handler = async (event) => {
             rc.intentos_contacto,
             rc.contact_id
           FROM recupero_candidatos rc
+          ${datasetJoin}
           WHERE rc.organization_id = $1
             AND rc.seller_id = $2
             AND rc.estado_administrativo = 'activo'
+            ${datasetWhere}
             AND ${estadoFilter}
             ${itemsSearch.clause}
           ORDER BY rc.fecha_baja ASC NULLS LAST
@@ -18281,9 +18512,11 @@ export const handler = async (event) => {
           `
           SELECT COUNT(*)::int AS total
           FROM recupero_candidatos rc
+          ${datasetJoin}
           WHERE rc.organization_id = $1
             AND rc.seller_id = $2
             AND rc.estado_administrativo = 'activo'
+            ${datasetWhere}
             AND ${estadoFilter}
             ${countSearch.clause}
           `,
@@ -18300,9 +18533,11 @@ export const handler = async (event) => {
             COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recuperados,
             COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rechazados
           FROM recupero_candidatos rc
+          ${datasetJoin}
           WHERE rc.organization_id = $1
             AND rc.seller_id = $2
             AND rc.estado_administrativo = 'activo'
+            ${datasetWhere}
           `,
           [organizationId, dbUser.id]
         );
@@ -27231,6 +27466,969 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       });
     }
   }
+  if (method === "GET" && path === "/recovery/summary") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const [countsRes, datasetsRes, sellersRes] = await Promise.all([
+          client.query(
+            `
+            SELECT ${buildRecuperoCountsSelect("rc")}
+            FROM recupero_candidatos rc
+            JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+            WHERE rij.organization_id = $1
+            `,
+            [organizationId]
+          ),
+          client.query(
+            `
+            SELECT
+              id,
+              file_name,
+              dataset_name,
+              duplicate_rows,
+              dataset_status,
+              goal,
+              clientes_sync_at,
+              created_at,
+              finished_at,
+              COALESCE(finished_at, created_at) AS imported_at
+            FROM recupero_import_jobs
+            WHERE organization_id = $1
+            ORDER BY COALESCE(finished_at, created_at) DESC, created_at DESC
+            `,
+            [organizationId]
+          ),
+          client.query(
+            `
+            SELECT COUNT(DISTINCT rc.seller_id)::int AS active_sellers
+            FROM recupero_candidatos rc
+            JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+            WHERE rij.organization_id = $1
+              AND rc.seller_id IS NOT NULL
+            `,
+            [organizationId]
+          )
+        ]);
+
+        const counts = mapRecuperoCounts(countsRes.rows[0] || {});
+        const datasets = datasetsRes.rows;
+        const lastImport = datasets[0]
+          ? {
+              file: datasets[0].file_name || null,
+              at: datasets[0].imported_at || null,
+              duplicates_discarded: Number(datasets[0].duplicate_rows || 0)
+            }
+          : null;
+
+        return json(200, {
+          active_datasets: datasets.filter((row) => normalizeRecuperoDatasetStatus(row.dataset_status) === "activo").length,
+          total_rows: counts.total,
+          recovered: counts.recovered,
+          rejected: counts.rejected,
+          in_progress: counts.in_progress,
+          pending: counts.pending,
+          unassigned: counts.unassigned,
+          goal: datasets.reduce((acc, row) => acc + Number(row.goal || 0), 0),
+          effectiveness_pct: counts.effectiveness_pct,
+          active_sellers: Number(sellersRes.rows[0]?.active_sellers || 0),
+          last_import: lastImport,
+          clientes_sync_at: datasets.reduce((latest, row) => {
+            if (!row.clientes_sync_at) return latest;
+            if (!latest) return row.clientes_sync_at;
+            return new Date(row.clientes_sync_at) > new Date(latest) ? row.clientes_sync_at : latest;
+          }, null)
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery summary", error: error.message });
+    }
+  }
+  if (method === "GET" && path === "/recovery/datasets") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const result = await client.query(
+          `
+          WITH candidate_counts AS (
+            SELECT
+              rc.dataset_id,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recovered,
+              COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rejected,
+              COUNT(*) FILTER (
+                WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                  AND rc.estado = 'en_gestion'
+              )::int AS in_progress,
+              COUNT(*) FILTER (
+                WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                  AND rc.estado = 'disponible'
+              )::int AS pending,
+              COUNT(*) FILTER (WHERE rc.seller_id IS NOT NULL)::int AS assigned_rows,
+              COUNT(*) FILTER (WHERE rc.seller_id IS NULL)::int AS unassigned_rows
+            FROM recupero_candidatos rc
+            JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+            WHERE rij.organization_id = $1
+            GROUP BY rc.dataset_id
+          ),
+          assignee_counts AS (
+            SELECT
+              rc.dataset_id,
+              COUNT(DISTINCT rc.seller_id) FILTER (WHERE rc.seller_id IS NOT NULL)::int AS assignees_count,
+              CASE
+                WHEN COUNT(DISTINCT rc.seller_id) FILTER (WHERE rc.seller_id IS NOT NULL) = 1
+                  THEN MAX(COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre))
+                ELSE NULL
+              END AS assignee_name
+            FROM recupero_candidatos rc
+            JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+            LEFT JOIN users u ON u.id = rc.seller_id
+            WHERE rij.organization_id = $1
+            GROUP BY rc.dataset_id
+          )
+          SELECT
+            rij.id,
+            rij.file_name,
+            rij.dataset_name,
+            rij.dataset_status,
+            COALESCE(rij.finished_at, rij.created_at) AS imported_at,
+            COALESCE(cc.total, 0) AS total,
+            COALESCE(cc.recovered, 0) AS recovered,
+            COALESCE(cc.rejected, 0) AS rejected,
+            COALESCE(cc.in_progress, 0) AS in_progress,
+            COALESCE(cc.pending, 0) AS pending,
+            COALESCE(cc.assigned_rows, 0) AS assigned_rows,
+            COALESCE(cc.unassigned_rows, 0) AS unassigned_rows,
+            COALESCE(ac.assignees_count, 0) AS assignees_count,
+            ac.assignee_name
+          FROM recupero_import_jobs rij
+          LEFT JOIN candidate_counts cc ON cc.dataset_id = rij.id
+          LEFT JOIN assignee_counts ac ON ac.dataset_id = rij.id
+          WHERE rij.organization_id = $1
+          ORDER BY COALESCE(rij.finished_at, rij.created_at) DESC, rij.created_at DESC
+          `,
+          [organizationId]
+        );
+
+        return json(
+          200,
+          result.rows.map((row) => ({
+            id: row.id,
+            name: row.dataset_name || row.file_name || null,
+            source_file: row.file_name || null,
+            imported_at: row.imported_at || null,
+            status: normalizeRecuperoDatasetStatus(row.dataset_status),
+            counts: {
+              total: Number(row.total || 0),
+              recovered: Number(row.recovered || 0),
+              rejected: Number(row.rejected || 0),
+              in_progress: Number(row.in_progress || 0),
+              pending: Number(row.pending || 0)
+            },
+            assigned_rows: Number(row.assigned_rows || 0),
+            unassigned_rows: Number(row.unassigned_rows || 0),
+            assignees_count: Number(row.assignees_count || 0),
+            assignee_name: Number(row.assignees_count || 0) === 1 ? row.assignee_name || null : null
+          }))
+        );
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery datasets", error: error.message });
+    }
+  }
+  if (method === "GET" && path === "/recovery/sellers") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const result = await client.query(
+          `
+          SELECT
+            rc.seller_id,
+            COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS name,
+            ARRAY_REMOVE(ARRAY_AGG(DISTINCT COALESCE(rij.dataset_name, rij.file_name)), NULL) AS dataset_names,
+            COUNT(*)::int AS assigned,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recovered,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rejected,
+            COUNT(*) FILTER (
+              WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                AND rc.estado = 'en_gestion'
+            )::int AS in_progress,
+            COUNT(*) FILTER (
+              WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                AND rc.estado = 'disponible'
+            )::int AS pending,
+            ROUND(
+              100.0
+              * COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')
+              / NULLIF(COUNT(*) FILTER (WHERE rc.resultado_gestion IN ('venta', 'rechazo')), 0),
+              0
+            )::int AS effectiveness_pct
+          FROM recupero_candidatos rc
+          JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+          JOIN users u ON u.id = rc.seller_id
+          WHERE rij.organization_id = $1
+            AND rc.seller_id IS NOT NULL
+          GROUP BY rc.seller_id, u.nombre, u.apellido, u.id
+          ORDER BY name ASC NULLS LAST
+          `,
+          [organizationId]
+        );
+
+        return json(
+          200,
+          result.rows.map((row) => ({
+            seller_id: row.seller_id,
+            name: row.name || null,
+            dataset_names: Array.isArray(row.dataset_names) ? row.dataset_names : [],
+            counts: {
+              assigned: Number(row.assigned || 0),
+              recovered: Number(row.recovered || 0),
+              rejected: Number(row.rejected || 0),
+              in_progress: Number(row.in_progress || 0),
+              pending: Number(row.pending || 0)
+            },
+            effectiveness_pct: Number(row.effectiveness_pct || 0)
+          }))
+        );
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery sellers", error: error.message });
+    }
+  }
+  if (method === "GET" && path.match(/^\/recovery\/datasets\/([^/]+)$/)) {
+    const match = path.match(/^\/recovery\/datasets\/([^/]+)$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+
+        const [counts, assignmentsRes, sampleRes] = await Promise.all([
+          loadRecuperoDatasetCounts(client, datasetId, organizationId),
+          client.query(
+            `
+            SELECT
+              ra.id,
+              ra.seller_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
+              ra.row_from,
+              ra.row_to,
+              COUNT(rc.id)::int AS assigned,
+              COUNT(rc.id) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recovered,
+              COUNT(rc.id) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rejected,
+              COUNT(rc.id) FILTER (
+                WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                  AND rc.estado = 'en_gestion'
+              )::int AS in_progress,
+              COUNT(rc.id) FILTER (
+                WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                  AND rc.estado = 'disponible'
+              )::int AS pending
+            FROM recupero_asignaciones_rango ra
+            LEFT JOIN users u ON u.id = ra.seller_id
+            LEFT JOIN recupero_candidatos rc
+              ON rc.dataset_id = ra.dataset_id
+             AND rc.organization_id = ra.organization_id
+             AND rc.row_number BETWEEN ra.row_from AND ra.row_to
+            WHERE ra.dataset_id = $1
+              AND ra.organization_id = $2
+              AND ra.released_at IS NULL
+            GROUP BY ra.id, ra.seller_id, u.nombre, u.apellido, u.id, ra.row_from, ra.row_to
+            ORDER BY ra.row_from ASC
+            `,
+            [datasetId, organizationId]
+          ),
+          client.query(
+            `
+            SELECT
+              row_number,
+              nombre,
+              apellido,
+              documento,
+              COALESCE(NULLIF(celular, ''), telefono) AS phone,
+              precio_anterior AS debt_amount,
+              COALESCE(NULLIF(motivo_baja_detalle, ''), motivo_baja) AS churn_reason,
+              producto_anterior AS previous_plan,
+              estado,
+              resultado_gestion
+            FROM recupero_candidatos
+            WHERE dataset_id = $1
+              AND organization_id = $2
+            ORDER BY row_number ASC NULLS LAST, created_at ASC
+            LIMIT 5
+            `,
+            [datasetId, organizationId]
+          )
+        ]);
+
+        return json(200, {
+          dataset: buildRecuperoDatasetPayload(datasetRow),
+          counts: {
+            total: counts.total,
+            recovered: counts.recovered,
+            rejected: counts.rejected,
+            in_progress: counts.in_progress,
+            pending: counts.pending
+          },
+          assignments: assignmentsRes.rows.map((row) => ({
+            id: row.id,
+            seller_id: row.seller_id,
+            seller_name: row.seller_name || null,
+            row_from: Number(row.row_from || 0),
+            row_to: Number(row.row_to || 0),
+            counts: {
+              assigned: Number(row.assigned || 0),
+              recovered: Number(row.recovered || 0),
+              rejected: Number(row.rejected || 0),
+              in_progress: Number(row.in_progress || 0),
+              pending: Number(row.pending || 0)
+            }
+          })),
+          sample: sampleRes.rows.map((row) => ({
+            row_number: Number(row.row_number || 0),
+            client_name: [row.nombre, row.apellido].filter(Boolean).join(" ").trim(),
+            document: row.documento || null,
+            phone: row.phone || null,
+            debt_amount: row.debt_amount !== null && row.debt_amount !== undefined ? Number(row.debt_amount) : 0,
+            churn_reason: row.churn_reason || null,
+            previous_plan: row.previous_plan || null,
+            status: getRecuperoCollapsedStatus(row.estado, row.resultado_gestion),
+            resultado_gestion: row.resultado_gestion || null
+          }))
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery dataset detail", error: error.message });
+    }
+  }
+  if (method === "POST" && path.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/)) {
+    const match = path.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+      const sellerId = body?.seller_id || null;
+      const rowFrom = Number(body?.row_from);
+      const rowTo = Number(body?.row_to);
+      if (!isValidUuid(sellerId)) {
+        return json(422, { ok: false, message: "seller_id invalido" });
+      }
+      if (!Number.isInteger(rowFrom) || !Number.isInteger(rowTo) || rowFrom < 1 || rowTo <= rowFrom) {
+        return json(422, { ok: false, message: "Rango invalido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+        if (rowTo > Number(datasetRow.total_rows || 0)) {
+          return json(422, { ok: false, message: "El rango excede el total del dataset" });
+        }
+        if (normalizeRecuperoDatasetStatus(datasetRow.dataset_status) !== "activo") {
+          return json(409, { ok: false, message: "Solo se pueden asignar datasets activos" });
+        }
+
+        await client.query("BEGIN");
+        const overlapRes = await client.query(
+          `
+          SELECT
+            ra.row_from,
+            ra.row_to,
+            COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name
+          FROM recupero_asignaciones_rango ra
+          LEFT JOIN users u ON u.id = ra.seller_id
+          WHERE ra.dataset_id = $1
+            AND ra.organization_id = $2
+            AND ra.released_at IS NULL
+            AND int4range(ra.row_from, ra.row_to + 1, '[)') && int4range($3, $4 + 1, '[)')
+          ORDER BY ra.row_from ASC
+          LIMIT 1
+          `,
+          [datasetId, organizationId, rowFrom, rowTo]
+        );
+        if (overlapRes.rows.length) {
+          await client.query("ROLLBACK");
+          const conflict = overlapRes.rows[0];
+          return json(409, {
+            ok: false,
+            conflict: {
+              seller_name: conflict.seller_name || null,
+              row_from: Number(conflict.row_from || 0),
+              row_to: Number(conflict.row_to || 0)
+            }
+          });
+        }
+
+        const unavailableRes = await client.query(
+          `
+          SELECT
+            row_number,
+            seller_id,
+            estado,
+            resultado_gestion
+          FROM recupero_candidatos
+          WHERE dataset_id = $1
+            AND organization_id = $2
+            AND row_number BETWEEN $3 AND $4
+            AND (
+              seller_id IS NOT NULL
+              OR estado <> 'disponible'
+              OR resultado_gestion IN ('venta', 'rechazo')
+            )
+          ORDER BY row_number ASC
+          LIMIT 1
+          `,
+          [datasetId, organizationId, rowFrom, rowTo]
+        );
+        if (unavailableRes.rows.length) {
+          await client.query("ROLLBACK");
+          return json(409, {
+            ok: false,
+            message: "El rango incluye candidatos ya asignados o gestionados",
+            conflict: {
+              row_number: Number(unavailableRes.rows[0].row_number || 0),
+              seller_id: unavailableRes.rows[0].seller_id || null,
+              status: getRecuperoCollapsedStatus(
+                unavailableRes.rows[0].estado,
+                unavailableRes.rows[0].resultado_gestion
+              )
+            }
+          });
+        }
+
+        const assignmentRes = await client.query(
+          `
+          INSERT INTO recupero_asignaciones_rango (
+            dataset_id,
+            organization_id,
+            seller_id,
+            row_from,
+            row_to,
+            assigned_by
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+          RETURNING id, seller_id, row_from, row_to, assigned_at
+          `,
+          [datasetId, organizationId, sellerId, rowFrom, rowTo, dbUser.id]
+        );
+
+        const updateRes = await client.query(
+          `
+          UPDATE recupero_candidatos
+          SET seller_id = $1,
+              estado = 'en_gestion',
+              fecha_asignacion = NOW(),
+              updated_at = NOW()
+          WHERE dataset_id = $2
+            AND organization_id = $3
+            AND row_number BETWEEN $4 AND $5
+            AND estado = 'disponible'
+            AND seller_id IS NULL
+            AND resultado_gestion NOT IN ('venta', 'rechazo')
+          RETURNING id
+          `,
+          [sellerId, datasetId, organizationId, rowFrom, rowTo]
+        );
+        if (updateRes.rows.length) {
+          await client.query(
+            `
+            INSERT INTO recupero_candidatos_historial
+              (candidato_id, estado_anterior, estado_nuevo, tipo_evento, seller_id, nota, created_at)
+            SELECT id, 'disponible', 'en_gestion', 'asignacion_rango', $1, $2, NOW()
+            FROM recupero_candidatos
+            WHERE id = ANY($3::uuid[])
+            `,
+            [sellerId, `Asignacion de rango ${rowFrom}-${rowTo}`, updateRes.rows.map((row) => row.id)]
+          );
+        }
+
+        await client.query("COMMIT");
+        const counts = await loadRecuperoDatasetCounts(client, datasetId, organizationId);
+        return json(201, {
+          ok: true,
+          assignment: {
+            id: assignmentRes.rows[0]?.id || null,
+            seller_id: assignmentRes.rows[0]?.seller_id || sellerId,
+            row_from: Number(assignmentRes.rows[0]?.row_from || rowFrom),
+            row_to: Number(assignmentRes.rows[0]?.row_to || rowTo),
+            assigned_at: assignmentRes.rows[0]?.assigned_at || null
+          },
+          counts: {
+            total: counts.total,
+            recovered: counts.recovered,
+            rejected: counts.rejected,
+            in_progress: counts.in_progress,
+            pending: counts.pending
+          },
+          unassigned_rows: counts.unassigned
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to create recovery assignment", error: error.message });
+    }
+  }
+  if (method === "DELETE" && path.match(/^\/recovery\/assignments\/([^/]+)$/)) {
+    const match = path.match(/^\/recovery\/assignments\/([^/]+)$/);
+    const assignmentId = match?.[1] || null;
+    if (!isValidUuid(assignmentId)) {
+      return json(400, { ok: false, message: "assignment_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        await client.query("BEGIN");
+        const assignmentRes = await client.query(
+          `
+          SELECT id, dataset_id, seller_id, row_from, row_to
+          FROM recupero_asignaciones_rango
+          WHERE id = $1
+            AND organization_id = $2
+            AND released_at IS NULL
+          LIMIT 1
+          `,
+          [assignmentId, organizationId]
+        );
+        const assignment = assignmentRes.rows[0];
+        if (!assignment) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Assignment no encontrado" });
+        }
+
+        await client.query(
+          `
+          UPDATE recupero_asignaciones_rango
+          SET released_at = NOW(),
+              released_by = $2,
+              updated_at = NOW()
+          WHERE id = $1
+          `,
+          [assignmentId, dbUser.id]
+        );
+
+        await client.query(
+          `
+          UPDATE recupero_candidatos
+          SET seller_id = NULL,
+              fecha_asignacion = CASE
+                WHEN resultado_gestion IN ('venta', 'rechazo') THEN fecha_asignacion
+                ELSE NULL
+              END,
+              estado = CASE
+                WHEN resultado_gestion IN ('venta', 'rechazo') THEN estado
+                ELSE 'disponible'
+              END,
+              updated_at = NOW()
+          WHERE dataset_id = $1
+            AND organization_id = $2
+            AND row_number BETWEEN $3 AND $4
+            AND seller_id = $5
+          `,
+          [assignment.dataset_id, organizationId, assignment.row_from, assignment.row_to, assignment.seller_id]
+        );
+
+        await client.query("COMMIT");
+        const counts = await loadRecuperoDatasetCounts(client, assignment.dataset_id, organizationId);
+        return json(200, {
+          ok: true,
+          counts: {
+            total: counts.total,
+            recovered: counts.recovered,
+            rejected: counts.rejected,
+            in_progress: counts.in_progress,
+            pending: counts.pending
+          },
+          unassigned_rows: counts.unassigned
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to release recovery assignment", error: error.message });
+    }
+  }
+  if (method === "PATCH" && path.match(/^\/recovery\/datasets\/([^/]+)$/)) {
+    const match = path.match(/^\/recovery\/datasets\/([^/]+)$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+      const rawStatus = normalizeLowerValue(body?.status);
+      if (!RECUPERO_DATASET_STATUSES.has(rawStatus)) {
+        return json(422, { ok: false, message: "status invalido" });
+      }
+      const nextStatus = rawStatus;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const updateRes = await client.query(
+          `
+          UPDATE recupero_import_jobs
+          SET dataset_status = $1,
+              updated_at = NOW()
+          WHERE id = $2
+            AND organization_id = $3
+          RETURNING id
+          `,
+          [nextStatus, datasetId, organizationId]
+        );
+        if (!updateRes.rows.length) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        return json(200, { ok: true, dataset: buildRecuperoDatasetPayload(datasetRow) });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to update recovery dataset", error: error.message });
+    }
+  }
+  if (method === "POST" && path === "/recovery/imports") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const multipart = parseMultipartFormData(event, { encoding: "latin1" });
+      if (!multipart) {
+        return json(400, { ok: false, message: "Archivo invalido" });
+      }
+
+      const fileEntry =
+        multipart.files?.file ||
+        multipart.files?.archivo ||
+        Object.values(multipart.files || {})[0];
+      const fileNameHeader =
+        event?.headers?.["x-file-name"] ||
+        event?.headers?.["X-File-Name"] ||
+        event?.headers?.["x-filename"] ||
+        event?.headers?.["X-Filename"] ||
+        "recupero.csv";
+      const fileName = fileEntry?.filename || fileNameHeader || "recupero.csv";
+      const csvText = fileEntry?.content || "";
+      if (!fileName.toLowerCase().endsWith(".csv")) {
+        return json(400, { ok: false, message: "Formato invalido" });
+      }
+      if (!csvText || !csvText.trim()) {
+        return json(400, { ok: false, message: "CSV vacio" });
+      }
+
+      const sizeBytes = Buffer.byteLength(csvText, "utf8");
+      if (sizeBytes > 5 * 1024 * 1024) {
+        return json(400, { ok: false, message: "Archivo demasiado grande" });
+      }
+
+      const delimiterRaw = String(multipart.fields?.delimiter || "").trim();
+      const delimiter = delimiterRaw && delimiterRaw.length === 1 ? delimiterRaw : null;
+      const iterator = iterateCsvLines(csvText.replace(/^\uFEFF/, ""));
+      const headerResult = iterator.next();
+      const headerLine = headerResult.done ? "" : headerResult.value || "";
+      const headerDelimiter = delimiter || detectCsvDelimiter(headerLine);
+      const headers = parseCsvLine(headerLine, headerDelimiter).map((h) => normalizeImportValue(h));
+      const hasNombre = headers.some((h) => h === "nombres" || h === "nombre");
+      const hasApellido = headers.some((h) => h === "apellidos" || h === "apellido");
+      const hasIdentificador =
+        headers.includes("documento") || headers.some((h) => h === "telefono" || h === "celular");
+      if (!hasNombre || !hasApellido || !hasIdentificador) {
+        return json(400, {
+          ok: false,
+          message: "El CSV debe tener columnas: Nombres, Apellidos y al menos Documento o Telefono"
+        });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const preview = await analyzeRecuperoImportCsv(client, {
+          csvText,
+          delimiter: headerDelimiter,
+          organizationId
+        });
+        if (!preview.ok) {
+          return json(400, { ok: false, message: preview.errorMessage });
+        }
+
+        const fileHash = crypto.createHash("sha256").update(csvText).digest("hex");
+        const datasetName = normalizeText(multipart.fields?.name || multipart.fields?.dataset_name || "") || fileName;
+        const datasetStatus = normalizeRecuperoDatasetStatus(multipart.fields?.status || "activo");
+        const source = RECUPERO_DATASET_SOURCE_DEFAULT;
+        const churnWindowFrom = normalizeText(multipart.fields?.churn_window_from || "") || null;
+        const churnWindowTo = normalizeText(multipart.fields?.churn_window_to || "") || null;
+        const offer = normalizeText(multipart.fields?.offer || "") || null;
+        const expiresOn = normalizeText(multipart.fields?.expires_on || "") || null;
+        const goal = Number.isFinite(Number(multipart.fields?.goal)) ? Number(multipart.fields?.goal) : 0;
+        const maxAttemptsRaw = normalizeText(multipart.fields?.max_attempts || "") || null;
+        let maxAttempts = { calls: 3, whatsapp: 1 };
+        if (maxAttemptsRaw) {
+          try {
+            maxAttempts = JSON.parse(maxAttemptsRaw);
+          } catch {}
+        }
+
+        const existingRes = await client.query(
+          `
+          SELECT id, status
+          FROM recupero_import_jobs
+          WHERE file_hash = $1
+            AND organization_id = $2
+            AND status IN ('queued', 'processing', 'done')
+          ORDER BY created_at DESC
+          LIMIT 1
+          `,
+          [fileHash, organizationId]
+        );
+        if (existingRes.rows.length) {
+          return json(200, {
+            ok: true,
+            dataset_id: existingRes.rows[0].id,
+            status: existingRes.rows[0].status,
+            duplicated: true
+          });
+        }
+
+        const jobRes = await client.query(
+          `
+          INSERT INTO recupero_import_jobs (
+            file_name,
+            status,
+            total_rows,
+            processed_rows,
+            updated_rows,
+            error_rows,
+            duplicate_rows,
+            invalid_rows,
+            not_found_rows,
+            csv_text,
+            created_by,
+            file_hash,
+            delimiter,
+            organization_id,
+            dataset_name,
+            dataset_source,
+            churn_window_from,
+            churn_window_to,
+            max_attempts,
+            offer,
+            expires_on,
+            dataset_status,
+            goal
+          )
+          VALUES (
+            $1, 'queued', 0, 0, 0, 0, 0, 0, 0, $2, $3, $4, $5, $6,
+            $7, $8, $9::date, $10::date, $11::jsonb, $12, $13::date, $14, $15
+          )
+          RETURNING id, status
+          `,
+          [
+            fileName,
+            csvText,
+            dbUser?.id || null,
+            fileHash,
+            headerDelimiter,
+            organizationId,
+            datasetName,
+            source,
+            churnWindowFrom,
+            churnWindowTo,
+            JSON.stringify(maxAttempts),
+            offer,
+            expiresOn,
+            datasetStatus,
+            goal
+          ]
+        );
+
+        await enqueueRecuperoImportJob(jobRes.rows[0].id);
+        return json(201, {
+          ok: true,
+          dataset_id: jobRes.rows[0].id,
+          total_rows: preview.summary.total,
+          duplicates_discarded: preview.summary.duplicate_rows,
+          rejected_rows: preview.errors.map((errorRow) => ({
+            line: errorRow.row,
+            reason: errorRow.message
+          }))
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to create recovery import", error: error.message });
+    }
+  }
   if (
     method === "POST" &&
     path.endsWith("/api/recupero/importaciones/preview")
@@ -27411,6 +28609,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       await client.connect();
       try {
         const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const jobCols = await getTableColumns(client, "recupero_import_jobs");
+        const hasDatasetName = jobCols.has("dataset_name");
+        const hasDatasetSource = jobCols.has("dataset_source");
+        const hasDatasetStatus = jobCols.has("dataset_status");
+        const hasGoal = jobCols.has("goal");
 
         const existingRes = await client.query(
           `
@@ -27432,28 +28635,61 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           });
         }
 
+        const insertColumns = [
+          "file_name",
+          "status",
+          "total_rows",
+          "processed_rows",
+          "updated_rows",
+          "error_rows",
+          "duplicate_rows",
+          "invalid_rows",
+          "not_found_rows",
+          "csv_text",
+          "created_by",
+          "file_hash",
+          "delimiter",
+          "organization_id"
+        ];
+        const insertValuesSql = [
+          "$1", "'queued'", "0", "0", "0", "0", "0", "0", "0", "$2", "$3", "$4", "$5", "$6"
+        ];
+        const insertParams = [fileName, csvText, dbUser?.id || null, fileHash, headerDelimiter, organizationId];
+        let nextInsertParam = 7;
+        if (hasDatasetName) {
+          insertColumns.push("dataset_name");
+          insertValuesSql.push(`$${nextInsertParam}`);
+          insertParams.push(fileName);
+          nextInsertParam += 1;
+        }
+        if (hasDatasetSource) {
+          insertColumns.push("dataset_source");
+          insertValuesSql.push(`$${nextInsertParam}`);
+          insertParams.push(RECUPERO_DATASET_SOURCE_DEFAULT);
+          nextInsertParam += 1;
+        }
+        if (hasDatasetStatus) {
+          insertColumns.push("dataset_status");
+          insertValuesSql.push(`$${nextInsertParam}`);
+          insertParams.push("activo");
+          nextInsertParam += 1;
+        }
+        if (hasGoal) {
+          insertColumns.push("goal");
+          insertValuesSql.push(`$${nextInsertParam}`);
+          insertParams.push(0);
+          nextInsertParam += 1;
+        }
+
         const jobRes = await client.query(
           `
           INSERT INTO recupero_import_jobs (
-            file_name,
-            status,
-            total_rows,
-            processed_rows,
-            updated_rows,
-            error_rows,
-            duplicate_rows,
-            invalid_rows,
-            not_found_rows,
-            csv_text,
-            created_by,
-            file_hash,
-            delimiter,
-            organization_id
+            ${insertColumns.join(", ")}
           )
-          VALUES ($1, 'queued', 0, 0, 0, 0, 0, 0, 0, $2, $3, $4, $5, $6)
+          VALUES (${insertValuesSql.join(", ")})
           RETURNING id, status
           `,
-          [fileName, csvText, dbUser?.id || null, fileHash, headerDelimiter, organizationId]
+          insertParams
         );
 
         await enqueueRecuperoImportJob(jobRes.rows[0].id);
