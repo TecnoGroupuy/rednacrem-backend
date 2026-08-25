@@ -101,96 +101,89 @@ WITH orphan_orgs AS (
   WHERE rc.dataset_id IS NULL
     AND rc.organization_id IS NOT NULL
   GROUP BY rc.organization_id
-),
-inserted_synthetic_datasets AS (
-  INSERT INTO public.recupero_import_jobs (
-    file_name,
-    file_hash,
-    delimiter,
-    status,
-    total_rows,
-    processed_rows,
-    updated_rows,
-    error_rows,
-    duplicate_rows,
-    invalid_rows,
-    not_found_rows,
-    error_message,
-    csv_text,
-    error_rows_detail,
-    error_report_csv,
-    created_by,
-    started_at,
-    finished_at,
-    created_at,
-    updated_at,
-    organization_id,
-    dataset_name,
-    dataset_source,
-    churn_window_from,
-    churn_window_to,
-    max_attempts,
-    offer,
-    expires_on,
-    dataset_status,
-    goal,
-    clientes_sync_at
-  )
-  SELECT
-    'historico_sin_origen_conocido.csv',
-    md5('recupero-historico-sin-origen-conocido:' || orphan_orgs.organization_id::text),
-    NULL,
-    'done',
-    orphan_orgs.orphan_rows,
-    orphan_orgs.orphan_rows,
-    0,
-    0,
-    0,
-    0,
-    0,
-    NULL,
-    '',
-    NULL,
-    NULL,
-    NULL,
-    now(),
-    now(),
-    now(),
-    now(),
-    orphan_orgs.organization_id,
-    'Histórico sin origen conocido',
-    'legacy',
-    NULL,
-    NULL,
-    '{"calls": 3, "whatsapp": 1}'::jsonb,
-    NULL,
-    NULL,
-    'activo',
-    0,
-    NULL
-  FROM orphan_orgs
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM public.recupero_import_jobs rij
-    WHERE rij.organization_id = orphan_orgs.organization_id
-      AND rij.dataset_source = 'legacy'
-      AND rij.dataset_name = 'Histórico sin origen conocido'
-  )
-  RETURNING id, organization_id
-),
-synthetic_datasets AS (
-  SELECT
-    rij.id,
-    rij.organization_id
-  FROM public.recupero_import_jobs rij
-  WHERE rij.dataset_source = 'legacy'
-    AND rij.dataset_name = 'Histórico sin origen conocido'
 )
+INSERT INTO public.recupero_import_jobs (
+  file_name,
+  file_hash,
+  delimiter,
+  status,
+  total_rows,
+  processed_rows,
+  updated_rows,
+  error_rows,
+  duplicate_rows,
+  invalid_rows,
+  not_found_rows,
+  error_message,
+  csv_text,
+  error_rows_detail,
+  error_report_csv,
+  created_by,
+  started_at,
+  finished_at,
+  created_at,
+  updated_at,
+  organization_id,
+  dataset_name,
+  dataset_source,
+  churn_window_from,
+  churn_window_to,
+  max_attempts,
+  offer,
+  expires_on,
+  dataset_status,
+  goal,
+  clientes_sync_at
+)
+SELECT
+  'historico_sin_origen_conocido.csv',
+  md5('recupero-historico-sin-origen-conocido:' || orphan_orgs.organization_id::text),
+  NULL,
+  'done',
+  orphan_orgs.orphan_rows,
+  orphan_orgs.orphan_rows,
+  0,
+  0,
+  0,
+  0,
+  0,
+  NULL,
+  '',
+  NULL,
+  NULL,
+  NULL,
+  now(),
+  now(),
+  now(),
+  now(),
+  orphan_orgs.organization_id,
+  'Histórico sin origen conocido',
+  'legacy',
+  NULL,
+  NULL,
+  '{"calls": 3, "whatsapp": 1}'::jsonb,
+  NULL,
+  NULL,
+  'activo',
+  0,
+  NULL
+FROM orphan_orgs
+WHERE NOT EXISTS (
+  SELECT
+    1
+  FROM public.recupero_import_jobs rij
+  WHERE rij.organization_id = orphan_orgs.organization_id
+    AND rij.dataset_source = 'legacy'
+    AND rij.dataset_name = 'Histórico sin origen conocido'
+);
+
 UPDATE public.recupero_candidatos rc
-SET dataset_id = sd.id
-FROM synthetic_datasets sd
+SET dataset_id = rij.id
+FROM public.recupero_import_jobs rij
 WHERE rc.dataset_id IS NULL
-  AND rc.organization_id = sd.organization_id;
+  AND rc.organization_id = rij.organization_id
+  AND rij.dataset_source = 'legacy'
+  AND rij.dataset_name = 'Histórico sin origen conocido';
 
 WITH ranked_candidates AS (
   SELECT
