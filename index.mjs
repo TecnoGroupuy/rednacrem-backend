@@ -334,7 +334,11 @@ function getPathSegments(path) {
 
 function normalizeRecoveryPath(path) {
   const rawPath = String(path || "");
-  return rawPath.startsWith("/api/recovery") ? rawPath.slice(4) : rawPath;
+  const apiRecoveryIndex = rawPath.indexOf("/api/recovery");
+  if (apiRecoveryIndex >= 0) {
+    return rawPath.slice(apiRecoveryIndex + 4);
+  }
+  return rawPath;
 }
 
 function matchVendorRequestActionPath(path, action) {
@@ -18403,7 +18407,7 @@ export const handler = async (event) => {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, ["vendedor", "atencion_cliente"]);
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
       if (roleError) return roleError;
 
       let organizationId = null;
