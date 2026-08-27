@@ -332,6 +332,11 @@ function getPathSegments(path) {
   return path.split("/").filter(Boolean);
 }
 
+function normalizeRecoveryPath(path) {
+  const rawPath = String(path || "");
+  return rawPath.startsWith("/api/recovery") ? rawPath.slice(4) : rawPath;
+}
+
 function matchVendorRequestActionPath(path, action) {
   const escapedAction = String(action || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = String(path || "").match(
@@ -27466,7 +27471,9 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       });
     }
   }
-  if (method === "GET" && path === "/recovery/summary") {
+  const recoveryPath = normalizeRecoveryPath(path);
+
+  if (method === "GET" && recoveryPath === "/recovery/summary") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
@@ -27564,7 +27571,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery summary", error: error.message });
     }
   }
-  if (method === "GET" && path === "/recovery/datasets") {
+  if (method === "GET" && recoveryPath === "/recovery/datasets") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
@@ -27676,7 +27683,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery datasets", error: error.message });
     }
   }
-  if (method === "GET" && path === "/recovery/sellers") {
+  if (method === "GET" && recoveryPath === "/recovery/sellers") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
@@ -27755,8 +27762,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery sellers", error: error.message });
     }
   }
-  if (method === "GET" && path.match(/^\/recovery\/datasets\/([^/]+)$/)) {
-    const match = path.match(/^\/recovery\/datasets\/([^/]+)$/);
+  if (method === "GET" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/);
     const datasetId = match?.[1] || null;
     if (!isValidUuid(datasetId)) {
       return json(400, { ok: false, message: "dataset_id invalido" });
@@ -27887,8 +27894,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery dataset detail", error: error.message });
     }
   }
-  if (method === "POST" && path.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/)) {
-    const match = path.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/);
+  if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/);
     const datasetId = match?.[1] || null;
     if (!isValidUuid(datasetId)) {
       return json(400, { ok: false, message: "dataset_id invalido" });
@@ -28083,8 +28090,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to create recovery assignment", error: error.message });
     }
   }
-  if (method === "DELETE" && path.match(/^\/recovery\/assignments\/([^/]+)$/)) {
-    const match = path.match(/^\/recovery\/assignments\/([^/]+)$/);
+  if (method === "DELETE" && recoveryPath.match(/^\/recovery\/assignments\/([^/]+)$/)) {
+    const match = recoveryPath.match(/^\/recovery\/assignments\/([^/]+)$/);
     const assignmentId = match?.[1] || null;
     if (!isValidUuid(assignmentId)) {
       return json(400, { ok: false, message: "assignment_id invalido" });
@@ -28183,8 +28190,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to release recovery assignment", error: error.message });
     }
   }
-  if (method === "PATCH" && path.match(/^\/recovery\/datasets\/([^/]+)$/)) {
-    const match = path.match(/^\/recovery\/datasets\/([^/]+)$/);
+  if (method === "PATCH" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/);
     const datasetId = match?.[1] || null;
     if (!isValidUuid(datasetId)) {
       return json(400, { ok: false, message: "dataset_id invalido" });
@@ -28243,7 +28250,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to update recovery dataset", error: error.message });
     }
   }
-  if (method === "POST" && path === "/recovery/imports") {
+  if (method === "POST" && recoveryPath === "/recovery/imports") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
       let authError = requireAuthenticated(event, authUser);
