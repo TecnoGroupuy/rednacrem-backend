@@ -25465,6 +25465,102 @@ async function getNewContactsDistribution(client, batchId, states = ["nuevo"]) {
   }));
 }
 
+async function distributeRecuperoDatasetPendingCandidates(client, datasetId, sellerIds, organizationId) {
+  const normalizedSellerIds = [...new Set((Array.isArray(sellerIds) ? sellerIds : []).filter(Boolean))];
+  if (!normalizedSellerIds.length) {
+    return { distributedCount: 0, distribution: [] };
+  }
+
+  const sellersRes = await client.query(
+    `
+    SELECT u.id,
+           COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre, u.email) AS seller_name
+    FROM users u
+    JOIN organization_users ou ON ou.user_id = u.id
+    WHERE ou.organization_id = $1
+      AND ou.activo = true
+      AND u.role_key = 'vendedor'
+      AND u.status = 'approved'
+      AND (u.is_test IS NULL OR u.is_test = false)
+      AND u.id = ANY($2::uuid[])
+    ORDER BY u.nombre ASC, u.apellido ASC, u.id ASC
+    `,
+    [organizationId, normalizedSellerIds]
+  );
+  if (sellersRes.rows.length !== normalizedSellerIds.length) {
+    const error = new Error("Uno o mas seller_ids no pertenecen a vendedores activos de la organizacion");
+    error.status = 422;
+    throw error;
+  }
+
+  const candidatesRes = await client.query(
+    `
+    SELECT id
+    FROM recupero_candidatos
+    WHERE dataset_id = $1
+      AND organization_id = $2
+      AND estado = 'disponible'
+      AND seller_id IS NULL
+      AND resultado_gestion NOT IN ('venta', 'rechazo')
+    ORDER BY row_number ASC NULLS LAST, created_at ASC, id ASC
+    `,
+    [datasetId, organizationId]
+  );
+
+  if (!candidatesRes.rows.length) {
+    return {
+      distributedCount: 0,
+      distribution: sellersRes.rows.map((row) => ({
+        seller_id: row.id,
+        seller_name: row.seller_name || null,
+        assigned: 0
+      }))
+    };
+  }
+
+  const candidateIds = candidatesRes.rows.map((row) => row.id);
+  const assignedSellerIds = candidateIds.map((_candidateId, index) => normalizedSellerIds[index % normalizedSellerIds.length]);
+  const distributionCounts = new Map();
+  for (const sellerId of assignedSellerIds) {
+    distributionCounts.set(sellerId, (distributionCounts.get(sellerId) || 0) + 1);
+  }
+
+  const chunkSize = 500;
+  for (let i = 0; i < candidateIds.length; i += chunkSize) {
+    const candidateChunk = candidateIds.slice(i, i + chunkSize);
+    const sellerChunk = assignedSellerIds.slice(i, i + chunkSize);
+    await client.query(
+      `
+      UPDATE recupero_candidatos rc
+      SET seller_id = v.seller_id,
+          estado = 'en_gestion',
+          fecha_asignacion = NOW(),
+          updated_at = NOW()
+      FROM (
+        SELECT UNNEST($1::uuid[]) AS id,
+               UNNEST($2::uuid[]) AS seller_id
+      ) v
+      WHERE rc.id = v.id
+        AND rc.dataset_id = $3
+        AND rc.organization_id = $4
+        AND rc.estado = 'disponible'
+        AND rc.seller_id IS NULL
+        AND rc.resultado_gestion NOT IN ('venta', 'rechazo')
+      `,
+      [candidateChunk, sellerChunk, datasetId, organizationId]
+    );
+  }
+
+  return {
+    distributedCount: candidateIds.length,
+    distribution: sellersRes.rows.map((row) => ({
+      seller_id: row.id,
+      seller_name: row.seller_name || null,
+      assigned: Number(distributionCounts.get(row.id) || 0)
+    }))
+  };
+}
+
 async function getBatchSellerTotals(client, batchId, organizationId = null) {
   const values = [batchId];
   let orgClause = "";
@@ -29044,6 +29140,89 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to create recovery assignment", error: error.message });
+    }
+  }
+  if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/distribute$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/distribute$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+      const sellerIds = Array.isArray(body?.seller_ids)
+        ? [...new Set(body.seller_ids.map((id) => String(id || "").trim()).filter(Boolean))]
+        : [];
+      if (!sellerIds.length || sellerIds.some((id) => !isValidUuid(id))) {
+        return json(422, { ok: false, message: "seller_ids invalidos" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema);
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+        if (normalizeRecuperoDatasetStatus(datasetRow.dataset_status) !== "activo") {
+          return json(409, { ok: false, message: "Solo se pueden distribuir datasets activos" });
+        }
+
+        await client.query("BEGIN");
+        try {
+          const result = await distributeRecuperoDatasetPendingCandidates(
+            client,
+            datasetId,
+            sellerIds,
+            organizationId
+          );
+          await client.query("COMMIT");
+          const counts = await loadRecuperoDatasetCounts(client, datasetId, organizationId);
+          return json(200, {
+            ok: true,
+            distributed_count: result.distributedCount,
+            distribution: result.distribution,
+            counts: {
+              total: counts.total,
+              recovered: counts.recovered,
+              rejected: counts.rejected,
+              in_progress: counts.in_progress,
+              pending: counts.pending
+            },
+            unassigned_rows: counts.unassigned
+          });
+        } catch (err) {
+          await client.query("ROLLBACK");
+          if (err?.status) {
+            return json(err.status, { ok: false, message: err.message });
+          }
+          return json(500, { ok: false, message: err.message });
+        }
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to distribute recovery dataset", error: error.message });
     }
   }
   if (method === "DELETE" && recoveryPath.match(/^\/recovery\/assignments\/([^/]+)$/)) {
