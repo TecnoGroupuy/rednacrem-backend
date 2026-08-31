@@ -716,60 +716,9 @@ async function getLeadContactColumns(client) {
   return leadContactColumnsCache;
 }
 
-let datosParaTrabajarSourceColumnsReady = false;
-async function ensureDatosParaTrabajarSourceColumns(client) {
-  if (datosParaTrabajarSourceColumnsReady) return;
-
-  await client.query(`
-    ALTER TABLE datos_para_trabajar
-    ADD COLUMN IF NOT EXISTS source_family text,
-    ADD COLUMN IF NOT EXISTS source_channel text,
-    ADD COLUMN IF NOT EXISTS source_system text
-  `);
-
-  await client.query(`
-    UPDATE datos_para_trabajar
-    SET
-      source_family = COALESCE(
-        source_family,
-        CASE
-          WHEN lower(trim(coalesce(origen_dato, ''))) IN ('facebook', 'instagram', 'whatsapp', 'sitio web', 'formulario web', 'web form', 'web_form', 'meta')
-            THEN 'hot'
-          WHEN lower(trim(coalesce(origen_dato, ''))) = 'manual'
-            THEN 'manual'
-          WHEN lower(trim(coalesce(origen_dato, ''))) = 'discado auto'
-            THEN 'discado'
-          WHEN lower(trim(coalesce(origen_dato, ''))) = 'recupero'
-            THEN 'recupero'
-          ELSE source_family
-        END
-      ),
-      source_channel = COALESCE(
-        source_channel,
-        CASE
-          WHEN lower(trim(coalesce(origen_dato, ''))) = 'facebook' THEN 'facebook'
-          WHEN lower(trim(coalesce(origen_dato, ''))) = 'instagram' THEN 'instagram'
-          WHEN lower(trim(coalesce(origen_dato, ''))) = 'whatsapp' THEN 'whatsapp'
-          WHEN lower(trim(coalesce(origen_dato, ''))) IN ('sitio web', 'formulario web', 'web form', 'web_form') THEN 'web_form'
-          ELSE source_channel
-        END
-      ),
-      source_system = COALESCE(
-        source_system,
-        CASE
-          WHEN lower(trim(coalesce(origen_dato, ''))) IN ('facebook', 'instagram', 'whatsapp', 'sitio web', 'formulario web', 'web form', 'web_form', 'meta', 'manual', 'discado auto', 'recupero')
-            THEN 'legacy_backfill'
-          ELSE source_system
-        END
-      )
-    WHERE source_family IS NULL
-       OR source_channel IS NULL
-       OR source_system IS NULL
-  `);
-
-  leadContactColumnsCache = null;
-  tableColumnsCache.delete("datos_para_trabajar");
-  datosParaTrabajarSourceColumnsReady = true;
+async function ensureDatosParaTrabajarSourceColumns() {
+  // The global legacy backfill is intentionally disabled. It must run only as a
+  // controlled, batched migration, never in the request path.
 }
 
 function normalizePhoneDigits(value) {
