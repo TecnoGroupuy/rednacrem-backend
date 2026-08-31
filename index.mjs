@@ -25476,7 +25476,7 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
   }
 }
 
-const LEAD_REDISTRIBUTION_PENDING_STATES = ["nuevo", "seguimiento", "rellamar", "no_contesta"];
+const LEAD_REDISTRIBUTION_PENDING_STATES = ["nuevo", "no_contesta", "rellamar", "seguimiento"];
 
 async function getNewContactsDistribution(client, batchId, states = ["nuevo"]) {
   const res = await client.query(
@@ -26643,8 +26643,14 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
              ON CONFLICT DO NOTHING`,
             [batchId, sellerId]
           );
-          await redistributeNewContacts(client, batchId, null, null, organizationId);
-          distribution = await getNewContactsDistribution(client, batchId);
+          await redistributeNewContacts(client, batchId, null, {
+            states: LEAD_REDISTRIBUTION_PENDING_STATES
+          }, organizationId);
+          distribution = await getNewContactsDistribution(
+            client,
+            batchId,
+            LEAD_REDISTRIBUTION_PENDING_STATES
+          );
           await client.query("COMMIT");
         } catch (err) {
           await client.query("ROLLBACK");
