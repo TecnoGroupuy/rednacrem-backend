@@ -10256,6 +10256,942 @@ function requireRole(event, dbUser, allowedRoles) {
   return null;
 }
 
+const OPERACIONES_HISTORIA_CLINICA_ENABLED = false;
+const OPERACIONES_SERVICE_ACTIVE_STATES = ["asignado", "en_curso"];
+const OPERACIONES_SERVICE_TERMINAL_STATES = ["finalizado", "cancelado"];
+const OPERACIONES_SERVICE_ALLOWED_TRANSITIONS = {
+  solicitado: ["asignado", "cancelado"],
+  asignado: ["en_curso", "cancelado", "finalizado"],
+  en_curso: ["finalizado", "cancelado"],
+  finalizado: [],
+  cancelado: []
+};
+const operationsTableMetadataCache = new Map();
+
+function toSnakeCase(value) {
+  return String(value || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[\s-]+/g, "_")
+    .replace(/__+/g, "_")
+    .toLowerCase();
+}
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function pickFirstPresent(obj, candidates = []) {
+  for (const key of candidates) {
+    if (hasOwn(obj, key)) return obj[key];
+  }
+  return undefined;
+}
+
+function normalizeBoolean(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value;
+  const normalized = normalizeText(value).toLowerCase();
+  if (["true", "1", "si", "sí", "yes"].includes(normalized)) return true;
+  if (["false", "0", "no"].includes(normalized)) return false;
+  return null;
+}
+
+function getPreferredColumn(columnNames, candidates = []) {
+  for (const candidate of candidates) {
+    if (columnNames.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+function buildCamelAlias(columnName) {
+  return String(columnName || "").replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+async function getTableColumnMetadata(client, tableName) {
+  if (operationsTableMetadataCache.has(tableName)) return operationsTableMetadataCache.get(tableName);
+  const result = await client.query(
+    `
+    SELECT
+      column_name,
+      data_type,
+      udt_name,
+      is_nullable,
+      column_default
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = $1
+    ORDER BY ordinal_position
+    `,
+    [tableName]
+  );
+  const metadata = new Map();
+  for (const row of result.rows) {
+    metadata.set(row.column_name, row);
+  }
+  operationsTableMetadataCache.set(tableName, metadata);
+  return metadata;
+}
+
+async function requireOperationsTable(client, tableName) {
+  const metadata = await getTableColumnMetadata(client, tableName);
+  if (!metadata.size) {
+    throw { status: 500, message: `Tabla requerida no disponible: ${tableName}` };
+  }
+  if (!metadata.has("organization_id")) {
+    throw { status: 500, message: `${tableName}.organization_id es obligatorio` };
+  }
+  return metadata;
+}
+
+function normalizeValueForColumn(columnMeta, rawValue, columnName) {
+  if (rawValue === undefined) return undefined;
+  if (rawValue === "") return null;
+  if (rawValue === null) return null;
+  const dataType = String(columnMeta?.data_type || "").toLowerCase();
+  const udtName = String(columnMeta?.udt_name || "").toLowerCase();
+  if (udtName === "uuid" || columnName === "id" || columnName.endsWith("_id")) {
+    const normalized = normalizeText(rawValue) || null;
+    if (!normalized) return null;
+    if (!isValidUuid(normalized)) {
+      throw new Error(`${columnName} invalido`);
+    }
+    return normalized;
+  }
+  if (dataType === "boolean") {
+    const normalized = normalizeBoolean(rawValue);
+    if (normalized === null && rawValue !== null) {
+      throw new Error(`${columnName} invalido`);
+    }
+    return normalized;
+  }
+  if (
+    dataType.includes("integer")
+    || dataType === "numeric"
+    || dataType === "real"
+    || dataType === "double precision"
+    || dataType === "smallint"
+    || dataType === "bigint"
+    || udtName === "int4"
+    || udtName === "int8"
+    || udtName === "numeric"
+    || udtName === "float4"
+    || udtName === "float8"
+  ) {
+    const parsed = parseNumber(rawValue);
+    if (parsed === null && rawValue !== null) {
+      throw new Error(`${columnName} invalido`);
+    }
+    return parsed;
+  }
+  if (dataType === "json" || dataType === "jsonb") {
+    if (typeof rawValue === "string") {
+      try {
+        return JSON.parse(rawValue);
+      } catch {
+        return rawValue;
+      }
+    }
+    return rawValue;
+  }
+  if (dataType === "ARRAY") {
+    return Array.isArray(rawValue) ? rawValue : rawValue;
+  }
+  if (
+    dataType.includes("date")
+    || dataType.includes("time")
+    || dataType.includes("timestamp")
+  ) {
+    return normalizeText(rawValue) || null;
+  }
+  return typeof rawValue === "string" ? normalizeText(rawValue) || null : rawValue;
+}
+
+function getBodyCandidateMap(body = {}) {
+  const map = new Map();
+  for (const [key, value] of Object.entries(body)) {
+    map.set(key, value);
+    map.set(toSnakeCase(key), value);
+  }
+  return map;
+}
+
+async function sanitizeRowPayload(client, tableName, body, options = {}) {
+  const metadata = await requireOperationsTable(client, tableName);
+  const exclude = new Set(options.exclude || []);
+  const includeOnly = options.includeOnly ? new Set(options.includeOnly) : null;
+  const aliases = options.aliases || {};
+  const bodyMap = getBodyCandidateMap(normalizeEmptyStringsToNull(body || {}));
+  const payload = {};
+
+  for (const [columnName, columnMeta] of metadata.entries()) {
+    if (exclude.has(columnName)) continue;
+    if (includeOnly && !includeOnly.has(columnName)) continue;
+    const aliasCandidates = aliases[columnName] || [];
+    const bodyKeyCandidates = [columnName, buildCamelAlias(columnName), ...aliasCandidates];
+    let hasValue = false;
+    let rawValue;
+    for (const candidate of bodyKeyCandidates) {
+      if (bodyMap.has(candidate)) {
+        rawValue = bodyMap.get(candidate);
+        hasValue = true;
+        break;
+      }
+    }
+    if (!hasValue) continue;
+    if (Array.isArray(rawValue) && columnMeta.data_type !== "ARRAY" && columnMeta.data_type !== "json" && columnMeta.data_type !== "jsonb") {
+      continue;
+    }
+    if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) && columnMeta.data_type !== "json" && columnMeta.data_type !== "jsonb") {
+      continue;
+    }
+    payload[columnName] = normalizeValueForColumn(columnMeta, rawValue, columnName);
+  }
+
+  return payload;
+}
+
+async function resolveOrganizationIdStrict(client, dbUser) {
+  if (!dbUser?.id) {
+    throw { status: 403, message: "Usuario no asociado a una organizacion activa" };
+  }
+  const result = await client.query(
+    `
+    SELECT organization_id
+    FROM organization_users
+    WHERE user_id = $1
+      AND activo = true
+    ORDER BY created_at ASC
+    `,
+    [dbUser.id]
+  );
+  if (!result.rows.length) {
+    throw { status: 403, message: "Usuario no asociado a una organizacion activa" };
+  }
+  if (result.rows.length > 1) {
+    throw { status: 400, message: "No se pudo resolver la organizacion activa del usuario" };
+  }
+  return result.rows[0].organization_id;
+}
+
+async function getOperationsAccessContext(event, client = null) {
+  const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+  const authError = requireAuthenticated(event, authUser);
+  if (authError) return { error: authError };
+  const dbError = requireDbUser(event, dbUser);
+  if (dbError) return { error: dbError };
+  const statusError = requireApproved(event, dbUser);
+  if (statusError) return { error: statusError };
+
+  if (client) {
+    const organizationId = await resolveOrganizationIdStrict(client, dbUser);
+    return { authUser, dbUser, organizationId };
+  }
+
+  const orgClient = createDbClient();
+  await orgClient.connect();
+  try {
+    const organizationId = await resolveOrganizationIdStrict(orgClient, dbUser);
+    return { authUser, dbUser, organizationId };
+  } finally {
+    await orgClient.end();
+  }
+}
+
+function buildOrganizationWhere(alias = "", paramIndex = 1) {
+  return `${alias ? `${alias}.` : ""}organization_id = $${paramIndex}`;
+}
+
+async function getOrganizationRowById(client, tableName, id, organizationId, options = {}) {
+  if (!isValidUuid(id)) return null;
+  const metadata = await requireOperationsTable(client, tableName);
+  const whereParts = [`id = $1`, buildOrganizationWhere("", 2)];
+  const values = [id, organizationId];
+  if (options.extraWhere) {
+    whereParts.push(options.extraWhere);
+    if (Array.isArray(options.extraValues)) values.push(...options.extraValues);
+  }
+  const selectClause = options.selectClause || "*";
+  const result = await client.query(
+    `
+    SELECT ${selectClause}
+    FROM ${tableName}
+    WHERE ${whereParts.join(" AND ")}
+    LIMIT 1
+    `,
+    values
+  );
+  return result.rows[0] || null;
+}
+
+async function listOrganizationRows(client, tableName, organizationId, options = {}) {
+  const metadata = await requireOperationsTable(client, tableName);
+  const alias = options.alias || "";
+  const whereParts = [buildOrganizationWhere(alias, 1)];
+  const values = [organizationId];
+  if (options.activeColumn && metadata.has(options.activeColumn)) {
+    whereParts.push(`${alias ? `${alias}.` : ""}${options.activeColumn} = true`);
+  }
+  if (options.extraWhereParts?.length) {
+    whereParts.push(...options.extraWhereParts);
+    values.push(...(options.extraValues || []));
+  }
+  const orderBy = options.orderBy || (
+    metadata.has("created_at")
+      ? `${alias ? `${alias}.` : ""}created_at DESC`
+      : `${alias ? `${alias}.` : ""}id DESC`
+  );
+  const result = await client.query(
+    `
+    SELECT ${options.selectClause || `${alias || tableName}.*`}
+    FROM ${tableName}${alias ? ` ${alias}` : ""}
+    WHERE ${whereParts.join(" AND ")}
+    ${options.groupBy ? `GROUP BY ${options.groupBy}` : ""}
+    ORDER BY ${orderBy}
+    ${options.limit ? `LIMIT ${Number(options.limit)}` : ""}
+    `,
+    values
+  );
+  return result.rows;
+}
+
+async function insertOrganizationRow(client, tableName, body, organizationId, options = {}) {
+  const metadata = await requireOperationsTable(client, tableName);
+  const payload = await sanitizeRowPayload(client, tableName, body, {
+    exclude: ["id", "organization_id", "created_at", "updated_at", ...(options.exclude || [])],
+    includeOnly: options.includeOnly || null,
+    aliases: options.aliases || {}
+  });
+  payload.organization_id = organizationId;
+  if (options.defaults) {
+    for (const [key, value] of Object.entries(options.defaults)) {
+      if (metadata.has(key) && payload[key] === undefined) payload[key] = value;
+    }
+  }
+  if (options.extraPayload) {
+    for (const [key, value] of Object.entries(options.extraPayload)) {
+      if (metadata.has(key) && value !== undefined) payload[key] = value;
+    }
+  }
+  const columns = Object.keys(payload).filter((key) => payload[key] !== undefined);
+  if (!columns.length) {
+    throw { status: 400, message: "Sin campos para crear" };
+  }
+  const values = columns.map((key) => payload[key]);
+  const placeholders = columns.map((_, index) => `$${index + 1}`);
+  const result = await client.query(
+    `
+    INSERT INTO ${tableName} (${columns.join(", ")})
+    VALUES (${placeholders.join(", ")})
+    RETURNING *
+    `,
+    values
+  );
+  return result.rows[0] || null;
+}
+
+async function updateOrganizationRow(client, tableName, id, body, organizationId, options = {}) {
+  const metadata = await requireOperationsTable(client, tableName);
+  const payload = await sanitizeRowPayload(client, tableName, body, {
+    exclude: ["id", "organization_id", "created_at", ...(options.exclude || [])],
+    includeOnly: options.includeOnly || null,
+    aliases: options.aliases || {}
+  });
+  if (options.extraPayload) {
+    for (const [key, value] of Object.entries(options.extraPayload)) {
+      if (metadata.has(key) && value !== undefined) payload[key] = value;
+    }
+  }
+  if (metadata.has("updated_at") && !hasOwn(payload, "updated_at")) {
+    payload.updated_at = new Date().toISOString();
+  }
+  const entries = Object.entries(payload).filter(([, value]) => value !== undefined);
+  if (!entries.length) {
+    throw { status: 400, message: "No fields to update" };
+  }
+  const values = [];
+  const setParts = entries.map(([key, value], index) => {
+    values.push(value);
+    return `${key} = $${index + 1}`;
+  });
+  values.push(id, organizationId);
+  const result = await client.query(
+    `
+    UPDATE ${tableName}
+    SET ${setParts.join(", ")}
+    WHERE id = $${values.length - 1}
+      AND organization_id = $${values.length}
+    RETURNING *
+    `,
+    values
+  );
+  return result.rows[0] || null;
+}
+
+async function softDeleteOrganizationRow(client, tableName, id, organizationId, strategy = {}) {
+  const metadata = await requireOperationsTable(client, tableName);
+  const updates = [];
+  const values = [];
+  if (strategy.activeColumn && metadata.has(strategy.activeColumn)) {
+    values.push(false);
+    updates.push(`${strategy.activeColumn} = $${values.length}`);
+  }
+  if (strategy.stateColumn && metadata.has(strategy.stateColumn)) {
+    values.push(strategy.stateValue || "baja");
+    updates.push(`${strategy.stateColumn} = $${values.length}`);
+  }
+  if (strategy.extraPayload) {
+    for (const [key, value] of Object.entries(strategy.extraPayload)) {
+      if (metadata.has(key)) {
+        values.push(value);
+        updates.push(`${key} = $${values.length}`);
+      }
+    }
+  }
+  if (metadata.has("updated_at")) {
+    values.push(new Date().toISOString());
+    updates.push(`updated_at = $${values.length}`);
+  }
+  if (!updates.length) {
+    const deleted = await client.query(
+      `DELETE FROM ${tableName} WHERE id = $1 AND organization_id = $2 RETURNING id`,
+      [id, organizationId]
+    );
+    return deleted.rows[0] || null;
+  }
+  values.push(id, organizationId);
+  const result = await client.query(
+    `
+    UPDATE ${tableName}
+    SET ${updates.join(", ")}
+    WHERE id = $${values.length - 1}
+      AND organization_id = $${values.length}
+    RETURNING *
+    `,
+    values
+  );
+  return result.rows[0] || null;
+}
+
+function getVencimientoColumn(columnNames) {
+  return getPreferredColumn(columnNames, [
+    "fecha_vencimiento",
+    "vencimiento",
+    "vence_el",
+    "fecha_vence",
+    "fecha_expiracion",
+    "fecha_vigencia_hasta"
+  ]);
+}
+
+function getStartColumn(columnNames) {
+  return getPreferredColumn(columnNames, ["inicio", "fecha_inicio", "desde", "start_at", "hora_inicio"]);
+}
+
+function getEndColumn(columnNames) {
+  return getPreferredColumn(columnNames, ["fin", "fecha_fin", "hasta", "end_at", "hora_fin"]);
+}
+
+function getRoleNameColumn(columnNames) {
+  return getPreferredColumn(columnNames, ["rol", "role_key", "nombre_rol", "nombre", "codigo"]);
+}
+
+function getQuantityColumn(columnNames) {
+  return getPreferredColumn(columnNames, ["cantidad", "stock_actual", "stock", "existencia"]);
+}
+
+function getMinStockColumn(columnNames) {
+  return getPreferredColumn(columnNames, ["stock_minimo", "minimo", "minimo_alerta", "punto_reposicion"]);
+}
+
+async function ensureParentRow(client, tableName, id, organizationId, extraWhere = null, extraValues = []) {
+  const row = await getOrganizationRowById(client, tableName, id, organizationId, { extraWhere, extraValues });
+  if (!row) {
+    throw { status: 404, message: `${tableName} no encontrado` };
+  }
+  return row;
+}
+
+async function getPersonalDetail(client, personalId, organizationId) {
+  const person = await getOrganizationRowById(client, "su_personal", personalId, organizationId);
+  if (!person) return null;
+  const [roles, habilitaciones, capacitaciones, carnetSalud] = await Promise.all([
+    listOrganizationRows(client, "su_personal_roles", organizationId, {
+      extraWhereParts: ["personal_id = $2"],
+      extraValues: [personalId],
+      orderBy: "created_at ASC"
+    }).catch(() => []),
+    listOrganizationRows(client, "su_personal_habilitaciones", organizationId, {
+      extraWhereParts: ["personal_id = $2"],
+      extraValues: [personalId],
+      orderBy: "created_at DESC"
+    }).catch(() => []),
+    listOrganizationRows(client, "su_personal_capacitaciones", organizationId, {
+      extraWhereParts: ["personal_id = $2"],
+      extraValues: [personalId],
+      orderBy: "created_at DESC"
+    }).catch(() => []),
+    listOrganizationRows(client, "su_personal_carnet_salud", organizationId, {
+      extraWhereParts: ["personal_id = $2"],
+      extraValues: [personalId],
+      orderBy: "created_at DESC"
+    }).catch(() => [])
+  ]);
+  return {
+    ...person,
+    roles,
+    habilitaciones,
+    capacitaciones,
+    carnet_salud: carnetSalud
+  };
+}
+
+async function getVehiculoDetail(client, vehiculoId, organizationId) {
+  const vehiculo = await getOrganizationRowById(client, "su_vehiculos", vehiculoId, organizationId);
+  if (!vehiculo) return null;
+  const [documentos, mantenimiento, checklist] = await Promise.all([
+    listOrganizationRows(client, "su_vehiculos_documentos", organizationId, {
+      extraWhereParts: ["vehiculo_id = $2"],
+      extraValues: [vehiculoId],
+      orderBy: "created_at DESC"
+    }).catch(() => []),
+    listOrganizationRows(client, "su_vehiculos_mantenimiento", organizationId, {
+      extraWhereParts: ["vehiculo_id = $2"],
+      extraValues: [vehiculoId],
+      orderBy: "created_at DESC"
+    }).catch(() => []),
+    listOrganizationRows(client, "su_vehiculos_equipamiento_checklist", organizationId, {
+      extraWhereParts: ["vehiculo_id = $2"],
+      extraValues: [vehiculoId],
+      orderBy: "created_at DESC"
+    }).catch(() => [])
+  ]);
+  return {
+    ...vehiculo,
+    documentos,
+    mantenimiento,
+    checklist
+  };
+}
+
+async function getServicioDetail(client, servicioId, organizationId) {
+  const servicio = await getOrganizationRowById(client, "su_servicios", servicioId, organizationId);
+  if (!servicio) return null;
+  const dotacion = await listOrganizationRows(client, "su_servicios_dotacion", organizationId, {
+    extraWhereParts: ["servicio_id = $2"],
+    extraValues: [servicioId],
+    orderBy: "created_at ASC"
+  }).catch(() => []);
+  return {
+    ...servicio,
+    dotacion
+  };
+}
+
+async function listPersonalVencimientos(client, organizationId, days = 30) {
+  const items = [];
+  const tables = [
+    { tableName: "su_personal_habilitaciones", tipo: "habilitacion" },
+    { tableName: "su_personal_capacitaciones", tipo: "capacitacion" },
+    { tableName: "su_personal_carnet_salud", tipo: "carnet_salud" }
+  ];
+  for (const entry of tables) {
+    const metadata = await getTableColumnMetadata(client, entry.tableName);
+    if (!metadata.size || !metadata.has("organization_id") || !metadata.has("personal_id")) continue;
+    const columnNames = new Set(metadata.keys());
+    const vencCol = getVencimientoColumn(columnNames);
+    if (!vencCol) continue;
+    const labelCol = getPreferredColumn(columnNames, ["nombre", "titulo", "tipo", "descripcion"]);
+    const result = await client.query(
+      `
+      SELECT
+        t.*,
+        p.nombre AS personal_nombre,
+        p.apellido AS personal_apellido
+      FROM ${entry.tableName} t
+      JOIN su_personal p
+        ON p.id = t.personal_id
+       AND p.organization_id = $1
+      WHERE t.organization_id = $1
+        AND t.${vencCol} IS NOT NULL
+        AND t.${vencCol}::date <= (CURRENT_DATE + $2::int)
+      ORDER BY t.${vencCol} ASC
+      `,
+      [organizationId, days]
+    );
+    for (const row of result.rows) {
+      items.push({
+        tipo: entry.tipo,
+        fecha_vencimiento: row[vencCol],
+        etiqueta: labelCol ? row[labelCol] : null,
+        personal_id: row.personal_id,
+        personal_nombre: [row.personal_nombre, row.personal_apellido].filter(Boolean).join(" ").trim(),
+        item: row
+      });
+    }
+  }
+  items.sort((a, b) => String(a.fecha_vencimiento || "").localeCompare(String(b.fecha_vencimiento || "")));
+  return items;
+}
+
+async function listVehiculoDocumentosVencimientos(client, organizationId, days = 30) {
+  const metadata = await getTableColumnMetadata(client, "su_vehiculos_documentos");
+  if (!metadata.size || !metadata.has("organization_id")) return [];
+  const vencCol = getVencimientoColumn(new Set(metadata.keys()));
+  if (!vencCol) return [];
+  const result = await client.query(
+    `
+    SELECT
+      d.*,
+      v.nombre AS vehiculo_nombre,
+      v.matricula
+    FROM su_vehiculos_documentos d
+    LEFT JOIN su_vehiculos v
+      ON v.id = d.vehiculo_id
+     AND v.organization_id = $1
+    WHERE d.organization_id = $1
+      AND d.${vencCol} IS NOT NULL
+      AND d.${vencCol}::date <= (CURRENT_DATE + $2::int)
+    ORDER BY d.${vencCol} ASC
+    `,
+    [organizationId, days]
+  );
+  return result.rows;
+}
+
+async function listTurnosActuales(client, organizationId, baseId = null) {
+  const metadata = await requireOperationsTable(client, "su_turnos");
+  const columnNames = new Set(metadata.keys());
+  const startCol = getStartColumn(columnNames);
+  const endCol = getEndColumn(columnNames);
+  if (!startCol || !endCol) return [];
+  const whereParts = ["t.organization_id = $1", `t.${startCol} <= NOW()`, `t.${endCol} >= NOW()`];
+  const values = [organizationId];
+  if (baseId && metadata.has("base_id")) {
+    values.push(baseId);
+    whereParts.push(`t.base_id = $${values.length}`);
+  }
+  const result = await client.query(
+    `
+    SELECT t.*
+    FROM su_turnos t
+    WHERE ${whereParts.join(" AND ")}
+    ORDER BY t.${startCol} ASC
+    `,
+    values
+  );
+  return result.rows;
+}
+
+async function validateVehicleAvailable(client, vehiculoId, organizationId) {
+  if (!vehiculoId) return null;
+  const vehiculo = await getOrganizationRowById(client, "su_vehiculos", vehiculoId, organizationId);
+  if (!vehiculo) {
+    throw { status: 404, message: "Vehiculo no encontrado" };
+  }
+  if (String(vehiculo.estado_operativo || "").toLowerCase() !== "disponible") {
+    throw { status: 409, message: "El vehiculo no esta disponible" };
+  }
+  return vehiculo;
+}
+
+async function updateVehiculoEstadoOperativo(client, vehiculoId, organizationId, estado) {
+  if (!vehiculoId) return null;
+  return updateOrganizationRow(
+    client,
+    "su_vehiculos",
+    vehiculoId,
+    {},
+    organizationId,
+    { extraPayload: { estado_operativo: estado } }
+  );
+}
+
+function validateServiceTransition(actualState, nextState) {
+  if (!nextState) return true;
+  const current = normalizeText(actualState || "solicitado").toLowerCase();
+  const target = normalizeText(nextState).toLowerCase();
+  if (current === target) return true;
+  const allowed = OPERACIONES_SERVICE_ALLOWED_TRANSITIONS[current] || [];
+  return allowed.includes(target);
+}
+
+async function validateDotacionRole(client, { personalId, rolEnServicio, organizationId }) {
+  if (!personalId || !rolEnServicio) return;
+  const metadata = await getTableColumnMetadata(client, "su_personal_roles");
+  if (!metadata.size) return;
+  const roleColumn = getRoleNameColumn(new Set(metadata.keys()));
+  if (!roleColumn) return;
+  const result = await client.query(
+    `
+    SELECT 1
+    FROM su_personal_roles
+    WHERE organization_id = $1
+      AND personal_id = $2
+      AND LOWER(COALESCE(${roleColumn}, '')) = LOWER($3)
+    LIMIT 1
+    `,
+    [organizationId, personalId, rolEnServicio]
+  );
+  if (!result.rows.length) {
+    throw { status: 422, message: "rol_en_servicio no coincide con los roles del personal" };
+  }
+}
+
+async function getOrCreateMaterialStockRow(client, organizationId, payload) {
+  const metadata = await requireOperationsTable(client, "su_materiales_stock");
+  const columnNames = new Set(metadata.keys());
+  const quantityColumn = getQuantityColumn(columnNames);
+  if (!quantityColumn) {
+    throw { status: 500, message: "su_materiales_stock no tiene columna de cantidad reconocible" };
+  }
+  const materialId = payload.material_id || null;
+  const baseId = payload.base_id || null;
+  const vehiculoId = payload.vehiculo_id || null;
+  const bolso = payload.bolso ?? null;
+  if (!materialId) {
+    throw { status: 422, message: "material_id es obligatorio" };
+  }
+  const values = [organizationId, materialId];
+  const whereParts = [
+    "organization_id = $1",
+    "material_id = $2"
+  ];
+  if (metadata.has("base_id")) {
+    if (baseId) {
+      values.push(baseId);
+      whereParts.push(`base_id = $${values.length}`);
+    } else {
+      whereParts.push("base_id IS NULL");
+    }
+  }
+  if (metadata.has("vehiculo_id")) {
+    if (vehiculoId) {
+      values.push(vehiculoId);
+      whereParts.push(`vehiculo_id = $${values.length}`);
+    } else {
+      whereParts.push("vehiculo_id IS NULL");
+    }
+  }
+  if (metadata.has("bolso")) {
+    if (bolso !== null && bolso !== "") {
+      values.push(bolso);
+      whereParts.push(`bolso = $${values.length}`);
+    } else {
+      whereParts.push("bolso IS NULL");
+    }
+  }
+  const existing = await client.query(
+    `
+    SELECT *
+    FROM su_materiales_stock
+    WHERE ${whereParts.join(" AND ")}
+    LIMIT 1
+    `,
+    values
+  );
+  if (existing.rows[0]) {
+    return { row: existing.rows[0], quantityColumn };
+  }
+  const insertPayload = {};
+  for (const key of ["material_id", "base_id", "vehiculo_id", "bolso"]) {
+    if (metadata.has(key) && payload[key] !== undefined) insertPayload[key] = payload[key];
+  }
+  insertPayload[quantityColumn] = 0;
+  const created = await insertOrganizationRow(client, "su_materiales_stock", insertPayload, organizationId);
+  return { row: created, quantityColumn };
+}
+
+async function applyStockDelta(client, organizationId, payload, delta) {
+  const { row, quantityColumn } = await getOrCreateMaterialStockRow(client, organizationId, payload);
+  const current = Number(row?.[quantityColumn] || 0);
+  const next = current + Number(delta || 0);
+  if (next < 0) {
+    throw { status: 409, message: "Stock insuficiente para el movimiento solicitado" };
+  }
+  const updated = await updateOrganizationRow(
+    client,
+    "su_materiales_stock",
+    row.id,
+    {},
+    organizationId,
+    { extraPayload: { [quantityColumn]: next } }
+  );
+  return updated;
+}
+
+async function createMaterialMovimiento(client, body, organizationId, userId = null) {
+  const payload = await sanitizeRowPayload(client, "su_materiales_movimientos", body, {
+    exclude: ["id", "organization_id", "created_at", "updated_at"]
+  });
+  const tipoMovimiento = normalizeText(
+    payload.tipo_movimiento || body?.tipo_movimiento || body?.tipo || ""
+  ).toLowerCase();
+  const cantidad = Number(payload.cantidad ?? parseNumber(body?.cantidad) ?? 0);
+  if (!tipoMovimiento || !["entrada", "salida_servicio", "traspaso", "baja"].includes(tipoMovimiento)) {
+    throw { status: 422, message: "tipo de movimiento invalido" };
+  }
+  if (!(cantidad > 0)) {
+    throw { status: 422, message: "cantidad debe ser mayor a cero" };
+  }
+  payload.tipo_movimiento = tipoMovimiento;
+  payload.cantidad = cantidad;
+  const metadata = await requireOperationsTable(client, "su_materiales_movimientos");
+  if (metadata.has("created_by") && !payload.created_by) payload.created_by = userId;
+  if (tipoMovimiento === "traspaso") {
+    const origen = {
+      material_id: payload.material_id,
+      base_id: payload.origen_base_id ?? payload.base_origen_id ?? body?.origen_base_id ?? null,
+      vehiculo_id: payload.origen_vehiculo_id ?? payload.vehiculo_origen_id ?? body?.origen_vehiculo_id ?? null,
+      bolso: payload.origen_bolso ?? payload.bolso_origen ?? body?.origen_bolso ?? body?.bolso_origen ?? null
+    };
+    const destino = {
+      material_id: payload.material_id,
+      base_id: payload.destino_base_id ?? payload.base_destino_id ?? body?.destino_base_id ?? null,
+      vehiculo_id: payload.destino_vehiculo_id ?? payload.vehiculo_destino_id ?? body?.destino_vehiculo_id ?? null,
+      bolso: payload.destino_bolso ?? payload.bolso_destino ?? body?.destino_bolso ?? body?.bolso_destino ?? null
+    };
+    await applyStockDelta(client, organizationId, origen, -cantidad);
+    await applyStockDelta(client, organizationId, destino, cantidad);
+  } else {
+    const ubicacion = {
+      material_id: payload.material_id,
+      base_id: payload.base_id ?? null,
+      vehiculo_id: payload.vehiculo_id ?? null,
+      bolso: payload.bolso ?? null
+    };
+    const sign = tipoMovimiento === "entrada" ? 1 : -1;
+    await applyStockDelta(client, organizationId, ubicacion, sign * cantidad);
+  }
+  return insertOrganizationRow(client, "su_materiales_movimientos", payload, organizationId);
+}
+
+async function prepareEquipoBiomedicoPayload(client, organizationId, body, current = null) {
+  const metadata = await requireOperationsTable(client, "su_equipos_biomedicos");
+  const payload = await sanitizeRowPayload(client, "su_equipos_biomedicos", body, {
+    exclude: ["id", "organization_id", "created_at", "updated_at"]
+  });
+  const ubicacionTipo = normalizeText(
+    hasOwn(payload, "ubicacion_tipo")
+      ? payload.ubicacion_tipo
+      : current?.ubicacion_tipo
+  ).toLowerCase();
+  const baseId = hasOwn(payload, "base_id") ? payload.base_id : current?.base_id;
+  const vehiculoId = hasOwn(payload, "vehiculo_id") ? payload.vehiculo_id : current?.vehiculo_id;
+
+  if (ubicacionTipo === "vehiculo") {
+    if (!vehiculoId) {
+      throw { status: 422, message: "vehiculo_id es obligatorio cuando ubicacion_tipo es vehiculo" };
+    }
+    if (metadata.has("base_id")) payload.base_id = null;
+  } else if (ubicacionTipo === "base") {
+    if (!baseId) {
+      throw { status: 422, message: "base_id es obligatorio cuando ubicacion_tipo es base" };
+    }
+    if (metadata.has("vehiculo_id")) payload.vehiculo_id = null;
+  } else if (ubicacionTipo === "economato" || ubicacionTipo === "backup") {
+    if (metadata.has("base_id")) payload.base_id = null;
+    if (metadata.has("vehiculo_id")) payload.vehiculo_id = null;
+  }
+
+  if (ubicacionTipo === "vehiculo" && vehiculoId) {
+    await ensureParentRow(client, "su_vehiculos", vehiculoId, organizationId);
+  }
+  if (ubicacionTipo === "base" && baseId) {
+    await ensureParentRow(client, "su_bases", baseId, organizationId);
+  }
+
+  return payload;
+}
+
+async function getMonitorResumen(client, organizationId) {
+  const bases = await listOrganizationRows(client, "su_bases", organizationId, {
+    activeColumn: "activa",
+    orderBy: "created_at ASC"
+  }).catch(() => []);
+  const vehiculosMetadata = await getTableColumnMetadata(client, "su_vehiculos");
+  const baseMetadata = await getTableColumnMetadata(client, "su_bases");
+  const serviciosMetadata = await getTableColumnMetadata(client, "su_servicios");
+  const turnosMetadata = await getTableColumnMetadata(client, "su_turnos");
+  const minVehiculosColumn = getPreferredColumn(new Set(baseMetadata.keys()), [
+    "minimo_vehiculos_habilitados",
+    "minimo_moviles_habilitados",
+    "minimo_unidades",
+    "minimo_operativo"
+  ]);
+  const hasBaseOnVehiculos = vehiculosMetadata.has("base_id");
+  const hasBaseOnServicios = serviciosMetadata.has("base_id");
+  const hasBaseOnTurnos = turnosMetadata.has("base_id");
+  const turnoStartCol = getStartColumn(new Set(turnosMetadata.keys()));
+  const turnoEndCol = getEndColumn(new Set(turnosMetadata.keys()));
+
+  const items = [];
+  for (const base of bases) {
+    const values = [organizationId, base.id];
+    const vehiculosDisponiblesRes = hasBaseOnVehiculos
+      ? await client.query(
+        `
+        SELECT COUNT(*)::int AS total
+        FROM su_vehiculos
+        WHERE organization_id = $1
+          AND base_id = $2
+          AND LOWER(COALESCE(estado_operativo, '')) = 'disponible'
+        `,
+        values
+      )
+      : { rows: [{ total: 0 }] };
+    const personalTurnoRes = hasBaseOnTurnos && turnoStartCol && turnoEndCol
+      ? await client.query(
+        `
+        SELECT COUNT(DISTINCT personal_id)::int AS total
+        FROM su_turnos
+        WHERE organization_id = $1
+          AND base_id = $2
+          AND ${turnoStartCol} <= NOW()
+          AND ${turnoEndCol} >= NOW()
+        `,
+        values
+      )
+      : { rows: [{ total: 0 }] };
+    const serviciosActivosRes = hasBaseOnServicios
+      ? await client.query(
+        `
+        SELECT COUNT(*)::int AS total
+        FROM su_servicios
+        WHERE organization_id = $1
+          AND base_id = $2
+          AND estado = ANY($3::text[])
+        `,
+        [organizationId, base.id, OPERACIONES_SERVICE_ACTIVE_STATES]
+      )
+      : { rows: [{ total: 0 }] };
+    items.push({
+      base,
+      vehiculos_disponibles: Number(vehiculosDisponiblesRes.rows[0]?.total || 0),
+      minimo_vehiculos_habilitados: minVehiculosColumn ? Number(base[minVehiculosColumn] || 0) : null,
+      personal_en_turno: Number(personalTurnoRes.rows[0]?.total || 0),
+      servicios_activos: Number(serviciosActivosRes.rows[0]?.total || 0)
+    });
+  }
+  return items;
+}
+
+function operationsErrorResponse(error, fallbackMessage) {
+  if (error?.status) {
+    return json(error.status, { ok: false, message: error.message });
+  }
+  if (["23514", "23503", "23505"].includes(error?.code)) {
+    return json(400, {
+      ok: false,
+      message: "La operación no pudo completarse por una validación de datos"
+    });
+  }
+  return json(500, {
+    ok: false,
+    message: fallbackMessage,
+    error: error?.message || String(error)
+  });
+}
+
 async function createVendorRegistrationRequest(data) {
   const client = createDbClient();
 
@@ -11138,6 +12074,22 @@ export const handler = async (event) => {
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
   const manualTicketCloseMatch = path.match(/\/manual-tickets\/([^/]+)\/close$/);
   const leadBatchManualContactMatch = path.match(/\/lead-batches\/([^/]+)\/contacts\/manual$/);
+  const operacionesBaseMatch = path.match(/\/operaciones\/bases\/([^/]+)$/);
+  const operacionesPersonalMatch = path.match(/\/operaciones\/personal\/([^/]+)$/);
+  const operacionesPersonalRoleMatch = path.match(/\/operaciones\/personal\/([^/]+)\/roles\/([^/]+)$/);
+  const operacionesPersonalHabMatch = path.match(/\/operaciones\/personal\/([^/]+)\/habilitaciones\/([^/]+)$/);
+  const operacionesPersonalCapMatch = path.match(/\/operaciones\/personal\/([^/]+)\/capacitaciones\/([^/]+)$/);
+  const operacionesPersonalCarnetMatch = path.match(/\/operaciones\/personal\/([^/]+)\/carnet-salud\/([^/]+)$/);
+  const operacionesTurnoMatch = path.match(/\/operaciones\/turnos\/([^/]+)$/);
+  const operacionesEquipoMatch = path.match(/\/operaciones\/equipos\/([^/]+)$/);
+  const operacionesVehiculoMatch = path.match(/\/operaciones\/vehiculos\/([^/]+)$/);
+  const operacionesVehiculoDocumentoMatch = path.match(/\/operaciones\/vehiculos\/([^/]+)\/documentos\/([^/]+)$/);
+  const operacionesVehiculoMantenimientoPath = path.match(/\/operaciones\/vehiculos\/([^/]+)\/mantenimiento$/);
+  const operacionesVehiculoChecklistPath = path.match(/\/operaciones\/vehiculos\/([^/]+)\/checklist$/);
+  const operacionesMaterialCatalogoMatch = path.match(/\/operaciones\/materiales\/catalogo\/([^/]+)$/);
+  const operacionesServicioMatch = path.match(/\/operaciones\/servicios\/([^/]+)$/);
+  const operacionesServicioDotacionMatch = path.match(/\/operaciones\/servicios\/([^/]+)\/dotacion\/([^/]+)$/);
+  const operacionesServicioHistoriaClinicaPath = path.match(/\/operaciones\/servicios\/([^/]+)\/historia-clinica$/);
   console.log("REQUEST", {
     method,
     path,
@@ -34923,6 +35875,1378 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         message: "Failed to reject vendor request",
         error: error.message
       });
+    }
+  }
+
+  if (path.startsWith("/operaciones/")) {
+    if (method === "GET" && path.endsWith("/operaciones/bases")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const items = await listOrganizationRows(client, "su_bases", access.organizationId, {
+          activeColumn: "activa",
+          orderBy: "nombre ASC"
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list bases");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/personal/vencimientos")) {
+      const days = Math.max(1, Number(getQueryParam(event, "days") || 30));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const items = await listPersonalVencimientos(client, access.organizationId, days);
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load personal expirations");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/turnos/actual")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const baseId = normalizeText(getQueryParam(event, "base_id") || "") || null;
+        const items = await listTurnosActuales(client, access.organizationId, baseId);
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load current shifts");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/vehiculos/documentos/vencimientos")) {
+      const days = Math.max(1, Number(getQueryParam(event, "days") || 30));
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const items = await listVehiculoDocumentosVencimientos(client, access.organizationId, days);
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load vehicle document expirations");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/materiales/stock/critico")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const stockMetadata = await requireOperationsTable(client, "su_materiales_stock");
+        const catalogMetadata = await getTableColumnMetadata(client, "su_materiales_catalogo");
+        const qtyCol = getQuantityColumn(new Set(stockMetadata.keys()));
+        const minStockCol = getMinStockColumn(new Set(stockMetadata.keys()));
+        const catalogMinCol = getMinStockColumn(new Set(catalogMetadata.keys()));
+        if (!qtyCol || (!minStockCol && !catalogMinCol)) {
+          return json(200, { ok: true, items: [] });
+        }
+        const result = await client.query(
+          `
+          SELECT s.*, c.*
+          FROM su_materiales_stock s
+          LEFT JOIN su_materiales_catalogo c
+            ON c.id = s.material_id
+           AND c.organization_id = $1
+          WHERE s.organization_id = $1
+            AND COALESCE(s.${qtyCol}, 0) <= COALESCE(${minStockCol ? `s.${minStockCol}` : "NULL"}, ${catalogMinCol ? `c.${catalogMinCol}` : "NULL"}, 0)
+          ORDER BY COALESCE(s.${qtyCol}, 0) ASC
+          `,
+          [access.organizationId]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load critical stock");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/servicios/activos")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_servicios");
+        const result = await client.query(
+          `
+          SELECT *
+          FROM su_servicios
+          WHERE organization_id = $1
+            AND estado = ANY($2::text[])
+          ORDER BY ${metadata.has("created_at") ? "created_at DESC" : "id DESC"}
+          `,
+          [access.organizationId, OPERACIONES_SERVICE_ACTIVE_STATES]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list active services");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/monitor/resumen")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const items = await getMonitorResumen(client, access.organizationId);
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load monitor summary");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesBaseMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await getOrganizationRowById(client, "su_bases", operacionesBaseMatch[1], access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Base no encontrada" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load base");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/bases")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await insertOrganizationRow(client, "su_bases", body, access.organizationId, {
+          defaults: { activa: true }
+        });
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create base");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesBaseMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await updateOrganizationRow(client, "su_bases", operacionesBaseMatch[1], body, access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Base no encontrada" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update base");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesBaseMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await softDeleteOrganizationRow(client, "su_bases", operacionesBaseMatch[1], access.organizationId, {
+          activeColumn: "activa"
+        });
+        if (!item) return json(404, { ok: false, message: "Base no encontrada" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete base");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/personal")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_personal");
+        const whereParts = ["p.organization_id = $1"];
+        const values = [access.organizationId];
+        const baseId = normalizeText(getQueryParam(event, "base_id") || "");
+        const estado = normalizeText(getQueryParam(event, "estado") || "");
+        const rol = normalizeText(getQueryParam(event, "rol") || "");
+        if (baseId && metadata.has("base_id")) {
+          values.push(baseId);
+          whereParts.push(`p.base_id = $${values.length}`);
+        }
+        if (estado && metadata.has("estado")) {
+          values.push(estado);
+          whereParts.push(`LOWER(COALESCE(p.estado, '')) = LOWER($${values.length})`);
+        }
+        if (rol) {
+          const rolesMetadata = await getTableColumnMetadata(client, "su_personal_roles");
+          const roleColumn = getRoleNameColumn(new Set(rolesMetadata.keys()));
+          if (roleColumn) {
+            values.push(rol);
+            whereParts.push(
+              `EXISTS (
+                SELECT 1
+                FROM su_personal_roles spr
+                WHERE spr.organization_id = $1
+                  AND spr.personal_id = p.id
+                  AND LOWER(COALESCE(spr.${roleColumn}, '')) = LOWER($${values.length})
+              )`
+            );
+          }
+        }
+        const result = await client.query(
+          `
+          SELECT p.*
+          FROM su_personal p
+          WHERE ${whereParts.join(" AND ")}
+          ORDER BY COALESCE(p.apellido, ''), COALESCE(p.nombre, '')
+          `,
+          values
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list personal");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesPersonalMatch && operacionesPersonalMatch[1] !== "vencimientos") {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await getPersonalDetail(client, operacionesPersonalMatch[1], access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Personal no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load personal");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/personal")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const roles = Array.isArray(body?.roles) ? body.roles : Array.isArray(body?.roles_iniciales) ? body.roles_iniciales : [];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await client.query("BEGIN");
+        const payload = { ...body };
+        delete payload.roles;
+        delete payload.roles_iniciales;
+        delete payload.user_id;
+        const tipoPersonal = normalizeText(payload?.tipo_personal || payload?.tipoPersonal || "").toLowerCase();
+        const empresaContratistaId = normalizeText(
+          payload?.empresa_contratista_id || payload?.empresaContratistaId || ""
+        ) || null;
+        if (tipoPersonal === "externo" && !empresaContratistaId) {
+          throw {
+            status: 400,
+            message: "empresa_contratista_id es obligatorio cuando tipo_personal es externo"
+          };
+        }
+        if (tipoPersonal === "interno" && empresaContratistaId) {
+          throw {
+            status: 400,
+            message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno"
+          };
+        }
+        const personal = await insertOrganizationRow(client, "su_personal", payload, access.organizationId);
+        const createdRoles = [];
+        for (const roleItem of roles) {
+          const roleBody = typeof roleItem === "string" ? { rol: roleItem } : { ...(roleItem || {}) };
+          const created = await insertOrganizationRow(client, "su_personal_roles", {
+            ...roleBody,
+            personal_id: personal.id
+          }, access.organizationId);
+          createdRoles.push(created);
+        }
+        await client.query("COMMIT");
+        return json(201, { ok: true, item: { ...personal, roles: createdRoles } });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        return operationsErrorResponse(error, "Failed to create personal");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesPersonalMatch && operacionesPersonalMatch[1] !== "vencimientos") {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const payload = { ...body };
+      delete payload.user_id;
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await getOrganizationRowById(client, "su_personal", operacionesPersonalMatch[1], access.organizationId);
+        if (!current) return json(404, { ok: false, message: "Personal no encontrado" });
+        const finalTipoPersonal = normalizeText(
+          (hasOwn(payload, "tipo_personal") || hasOwn(payload, "tipoPersonal"))
+            ? (payload?.tipo_personal ?? payload?.tipoPersonal)
+            : current.tipo_personal
+        ).toLowerCase();
+        const finalEmpresaContratistaId = normalizeText(
+          (hasOwn(payload, "empresa_contratista_id") || hasOwn(payload, "empresaContratistaId"))
+            ? (payload?.empresa_contratista_id ?? payload?.empresaContratistaId)
+            : current.empresa_contratista_id
+        ) || null;
+        if (finalTipoPersonal === "externo" && !finalEmpresaContratistaId) {
+          return json(400, {
+            ok: false,
+            message: "empresa_contratista_id es obligatorio cuando tipo_personal es externo"
+          });
+        }
+        if (finalTipoPersonal === "interno" && finalEmpresaContratistaId) {
+          return json(400, {
+            ok: false,
+            message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno"
+          });
+        }
+        const item = await updateOrganizationRow(client, "su_personal", operacionesPersonalMatch[1], payload, access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Personal no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update personal");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesPersonalMatch && operacionesPersonalMatch[1] !== "vencimientos") {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await softDeleteOrganizationRow(client, "su_personal", operacionesPersonalMatch[1], access.organizationId, {
+          stateColumn: "estado",
+          stateValue: "baja"
+        });
+        if (!item) return json(404, { ok: false, message: "Personal no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete personal");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/roles$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/roles$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", match[1], access.organizationId);
+        const item = await insertOrganizationRow(client, "su_personal_roles", {
+          ...body,
+          personal_id: match[1]
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create personal role");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesPersonalRoleMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const result = await client.query(
+          `DELETE FROM su_personal_roles WHERE id = $1 AND personal_id = $2 AND organization_id = $3 RETURNING id`,
+          [operacionesPersonalRoleMatch[2], operacionesPersonalRoleMatch[1], access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Rol no encontrado" });
+        return json(200, { ok: true });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete personal role");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/habilitaciones$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/habilitaciones$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", match[1], access.organizationId);
+        const item = await insertOrganizationRow(client, "su_personal_habilitaciones", {
+          ...body,
+          personal_id: match[1]
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create habilitacion");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesPersonalHabMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await getOrganizationRowById(client, "su_personal_habilitaciones", operacionesPersonalHabMatch[2], access.organizationId, {
+          extraWhere: "personal_id = $3",
+          extraValues: [operacionesPersonalHabMatch[1]]
+        });
+        if (!current) return json(404, { ok: false, message: "Habilitacion no encontrada" });
+        const item = await updateOrganizationRow(client, "su_personal_habilitaciones", operacionesPersonalHabMatch[2], body, access.organizationId);
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update habilitacion");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/capacitaciones$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/capacitaciones$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", match[1], access.organizationId);
+        const item = await insertOrganizationRow(client, "su_personal_capacitaciones", {
+          ...body,
+          personal_id: match[1]
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create capacitacion");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesPersonalCapMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await getOrganizationRowById(client, "su_personal_capacitaciones", operacionesPersonalCapMatch[2], access.organizationId, {
+          extraWhere: "personal_id = $3",
+          extraValues: [operacionesPersonalCapMatch[1]]
+        });
+        if (!current) return json(404, { ok: false, message: "Capacitacion no encontrada" });
+        const item = await updateOrganizationRow(client, "su_personal_capacitaciones", operacionesPersonalCapMatch[2], body, access.organizationId);
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update capacitacion");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/carnet-salud$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/carnet-salud$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", match[1], access.organizationId);
+        const item = await insertOrganizationRow(client, "su_personal_carnet_salud", {
+          ...body,
+          personal_id: match[1]
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create carnet de salud");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesPersonalCarnetMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await getOrganizationRowById(client, "su_personal_carnet_salud", operacionesPersonalCarnetMatch[2], access.organizationId, {
+          extraWhere: "personal_id = $3",
+          extraValues: [operacionesPersonalCarnetMatch[1]]
+        });
+        if (!current) return json(404, { ok: false, message: "Carnet no encontrado" });
+        const item = await updateOrganizationRow(client, "su_personal_carnet_salud", operacionesPersonalCarnetMatch[2], body, access.organizationId);
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update carnet de salud");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/turnos")) {
+      const fecha = normalizeText(getQueryParam(event, "fecha") || "");
+      const baseId = normalizeText(getQueryParam(event, "base_id") || "");
+      const personalId = normalizeText(getQueryParam(event, "personal_id") || "");
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_turnos");
+        const cols = new Set(metadata.keys());
+        const startCol = getStartColumn(cols);
+        const whereParts = ["organization_id = $1"];
+        const values = [access.organizationId];
+        if (fecha && startCol) {
+          values.push(fecha);
+          whereParts.push(`${startCol}::date = $${values.length}::date`);
+        }
+        if (baseId && metadata.has("base_id")) {
+          values.push(baseId);
+          whereParts.push(`base_id = $${values.length}`);
+        }
+        if (personalId && metadata.has("personal_id")) {
+          values.push(personalId);
+          whereParts.push(`personal_id = $${values.length}`);
+        }
+        const result = await client.query(
+          `SELECT * FROM su_turnos WHERE ${whereParts.join(" AND ")} ORDER BY ${startCol || "id"} DESC`,
+          values
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list shifts");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/turnos")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await insertOrganizationRow(client, "su_turnos", body, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create shift");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesTurnoMatch && operacionesTurnoMatch[1] !== "actual") {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await updateOrganizationRow(client, "su_turnos", operacionesTurnoMatch[1], body, access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Turno no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update shift");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesTurnoMatch && operacionesTurnoMatch[1] !== "actual") {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const result = await client.query(
+          `DELETE FROM su_turnos WHERE id = $1 AND organization_id = $2 RETURNING id`,
+          [operacionesTurnoMatch[1], access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Turno no encontrado" });
+        return json(200, { ok: true });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete shift");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/equipos")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_equipos_biomedicos");
+        const extraWhereParts = [];
+        const extraValues = [];
+        for (const key of ["ubicacion_tipo", "estado"]) {
+          const raw = normalizeText(getQueryParam(event, key) || "");
+          if (raw && metadata.has(key)) {
+            extraValues.push(raw);
+            extraWhereParts.push(`${key}::text = $${extraValues.length + 1}`);
+          }
+        }
+        const equipo = normalizeText(getQueryParam(event, "equipo") || getQueryParam(event, "tipo") || "");
+        if (equipo) {
+          const equipoColumn = metadata.has("tipo")
+            ? "tipo"
+            : metadata.has("equipo")
+            ? "equipo"
+            : null;
+          if (equipoColumn) {
+            extraValues.push(equipo);
+            extraWhereParts.push(`${equipoColumn}::text = $${extraValues.length + 1}`);
+          }
+        }
+        const items = await listOrganizationRows(client, "su_equipos_biomedicos", access.organizationId, {
+          extraWhereParts,
+          extraValues,
+          orderBy: "COALESCE(updated_at, created_at, NOW()) DESC"
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list biomedical equipment");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesEquipoMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await getOrganizationRowById(client, "su_equipos_biomedicos", operacionesEquipoMatch[1], access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Equipo biomedico no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load biomedical equipment");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/equipos")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const payload = await prepareEquipoBiomedicoPayload(client, access.organizationId, body);
+        const item = await insertOrganizationRow(client, "su_equipos_biomedicos", payload, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create biomedical equipment");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesEquipoMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await ensureParentRow(client, "su_equipos_biomedicos", operacionesEquipoMatch[1], access.organizationId);
+        const payload = await prepareEquipoBiomedicoPayload(client, access.organizationId, body, current);
+        const item = await updateOrganizationRow(
+          client,
+          "su_equipos_biomedicos",
+          operacionesEquipoMatch[1],
+          payload,
+          access.organizationId
+        );
+        if (!item) return json(404, { ok: false, message: "Equipo biomedico no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update biomedical equipment");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesEquipoMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await softDeleteOrganizationRow(client, "su_equipos_biomedicos", operacionesEquipoMatch[1], access.organizationId, {
+          stateColumn: "estado",
+          stateValue: "inactivo"
+        });
+        if (!item) return json(404, { ok: false, message: "Equipo biomedico no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete biomedical equipment");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/vehiculos")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_vehiculos");
+        const whereParts = ["organization_id = $1"];
+        const values = [access.organizationId];
+        for (const key of ["base_id", "estado_operativo", "categoria"]) {
+          const raw = normalizeText(getQueryParam(event, key) || "");
+          if (raw && metadata.has(key)) {
+            values.push(raw);
+            whereParts.push(`LOWER(COALESCE(${key}::text, '')) = LOWER($${values.length})`);
+          }
+        }
+        const result = await client.query(
+          `SELECT * FROM su_vehiculos WHERE ${whereParts.join(" AND ")} ORDER BY COALESCE(nombre, matricula, id::text)`,
+          values
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list vehicles");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesVehiculoMatch) {
+      const vehiculoId = operacionesVehiculoMatch[1];
+      const reserved = new Set(["documentos", "mantenimiento", "checklist"]);
+      if (reserved.has(vehiculoId)) {
+        return json(404, { ok: false, message: "Route not found", path, method });
+      }
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await getVehiculoDetail(client, vehiculoId, access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Vehiculo no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load vehicle");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/vehiculos")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await insertOrganizationRow(client, "su_vehiculos", body, access.organizationId, {
+          defaults: { activa: true, estado_operativo: "disponible" }
+        });
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create vehicle");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesVehiculoMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await updateOrganizationRow(client, "su_vehiculos", operacionesVehiculoMatch[1], body, access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Vehiculo no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update vehicle");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesVehiculoMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await softDeleteOrganizationRow(client, "su_vehiculos", operacionesVehiculoMatch[1], access.organizationId, {
+          activeColumn: "activa"
+        });
+        if (!item) return json(404, { ok: false, message: "Vehiculo no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete vehicle");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/vehiculos\/([^/]+)\/documentos$/)) {
+      const match = path.match(/\/operaciones\/vehiculos\/([^/]+)\/documentos$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_vehiculos", match[1], access.organizationId);
+        const item = await insertOrganizationRow(client, "su_vehiculos_documentos", {
+          ...body,
+          vehiculo_id: match[1]
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create vehicle document");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesVehiculoDocumentoMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await getOrganizationRowById(client, "su_vehiculos_documentos", operacionesVehiculoDocumentoMatch[2], access.organizationId, {
+          extraWhere: "vehiculo_id = $3",
+          extraValues: [operacionesVehiculoDocumentoMatch[1]]
+        });
+        if (!current) return json(404, { ok: false, message: "Documento no encontrado" });
+        const item = await updateOrganizationRow(client, "su_vehiculos_documentos", operacionesVehiculoDocumentoMatch[2], body, access.organizationId);
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update vehicle document");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && operacionesVehiculoMantenimientoPath) {
+      const body = safeParseBody(event);
+      const vehiculoId = operacionesVehiculoMantenimientoPath?.[1];
+      if (!vehiculoId || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_vehiculos", vehiculoId, access.organizationId);
+        const item = await insertOrganizationRow(client, "su_vehiculos_mantenimiento", {
+          ...body,
+          vehiculo_id: vehiculoId
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create maintenance record");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesVehiculoMantenimientoPath) {
+      const vehiculoId = operacionesVehiculoMantenimientoPath?.[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_vehiculos", vehiculoId, access.organizationId);
+        const items = await listOrganizationRows(client, "su_vehiculos_mantenimiento", access.organizationId, {
+          extraWhereParts: ["vehiculo_id = $2"],
+          extraValues: [vehiculoId]
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list maintenance records");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && operacionesVehiculoChecklistPath) {
+      const body = safeParseBody(event);
+      const vehiculoId = operacionesVehiculoChecklistPath?.[1];
+      if (!vehiculoId || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_vehiculos", vehiculoId, access.organizationId);
+        const item = await insertOrganizationRow(client, "su_vehiculos_equipamiento_checklist", {
+          ...body,
+          vehiculo_id: vehiculoId
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create checklist");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesVehiculoChecklistPath) {
+      const vehiculoId = operacionesVehiculoChecklistPath?.[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_vehiculos", vehiculoId, access.organizationId);
+        const items = await listOrganizationRows(client, "su_vehiculos_equipamiento_checklist", access.organizationId, {
+          extraWhereParts: ["vehiculo_id = $2"],
+          extraValues: [vehiculoId]
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list checklist");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/materiales/catalogo")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const items = await listOrganizationRows(client, "su_materiales_catalogo", access.organizationId, {
+          activeColumn: "activo",
+          orderBy: "nombre ASC"
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list materials catalog");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/materiales/catalogo")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await insertOrganizationRow(client, "su_materiales_catalogo", body, access.organizationId, {
+          defaults: { activo: true }
+        });
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create material");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesMaterialCatalogoMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await updateOrganizationRow(client, "su_materiales_catalogo", operacionesMaterialCatalogoMatch[1], body, access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Material no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update material");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/materiales/stock")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_materiales_stock");
+        const whereParts = ["organization_id = $1"];
+        const values = [access.organizationId];
+        for (const key of ["base_id", "vehiculo_id", "material_id"]) {
+          const raw = normalizeText(getQueryParam(event, key) || "");
+          if (raw && metadata.has(key)) {
+            values.push(raw);
+            whereParts.push(`${key} = $${values.length}`);
+          }
+        }
+        const result = await client.query(
+          `SELECT * FROM su_materiales_stock WHERE ${whereParts.join(" AND ")} ORDER BY id DESC`,
+          values
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list stock");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/materiales/movimientos")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await client.query("BEGIN");
+        const item = await createMaterialMovimiento(client, body, access.organizationId, access.dbUser?.id || null);
+        await client.query("COMMIT");
+        return json(201, { ok: true, item });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        return operationsErrorResponse(error, "Failed to create material movement");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/materiales/movimientos")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_materiales_movimientos");
+        const whereParts = ["organization_id = $1"];
+        const values = [access.organizationId];
+        for (const key of ["base_id", "vehiculo_id", "material_id", "tipo"]) {
+          const raw = normalizeText(getQueryParam(event, key) || "");
+          if (raw && metadata.has(key)) {
+            values.push(raw);
+            whereParts.push(`${key}::text = $${values.length}`);
+          }
+        }
+        const orderBy = metadata.has("created_at") ? "created_at DESC" : "id DESC";
+        const result = await client.query(
+          `SELECT * FROM su_materiales_movimientos WHERE ${whereParts.join(" AND ")} ORDER BY ${orderBy}`,
+          values
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list material movements");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesServicioHistoriaClinicaPath) {
+      const servicioId = operacionesServicioHistoriaClinicaPath[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_servicios", servicioId, access.organizationId);
+        if (!OPERACIONES_HISTORIA_CLINICA_ENABLED) {
+          return json(403, { ok: false, message: "Módulo de historia clínica en preparación" });
+        }
+        const items = await listOrganizationRows(client, "su_servicios_historia_clinica", access.organizationId, {
+          extraWhereParts: ["servicio_id = $2"],
+          extraValues: [servicioId]
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load medical record");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && operacionesServicioHistoriaClinicaPath) {
+      const servicioId = operacionesServicioHistoriaClinicaPath[1];
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_servicios", servicioId, access.organizationId);
+        if (!OPERACIONES_HISTORIA_CLINICA_ENABLED) {
+          return json(403, { ok: false, message: "Módulo de historia clínica en preparación" });
+        }
+        const item = await insertOrganizationRow(client, "su_servicios_historia_clinica", {
+          ...body,
+          servicio_id: servicioId
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create medical record");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && path.endsWith("/operaciones/servicios")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const metadata = await requireOperationsTable(client, "su_servicios");
+        const cols = new Set(metadata.keys());
+        const dateCol = getPreferredColumn(cols, ["fecha", "fecha_servicio", "created_at", "inicio"]);
+        const whereParts = ["organization_id = $1"];
+        const values = [access.organizationId];
+        for (const key of ["estado", "tipo", "vehiculo_id"]) {
+          const raw = normalizeText(getQueryParam(event, key) || "");
+          if (raw && metadata.has(key)) {
+            values.push(raw);
+            whereParts.push(`${key}::text = $${values.length}`);
+          }
+        }
+        const fecha = normalizeText(getQueryParam(event, "fecha") || "");
+        if (fecha && dateCol) {
+          values.push(fecha);
+          whereParts.push(`${dateCol}::date = $${values.length}::date`);
+        }
+        const orderBy = dateCol || (metadata.has("created_at") ? "created_at" : "id");
+        const result = await client.query(
+          `SELECT * FROM su_servicios WHERE ${whereParts.join(" AND ")} ORDER BY ${orderBy} DESC`,
+          values
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list services");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "GET" && operacionesServicioMatch && operacionesServicioMatch[1] !== "activos") {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const item = await getServicioDetail(client, operacionesServicioMatch[1], access.organizationId);
+        if (!item) return json(404, { ok: false, message: "Servicio no encontrado" });
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load service");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.endsWith("/operaciones/servicios")) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      if (normalizeText(body?.vehiculo_id || body?.vehiculoId || "")) {
+        return json(422, {
+          ok: false,
+          message: "vehiculo_id no puede asignarse al crear el servicio solicitado"
+        });
+      }
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const payload = { ...body, estado: "solicitado" };
+        delete payload.organization_id;
+        const item = await insertOrganizationRow(client, "su_servicios", payload, access.organizationId, {
+          defaults: { estado: "solicitado" }
+        });
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create service");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesServicioMatch && operacionesServicioMatch[1] !== "activos") {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await client.query("BEGIN");
+        const current = await ensureParentRow(client, "su_servicios", operacionesServicioMatch[1], access.organizationId);
+        const nextEstado = normalizeText(body?.estado || current.estado || "").toLowerCase() || current.estado;
+        if (!validateServiceTransition(current.estado, nextEstado)) {
+          throw { status: 409, message: "Transicion de estado invalida" };
+        }
+        const requestedVehiculoId = normalizeText(body?.vehiculo_id || body?.vehiculoId || "") || current.vehiculo_id || null;
+        const nextPayload = { ...body };
+        if (requestedVehiculoId && requestedVehiculoId !== current.vehiculo_id && ["asignado", "en_curso"].includes(nextEstado)) {
+          await validateVehicleAvailable(client, requestedVehiculoId, access.organizationId);
+          await updateVehiculoEstadoOperativo(client, requestedVehiculoId, access.organizationId, "en_servicio");
+        }
+        if (current.vehiculo_id && current.vehiculo_id !== requestedVehiculoId && !OPERACIONES_SERVICE_TERMINAL_STATES.includes(String(current.estado || "").toLowerCase())) {
+          await updateVehiculoEstadoOperativo(client, current.vehiculo_id, access.organizationId, "disponible");
+        }
+        if (OPERACIONES_SERVICE_TERMINAL_STATES.includes(nextEstado) && (requestedVehiculoId || current.vehiculo_id)) {
+          await updateVehiculoEstadoOperativo(client, requestedVehiculoId || current.vehiculo_id, access.organizationId, "disponible");
+        }
+        const serviceMetadata = await getTableColumnMetadata(client, "su_servicios");
+        if (serviceMetadata.has("fecha_asignacion") && nextEstado === "asignado" && !current.fecha_asignacion) {
+          nextPayload.fecha_asignacion = new Date().toISOString();
+        }
+        if (serviceMetadata.has("fecha_inicio") && nextEstado === "en_curso" && !current.fecha_inicio) {
+          nextPayload.fecha_inicio = new Date().toISOString();
+        }
+        if (serviceMetadata.has("fecha_fin") && nextEstado === "finalizado") {
+          nextPayload.fecha_fin = new Date().toISOString();
+        }
+        nextPayload.vehiculo_id = requestedVehiculoId;
+        const item = await updateOrganizationRow(client, "su_servicios", operacionesServicioMatch[1], nextPayload, access.organizationId);
+        await client.query("COMMIT");
+        return json(200, { ok: true, item });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        return operationsErrorResponse(error, "Failed to update service");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/servicios\/([^/]+)\/dotacion$/)) {
+      const match = path.match(/\/operaciones\/servicios\/([^/]+)\/dotacion$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_servicios", match[1], access.organizationId);
+        const personalId = normalizeText(body?.personal_id || body?.personalId || "") || null;
+        const rolEnServicio = normalizeText(body?.rol_en_servicio || body?.rolEnServicio || "") || null;
+        if (!personalId) return json(422, { ok: false, message: "personal_id es obligatorio" });
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+        await validateDotacionRole(client, {
+          personalId,
+          rolEnServicio,
+          organizationId: access.organizationId
+        });
+        const item = await insertOrganizationRow(client, "su_servicios_dotacion", {
+          ...body,
+          servicio_id: match[1],
+          personal_id: personalId,
+          rol_en_servicio: rolEnServicio
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create dotacion");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesServicioDotacionMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const result = await client.query(
+          `DELETE FROM su_servicios_dotacion WHERE id = $1 AND servicio_id = $2 AND organization_id = $3 RETURNING id`,
+          [operacionesServicioDotacionMatch[2], operacionesServicioDotacionMatch[1], access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Dotacion no encontrada" });
+        return json(200, { ok: true });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete dotacion");
+      } finally {
+        await client.end();
+      }
     }
   }
 
