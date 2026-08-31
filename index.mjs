@@ -18439,14 +18439,42 @@ export const handler = async (event) => {
               COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'no_contesta' THEN lcs.contact_id END) AS no_contesta,
               COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'dato_erroneo' THEN lcs.contact_id END) AS dato_erroneo,
               COUNT(DISTINCT CASE WHEN lcs.estado_venta = 'nuevo' THEN lcs.contact_id END) AS nuevos,
-              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS vendedor_asignado_nombre,
+              COALESCE(vnd.vendedores, '[]'::jsonb) AS vendedores
             FROM lead_batches lb
             LEFT JOIN lead_batch_contacts lbc ON lbc.batch_id = lb.id
             LEFT JOIN lead_contact_status lcs ON lcs.batch_id = lb.id
             LEFT JOIN users u ON u.id = COALESCE(lb.seller_id, lb.asignado_a)
+            LEFT JOIN (
+              SELECT
+                lbs.batch_id,
+                JSONB_AGG(
+                  JSONB_BUILD_OBJECT(
+                    'id', seller.id,
+                    'nombre', seller.nombre,
+                    'apellido', seller.apellido,
+                    'email', seller.email,
+                    'total_contactos', COALESCE(vc.total, 0),
+                    'gestionados', COALESCE(vc.gestionados, 0)
+                  )
+                  ORDER BY seller.nombre ASC, seller.apellido ASC, seller.id ASC
+                ) AS vendedores
+              FROM lead_batch_sellers lbs
+              JOIN users seller ON seller.id = lbs.seller_id
+              LEFT JOIN (
+                SELECT
+                  batch_id,
+                  assigned_to,
+                  COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE estado_venta != 'nuevo') AS gestionados
+                FROM lead_contact_status
+                GROUP BY batch_id, assigned_to
+              ) vc ON vc.batch_id = lbs.batch_id AND vc.assigned_to = lbs.seller_id
+              GROUP BY lbs.batch_id
+            ) vnd ON vnd.batch_id = lb.id
             WHERE lb.tipo = 'recupero'
               AND lb.organization_id = $3
-            GROUP BY lb.id, u.nombre, u.apellido, u.id
+            GROUP BY lb.id, u.nombre, u.apellido, u.id, vnd.vendedores
             ORDER BY lb.created_at DESC
             LIMIT $1 OFFSET $2
             `,
@@ -18466,26 +18494,37 @@ export const handler = async (event) => {
 
         const total = Number(totalRes.rows[0]?.total || 0);
         const data = {
-          items: itemsRes.rows.map((row) => ({
-            id: row.id,
-            nombre: row.nombre,
-            estado: row.estado,
-            created_at: row.created_at,
-            cantidad: Number(row.cantidad || 0),
-            cantidad_datos: Number(row.cantidad || 0),
-            total_contactos: Number(row.total_contactos || 0),
-            gestionado: Number(row.gestionado || 0),
-            ventas: Number(row.ventas || 0),
-            rechazos: Number(row.rechazos || 0),
-            no_contesta: Number(row.no_contesta || 0),
-            dato_erroneo: Number(row.dato_erroneo || 0),
-            nuevos: Number(row.nuevos || 0),
-            configuracion: row.criterios,
-            criterios: row.criterios,
-            vendedor_asignado_id: row.seller_id || row.asignado_a || null,
-            vendedor_asignado_nombre: row.vendedor_asignado_nombre,
-            vendedor_asignado: row.vendedor_asignado_nombre
-          })),
+          items: itemsRes.rows.map((row) => {
+            let vendedores = row.vendedores || [];
+            if (typeof vendedores === "string") {
+              try {
+                vendedores = JSON.parse(vendedores);
+              } catch {
+                vendedores = [];
+              }
+            }
+            return {
+              id: row.id,
+              nombre: row.nombre,
+              estado: row.estado,
+              created_at: row.created_at,
+              cantidad: Number(row.cantidad || 0),
+              cantidad_datos: Number(row.cantidad || 0),
+              total_contactos: Number(row.total_contactos || 0),
+              gestionado: Number(row.gestionado || 0),
+              ventas: Number(row.ventas || 0),
+              rechazos: Number(row.rechazos || 0),
+              no_contesta: Number(row.no_contesta || 0),
+              dato_erroneo: Number(row.dato_erroneo || 0),
+              nuevos: Number(row.nuevos || 0),
+              configuracion: row.criterios,
+              criterios: row.criterios,
+              vendedor_asignado_id: row.seller_id || row.asignado_a || null,
+              vendedor_asignado_nombre: row.vendedor_asignado_nombre,
+              vendedor_asignado: row.vendedor_asignado_nombre,
+              vendedores
+            };
+          }),
           total,
           page,
           limit
