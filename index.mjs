@@ -36051,7 +36051,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     }
   }
 
-  if (path.startsWith("/operaciones/")) {
+  if (path.includes("/operaciones/")) {
     if (method === "GET" && path.endsWith("/operaciones/bases")) {
       const client = createDbClient();
       await client.connect();
