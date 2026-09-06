@@ -36848,7 +36848,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           }
         }
         const result = await client.query(
-          `SELECT * FROM su_vehiculos WHERE ${whereParts.join(" AND ")} ORDER BY COALESCE(nombre, matricula, id::text)`,
+          `SELECT * FROM su_vehiculos WHERE ${whereParts.join(" AND ")} ORDER BY COALESCE(numero_interno, matricula, id::text)`,
           values
         );
         return json(200, { ok: true, items: result.rows });
