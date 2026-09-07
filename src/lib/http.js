@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { AppError } from "./errors.js";
 
 export const ALLOWED_ORIGINS = [
@@ -6,11 +7,35 @@ export const ALLOWED_ORIGINS = [
   "https://callcenter.tri.uy",
 ];
 
+// Solo se aceptan ademas de ALLOWED_ORIGINS cuando LOCAL_DEV_AUTH=true (el
+// mismo flag que ya gatea el bypass de autenticacion local en index.mjs), asi
+// que en produccion (donde esa env var nunca se setea) el comportamiento es
+// identico al de antes: unicamente los 3 origenes de ALLOWED_ORIGINS.
+const LOCAL_DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"];
+
 // Pure helper: resolve a whitelisted CORS origin from the incoming request.
 export function resolveAllowedOrigin(event) {
   const headers = event?.headers || {};
   const origin = headers.origin || headers.Origin || "";
-  return ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  if (ALLOWED_ORIGINS.includes(origin)) return origin;
+  if (process.env.LOCAL_DEV_AUTH === "true" && LOCAL_DEV_ORIGINS.includes(origin)) {
+    return origin;
+  }
+  return ALLOWED_ORIGINS[0];
+}
+
+// AsyncLocalStorage: guarda el origin resuelto para el request en curso,
+// aislado por cadena de ejecucion async (a diferencia de una variable mutable
+// a nivel de modulo, no se pisa entre requests concurrentes en el mismo
+// proceso — relevante en local-server.mjs, que si puede interlazar requests).
+const corsOriginStore = new AsyncLocalStorage();
+
+export function withCorsOrigin(event, fn) {
+  return corsOriginStore.run(resolveAllowedOrigin(event), fn);
+}
+
+export function getCurrentCorsOrigin() {
+  return corsOriginStore.getStore() || ALLOWED_ORIGINS[0];
 }
 
 export const CORS_HEADERS = {

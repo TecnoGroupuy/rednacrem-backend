@@ -11,7 +11,7 @@ import {
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { AppError } from "./src/lib/errors.js";
-import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS } from "./src/lib/http.js";
+import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS, withCorsOrigin, getCurrentCorsOrigin } from "./src/lib/http.js";
 import { normalizePhone as normalizePhoneValidation } from "./src/lib/validation.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
 import { deleteUser as deleteCognitoUser } from "./src/services/cognitoService.js";
@@ -288,7 +288,8 @@ function json(statusCode, payload) {
     statusCode,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...CORS_HEADERS
+      ...CORS_HEADERS,
+      "Access-Control-Allow-Origin": getCurrentCorsOrigin()
     },
     body: JSON.stringify(payload)
   };
@@ -11947,7 +11948,9 @@ async function handleLeadManualContact(client, batchId, dbUser, organizationId, 
   }
 }
 
-export const handler = async (event) => {
+export const handler = async (event) => withCorsOrigin(event, () => routeRequest(event));
+
+async function routeRequest(event) {
   try {
   const preflightMethod =
     event?.requestContext?.http?.method || event?.httpMethod || "";
@@ -37437,7 +37440,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       error: error?.message || String(error)
     });
   }
-};
+}
 
 export const __testables = {
   isActiveFromStatus,
