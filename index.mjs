@@ -10791,7 +10791,7 @@ async function listVehiculoDocumentosVencimientos(client, organizationId, days =
     `
     SELECT
       d.*,
-      v.nombre AS vehiculo_nombre,
+      COALESCE(v.numero_interno, v.matricula, v.id::text) AS vehiculo_nombre,
       v.matricula
     FROM su_vehiculos_documentos d
     LEFT JOIN su_vehiculos v
