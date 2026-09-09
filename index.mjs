@@ -36287,25 +36287,73 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           values.push(estado);
           whereParts.push(`LOWER(COALESCE(p.estado, '')) = LOWER($${values.length})`);
         }
-        if (rol) {
-          const rolesMetadata = await getTableColumnMetadata(client, "su_personal_roles");
-          const roleColumn = getRoleNameColumn(new Set(rolesMetadata.keys()));
-          if (roleColumn) {
-            values.push(rol);
-            whereParts.push(
-              `EXISTS (
-                SELECT 1
-                FROM su_personal_roles spr
-                WHERE spr.organization_id = $1
-                  AND spr.personal_id = p.id
-                  AND LOWER(COALESCE(spr.${roleColumn}, '')) = LOWER($${values.length})
-              )`
-            );
-          }
+
+        // Se resuelve el nombre real de la columna de rol una sola vez: lo
+        // usan tanto el filtro ?rol= (EXISTS, comportamiento identico al de
+        // antes) como el subquery de roles agregados de mas abajo. Antes se
+        // pedia la metadata de su_personal_roles solo adentro del if (rol);
+        // ahora hace falta siempre, asi que se saca afuera.
+        const rolesMetadata = await getTableColumnMetadata(client, "su_personal_roles");
+        const roleColumn = getRoleNameColumn(new Set(rolesMetadata.keys()));
+
+        if (rol && roleColumn) {
+          values.push(rol);
+          whereParts.push(
+            `EXISTS (
+              SELECT 1
+              FROM su_personal_roles spr
+              WHERE spr.organization_id = $1
+                AND spr.personal_id = p.id
+                AND LOWER(COALESCE(spr.${roleColumn}, '')) = LOWER($${values.length})
+            )`
+          );
         }
+
+        // Cada persona trae ahora su lista de roles ({id, rol, rol_principal})
+        // en la misma query, para que listar 89+ personas no dispare un
+        // fetch aparte por cada una (eso solo pasaba, y sigue pasando sin
+        // cambios, en GET /operaciones/personal/:id via getPersonalDetail).
+        //
+        // Se eligio un subquery correlacionado con json_agg en vez de un
+        // LEFT JOIN + GROUP BY p.id por tres razones: (1) este SELECT usa
+        // `p.*` para no tener que listar a mano las columnas de su_personal
+        // (coherente con el resto del archivo, que descubre columnas via
+        // information_schema en vez de asumirlas) -- un GROUP BY p.id
+        // funcionaria igual gracias a la dependencia funcional de la PK en
+        // Postgres, pero ata el SELECT p.* a esa dependencia de forma menos
+        // obvia de leer; (2) evita el caso clasico de un LEFT JOIN sin
+        // roles produciendo una fila NULL que despues hay que filtrar con
+        // FILTER (WHERE spr.id IS NOT NULL) para no terminar con un array
+        // de un elemento nulo -- el subquery correlacionado directamente no
+        // genera esa fila fantasma: si no hay roles, el subquery no
+        // devuelve filas y json_agg da NULL, que el COALESCE de afuera
+        // convierte en '[]'; (3) no duplica ni afecta las filas de
+        // su_personal cuando alguien tiene mas de un rol, sin que la
+        // logica de whereParts/EXISTS de arriba tenga que lidiar con
+        // agrupamiento.
+        const rolePrincipalColumn = rolesMetadata.has("rol_principal") ? "rol_principal" : null;
+        const rolesSelect = roleColumn
+          ? `COALESCE(
+              (
+                SELECT json_agg(
+                  json_build_object(
+                    'id', spr.id,
+                    'rol', spr.${roleColumn}${rolePrincipalColumn ? `,
+                    'rol_principal', spr.${rolePrincipalColumn}` : ""}
+                  )
+                  ORDER BY spr.created_at ASC
+                )
+                FROM su_personal_roles spr
+                WHERE spr.organization_id = p.organization_id
+                  AND spr.personal_id = p.id
+              ),
+              '[]'::json
+            ) AS roles`
+          : `'[]'::json AS roles`;
+
         const result = await client.query(
           `
-          SELECT p.*
+          SELECT p.*, ${rolesSelect}
           FROM su_personal p
           WHERE ${whereParts.join(" AND ")}
           ORDER BY COALESCE(p.apellido, ''), COALESCE(p.nombre, '')
