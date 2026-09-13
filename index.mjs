@@ -10206,6 +10206,188 @@ function requireRole(event, dbUser, allowedRoles) {
   return null;
 }
 
+// ---------------------------------------------------------------------
+// Ficha publica de autocompletado (sin Cognito) -- token HMAC+timestamp,
+// stateless, sin tabla nueva para el token en si. Ver TAREA 1 del prompt
+// de implementacion para el detalle de diseño.
+// ---------------------------------------------------------------------
+
+const FICHA_PUBLICA_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24hs
+// Umbral de intentos fallidos de busqueda por IP: 5 en 15 minutos. Numero
+// chico a proposito -- es una busqueda por documento+fecha_nacimiento (poca
+// entropia si alguien probara documentos al voleo), y el uso legitimo real
+// es "una persona busca su propia ficha una vez, quiza reintenta si se
+// equivoca de fecha" -- 5 intentos deja margen generoso para errores de
+// tipeo genuinos sin abrir la puerta a un barrido de documentos.
+const FICHA_PUBLICA_MAX_INTENTOS = 5;
+const FICHA_PUBLICA_INTENTOS_WINDOW = "15 minutes";
+// 4MB de imagen decodificada. API Gateway con integracion Lambda proxy
+// tiene un techo de ~10MB de payload total; en base64 (el formato en que
+// llega el body, ~33% mas grande que los bytes reales) 4MB de imagen ocupan
+// ~5.4MB de body, dejando margen holgado antes de ese techo.
+const FICHA_PUBLICA_PHOTO_MAX_BYTES = 4 * 1024 * 1024;
+const FICHA_PUBLICA_PHOTO_ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const FICHA_PUBLICA_FECHA_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+// El secreto NUNCA se hardcodea ni tiene default -- si falta la env var, los
+// endpoints que dependen de el fallan de forma segura (no generan ni
+// aceptan ningun token) en vez de operar con un secreto conocido/adivinable.
+// Variable a setear en el Lambda antes de deployar: FICHA_PUBLICA_SECRET.
+function getFichaPublicaSecret() {
+  const secret = process.env.FICHA_PUBLICA_SECRET;
+  return secret && secret.length >= 16 ? secret : null;
+}
+
+// Genera un token de acceso temporal para la ficha publica. El payload
+// incluye organizationId ademas de exp (el prompt sugeria solo {exp} como
+// "algo tipo") -- se agrega para que el link que genera un admin de una
+// organizacion no sirva para buscar/editar personal de OTRA organizacion.
+// Sin esto, como el token no tiene ningun otro mecanismo de scoping, dos
+// organizaciones distintas con un documento coincidente (poco probable con
+// cedulas/DNI reales, pero no imposible con datos mal cargados) quedarian
+// cruzadas -- exactamente el tipo de bug de aislamiento multi-tenant que ya
+// paso antes en este proyecto (GET /clients, upsertContact()).
+function generateFichaPublicaToken(organizationId) {
+  const secret = getFichaPublicaSecret();
+  if (!secret) {
+    throw { status: 500, message: "FICHA_PUBLICA_SECRET no esta configurado en el entorno." };
+  }
+  const exp = Date.now() + FICHA_PUBLICA_TOKEN_TTL_MS;
+  const payloadB64 = Buffer.from(JSON.stringify({ exp, organizationId })).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(payloadB64).digest("hex");
+  return { token: `${payloadB64}.${signature}`, expiresAt: exp };
+}
+
+// Verifica un token de ficha publica. Comparacion timing-safe del HMAC
+// (crypto.timingSafeEqual, no === directo) y chequeo de vencimiento. Ante
+// cualquier fallo (secreto no configurado, formato invalido, firma que no
+// matchea, o vencido) devuelve { valid: false } sin distinguir la causa --
+// el mensaje que ve el cliente es siempre el mismo generico, para no darle
+// pistas a quien intente forjar un token.
+function verifyFichaPublicaToken(token) {
+  const secret = getFichaPublicaSecret();
+  if (!secret || !token || typeof token !== "string") return { valid: false };
+
+  const separatorIndex = token.lastIndexOf(".");
+  if (separatorIndex <= 0 || separatorIndex === token.length - 1) return { valid: false };
+  const payloadB64 = token.slice(0, separatorIndex);
+  const providedSignature = token.slice(separatorIndex + 1);
+
+  const expectedSignature = crypto.createHmac("sha256", secret).update(payloadB64).digest("hex");
+  let providedBuf, expectedBuf;
+  try {
+    providedBuf = Buffer.from(providedSignature, "hex");
+    expectedBuf = Buffer.from(expectedSignature, "hex");
+  } catch {
+    return { valid: false };
+  }
+  // timingSafeEqual tira TypeError si los buffers tienen longitud distinta
+  // en vez de comparar -- se chequea el largo antes. Esto no es en si un
+  // timing attack (el largo esperado de un HMAC-SHA256 en hex es siempre
+  // 64, fijo y publico), solo evita el throw.
+  if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+    return { valid: false };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+  } catch {
+    return { valid: false };
+  }
+  if (!payload || typeof payload.exp !== "number" || Date.now() >= payload.exp) {
+    return { valid: false };
+  }
+  if (!payload.organizationId || !isValidUuid(payload.organizationId)) {
+    return { valid: false };
+  }
+  return { valid: true, organizationId: payload.organizationId };
+}
+
+// event.requestContext.http.sourceIp es el campo que puebla API Gateway
+// (formato de evento HTTP API v2, el mismo que usa el resto del archivo --
+// ver getPath/getMethod) a partir de la conexion TCP real, no headers que el
+// cliente pueda forjar. Se prioriza por eso sobre X-Forwarded-For (que un
+// cliente si puede setear a mano) -- ese header solo se usa como fallback
+// defensivo si por algun motivo sourceIp no vino en el evento.
+function getFichaPublicaClientIp(event) {
+  const sourceIp = event?.requestContext?.http?.sourceIp;
+  if (sourceIp) return String(sourceIp);
+  const forwarded = event?.headers?.["x-forwarded-for"] || event?.headers?.["X-Forwarded-For"];
+  if (forwarded) {
+    const first = String(forwarded).split(",")[0].trim();
+    if (first) return first;
+  }
+  return "unknown";
+}
+
+async function isFichaPublicaIpBlocked(client, ip) {
+  const result = await client.query(
+    `SELECT COUNT(*)::int AS intentos FROM ficha_publica_intentos
+     WHERE ip = $1 AND created_at > now() - interval '${FICHA_PUBLICA_INTENTOS_WINDOW}'`,
+    [ip]
+  );
+  return (result.rows[0]?.intentos || 0) >= FICHA_PUBLICA_MAX_INTENTOS;
+}
+
+async function registerFichaPublicaIntentoFallido(client, ip) {
+  await client.query(`INSERT INTO ficha_publica_intentos (ip) VALUES ($1)`, [ip]);
+}
+
+// Re-verifica documento+fecha_nacimiento contra el :id de la URL ANTES de
+// dejar leer o escribir nada -- asi alguien no puede simplemente cambiar el
+// id en la URL (aunque tenga un token valido) para buscar/editar la ficha
+// de otra persona. Las cuatro condiciones (id, organization_id del token,
+// documento, fecha_nacimiento) tienen que matchear juntas en la misma fila.
+async function verifyFichaPublicaPersona(client, organizationId, personalId, documento, fechaNacimiento) {
+  if (!isValidUuid(personalId)) return null;
+  const result = await client.query(
+    `SELECT id FROM su_personal
+     WHERE id = $1 AND organization_id = $2 AND documento = $3 AND fecha_nacimiento = $4::date
+     LIMIT 1`,
+    [personalId, organizationId, documento, fechaNacimiento]
+  );
+  return result.rows[0] || null;
+}
+
+// Unicos campos que la ficha publica puede tocar. Cualquier otra key que
+// venga en el body se ignora en silencio -- el resto de su_personal
+// (organization_id, rol, regimen_turno, estados, etc.) solo se edita desde
+// el modulo autenticado de RRHH.
+const FICHA_PUBLICA_CAMPOS_EDITABLES = ["telefono", "email", "domicilio"];
+const FICHA_PUBLICA_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// NOTA DE SCHEMA: estos SELECT/UPDATE asumen que su_personal tiene las
+// columnas documento, fecha_nacimiento, nombre, apellido, telefono, email,
+// domicilio, foto_url, organization_id y updated_at. El schema local diverge
+// del de produccion en este repo -- Damian confirma los nombres reales
+// contra RDS antes de deployar y se ajusta lo que haga falta.
+function projectFichaPublicaPersona(row) {
+  if (!row) return null;
+  const persona = {
+    id: row.id,
+    nombre: row.nombre ?? null,
+    apellido: row.apellido ?? null,
+    telefono: row.telefono ?? null,
+    email: row.email ?? null,
+    domicilio: row.domicilio ?? null,
+    foto_url: row.foto_url ?? null
+  };
+  persona.campos_vacios = [...FICHA_PUBLICA_CAMPOS_EDITABLES, "foto_url"].filter(
+    (campo) => persona[campo] === null || String(persona[campo]).trim() === ""
+  );
+  return persona;
+}
+
+// Extension de archivo para la key de S3, derivada del Content-Type ya
+// validado contra FICHA_PUBLICA_PHOTO_ALLOWED_TYPES (jpeg/png/webp).
+function fichaPublicaFotoExt(contentType) {
+  if (contentType === "image/jpeg") return "jpg";
+  if (contentType === "image/png") return "png";
+  if (contentType === "image/webp") return "webp";
+  return "jpg";
+}
+
 const OPERACIONES_HISTORIA_CLINICA_ENABLED = false;
 const OPERACIONES_SERVICE_ACTIVE_STATES = ["asignado", "en_curso"];
 const OPERACIONES_SERVICE_TERMINAL_STATES = ["finalizado", "cancelado"];
@@ -13804,6 +13986,187 @@ async function routeRequest(event) {
       return json(200, { ok: true, id: leadId, asignado_a: assignedTo });
     } catch (error) {
       return json(500, { ok: false, message: "Failed to process discado webhook", error: error.message });
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // FICHA PUBLICA DE PERSONAL (sin Cognito)
+  // Endpoints intencionalmente publicos: NO llevan requireAuthenticated /
+  // requireRole. El control de acceso es el token HMAC (verifyFichaPublicaToken,
+  // 24hs, scoped por organization_id) + la re-verificacion de
+  // documento+fecha_nacimiento en cada request de escritura
+  // (verifyFichaPublicaPersona). Van aca, en la zona de /webhooks/*, para que
+  // quede claro que se resuelven antes de cualquier gate de auth.
+  // El link se genera en POST /operaciones/personal/link-autocompletado.
+  // Mensajes deliberadamente genericos: no distinguir "documento no existe" de
+  // "fecha equivocada" de "token invalido", para no dar pistas a quien pruebe.
+  // ───────────────────────────────────────────────────────────────────────
+  const FICHA_PUBLICA_MSG_NO_MATCH = "No encontramos una ficha con esos datos. Revisá el documento y la fecha de nacimiento.";
+  const FICHA_PUBLICA_MSG_TOKEN = "El enlace no es válido o venció. Pedí uno nuevo a tu contacto de RRHH.";
+  const fichaPublicaFotoMatch = path.match(/\/publico\/ficha-personal\/([^/]+)\/foto$/);
+  const fichaPublicaIdMatch = path.match(/\/publico\/ficha-personal\/([^/]+)$/);
+
+  // GET /publico/ficha-personal/buscar?token=&documento=&fecha_nacimiento=
+  if (method === "GET" && path.endsWith("/publico/ficha-personal/buscar")) {
+    const tokenCheck = verifyFichaPublicaToken(getQueryParam(event, "token"));
+    if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
+
+    const documento = normalizeText(getQueryParam(event, "documento") || "");
+    const fechaNacimiento = normalizeText(getQueryParam(event, "fecha_nacimiento") || "");
+    if (!documento || !FICHA_PUBLICA_FECHA_REGEX.test(fechaNacimiento)) {
+      return json(400, { ok: false, message: "Ingresá tu documento y tu fecha de nacimiento (AAAA-MM-DD)." });
+    }
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      const ip = getFichaPublicaClientIp(event);
+      if (await isFichaPublicaIpBlocked(client, ip)) {
+        return json(429, { ok: false, message: "Demasiados intentos fallidos. Esperá unos minutos e intentá de nuevo." });
+      }
+
+      const result = await client.query(
+        `SELECT id, nombre, apellido, telefono, email, domicilio, foto_url
+         FROM su_personal
+         WHERE organization_id = $1 AND documento = $2 AND fecha_nacimiento = $3::date
+         LIMIT 1`,
+        [tokenCheck.organizationId, documento, fechaNacimiento]
+      );
+
+      if (!result.rows.length) {
+        await registerFichaPublicaIntentoFallido(client, ip);
+        return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+      }
+
+      return json(200, { ok: true, persona: projectFichaPublicaPersona(result.rows[0]) });
+    } catch (error) {
+      return json(500, { ok: false, message: "No se pudo buscar la ficha.", error: error.message });
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
+  // PATCH /publico/ficha-personal/:id  — body: { token?, documento, fecha_nacimiento, telefono?, email?, domicilio? }
+  if (method === "PATCH" && fichaPublicaIdMatch && !fichaPublicaFotoMatch) {
+    const personalId = fichaPublicaIdMatch[1];
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    const tokenCheck = verifyFichaPublicaToken(body.token || getQueryParam(event, "token"));
+    if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
+
+    const documento = normalizeText(body.documento || "");
+    const fechaNacimiento = normalizeText(body.fecha_nacimiento || "");
+    if (!documento || !FICHA_PUBLICA_FECHA_REGEX.test(fechaNacimiento)) {
+      return json(400, { ok: false, message: "Faltan tu documento y tu fecha de nacimiento para confirmar la identidad." });
+    }
+
+    // Whitelist estricta: se ignora cualquier otra key del body.
+    const updates = {};
+    for (const campo of FICHA_PUBLICA_CAMPOS_EDITABLES) {
+      if (Object.prototype.hasOwnProperty.call(body, campo)) {
+        const raw = body[campo];
+        const value = raw === null ? null : normalizeText(String(raw));
+        updates[campo] = value === "" ? null : value;
+      }
+    }
+    if (!Object.keys(updates).length) {
+      return json(400, { ok: false, message: "No hay cambios para guardar." });
+    }
+    if (updates.email && !FICHA_PUBLICA_EMAIL_REGEX.test(updates.email)) {
+      return json(422, { ok: false, message: "El email no tiene un formato válido." });
+    }
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      // Re-verifica que id + organization_id (del token) + documento +
+      // fecha_nacimiento sean la misma fila ANTES de escribir: cambiar el :id
+      // de la URL con un token valido no alcanza para tocar otra ficha.
+      const persona = await verifyFichaPublicaPersona(
+        client, tokenCheck.organizationId, personalId, documento, fechaNacimiento
+      );
+      if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+
+      const setCols = Object.keys(updates);
+      const setClause = setCols.map((col, i) => `${col} = $${i + 1}`).join(", ");
+      const values = setCols.map((col) => updates[col]);
+      values.push(personalId, tokenCheck.organizationId);
+
+      const result = await client.query(
+        `UPDATE su_personal SET ${setClause}, updated_at = now()
+         WHERE id = $${setCols.length + 1} AND organization_id = $${setCols.length + 2}
+         RETURNING id, nombre, apellido, telefono, email, domicilio, foto_url`,
+        values
+      );
+      return json(200, { ok: true, persona: projectFichaPublicaPersona(result.rows[0]) });
+    } catch (error) {
+      return json(500, { ok: false, message: "No se pudieron guardar los cambios.", error: error.message });
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
+  // POST /publico/ficha-personal/:id/foto?token=&documento=&fecha_nacimiento=
+  // Bytes crudos en el body (mismo patron que POST /organizations/:id/logo),
+  // pero con las validaciones de tipo y tamaño que ese endpoint no tiene.
+  if (method === "POST" && fichaPublicaFotoMatch) {
+    const personalId = fichaPublicaFotoMatch[1];
+
+    const tokenCheck = verifyFichaPublicaToken(getQueryParam(event, "token"));
+    if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
+
+    const documento = normalizeText(getQueryParam(event, "documento") || "");
+    const fechaNacimiento = normalizeText(getQueryParam(event, "fecha_nacimiento") || "");
+    if (!documento || !FICHA_PUBLICA_FECHA_REGEX.test(fechaNacimiento)) {
+      return json(400, { ok: false, message: "Faltan tu documento y tu fecha de nacimiento para confirmar la identidad." });
+    }
+
+    const rawContentType =
+      event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
+    const contentType = String(rawContentType).split(";")[0].trim().toLowerCase();
+    if (!FICHA_PUBLICA_PHOTO_ALLOWED_TYPES.has(contentType)) {
+      return json(422, { ok: false, message: "Formato de imagen no permitido. Subí un archivo JPG, PNG o WebP." });
+    }
+
+    if (!event.body) return json(400, { ok: false, message: "No llegó ninguna imagen." });
+    const imageBuffer = event.isBase64Encoded
+      ? Buffer.from(event.body, "base64")
+      : Buffer.from(event.body, "binary");
+    if (!imageBuffer.length) return json(400, { ok: false, message: "No llegó ninguna imagen." });
+    if (imageBuffer.length > FICHA_PUBLICA_PHOTO_MAX_BYTES) {
+      return json(422, { ok: false, message: "La imagen supera el tamaño máximo de 4 MB." });
+    }
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      const persona = await verifyFichaPublicaPersona(
+        client, tokenCheck.organizationId, personalId, documento, fechaNacimiento
+      );
+      if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+
+      const key = `personal/${personalId}.${fichaPublicaFotoExt(contentType)}`;
+      await s3Client.send(new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: imageBuffer,
+        ContentType: contentType,
+        CacheControl: "public, max-age=31536000"
+      }));
+      const fotoUrl = `${S3_BASE_URL}/${key}?v=${Date.now()}`;
+
+      const result = await client.query(
+        `UPDATE su_personal SET foto_url = $1, updated_at = now()
+         WHERE id = $2 AND organization_id = $3
+         RETURNING id, nombre, apellido, telefono, email, domicilio, foto_url`,
+        [fotoUrl, personalId, tokenCheck.organizationId]
+      );
+      return json(200, { ok: true, foto_url: fotoUrl, persona: projectFichaPublicaPersona(result.rows[0]) });
+    } catch (error) {
+      return json(500, { ok: false, message: "No se pudo subir la foto.", error: error.message });
     } finally {
       try { await client.end(); } catch {}
     }
@@ -36665,6 +37028,45 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         return json(200, { ok: true, item });
       } catch (error) {
         return operationsErrorResponse(error, "Failed to update carnet de salud");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // POST /operaciones/personal/link-autocompletado -- genera un link
+    // publico (sin Cognito, valido 24hs) para que el personal autocomplete
+    // su propia ficha. Ademas del chequeo generico de
+    // getOperationsAccessContext (autenticado + aprobado + organizacion
+    // resuelta, igual que el resto de /operaciones/personal), este endpoint
+    // puntual exige un rol especifico via requireRole: a diferencia de los
+    // demas endpoints de /operaciones/personal (que hoy no restringen por
+    // rol en absoluto -- ver auditoria previa), este genera un link que
+    // permite editar CUALQUIER ficha de la organizacion durante 24hs, asi
+    // que amerita ser mas estricto. Mismos roles que ya usa el item de nav
+    // de RRHH del lado del frontend (main.jsx: roles: ['director',
+    // 'operaciones']), mas superadministrador por la convencion ya
+    // establecida en el resto del archivo.
+    if (method === "POST" && path.endsWith("/operaciones/personal/link-autocompletado")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const roleError = requireRole(event, access.dbUser, ["superadministrador", "director", "operaciones"]);
+        if (roleError) return roleError;
+
+        const { token, expiresAt } = generateFichaPublicaToken(access.organizationId);
+        // Se arma la url con el origin del propio request (ya resuelto y
+        // whitelisteado por resolveAllowedOrigin/getCurrentCorsOrigin para
+        // CORS) en vez de una env var nueva -- distintas organizaciones de
+        // esta app pueden usar distintos dominios (rednacrem.tri.uy,
+        // globalassist.tri.uy, etc.), y este ya es el dominio real desde el
+        // que el admin esta generando el link.
+        const url = `${getCurrentCorsOrigin()}/completar-ficha?token=${encodeURIComponent(token)}`;
+
+        return json(200, { ok: true, token, expiresAt, url });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to generate ficha publica link");
       } finally {
         await client.end();
       }

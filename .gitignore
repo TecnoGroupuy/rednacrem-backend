@@ -1,4 +1,41 @@
 node_modules/
-.env
-*.zip
 dist/
+
+# Variables de entorno
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Claude / IDE
+.claude/
+.vscode/
+.idea/
+
+# Temporales y previews
+_tmp_*
+_old_*
+tmp-*
+tmp_*
+*.preview.mjs
+
+# Sesiones / cookies
+cookies*.txt
+
+# Certificados y llaves
+*.pem
+*.key
+*.crt
+
+# Archivos generados
+*.zip
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
