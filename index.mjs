@@ -2366,6 +2366,13 @@ function buildRecuperoCountsSelect(alias = "rc") {
     )::int AS pending,
     COUNT(*) FILTER (WHERE ${alias}.seller_id IS NOT NULL)::int AS assigned,
     COUNT(*) FILTER (WHERE ${alias}.seller_id IS NULL)::int AS unassigned,
+    COUNT(*) FILTER (
+      WHERE ${alias}.estado = 'en_gestion' AND ${alias}.resultado_gestion = 'nuevo'
+    )::int AS sin_gestion,
+    COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'no_contesta')::int AS no_contesta,
+    COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'seguimiento')::int AS seguimiento,
+    COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'rellamar')::int AS rellamar,
+    COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'dato_erroneo')::int AS dato_erroneo,
     ROUND(
       100.0
       * COUNT(*) FILTER (WHERE ${alias}.resultado_gestion = 'venta')
@@ -2384,6 +2391,11 @@ function mapRecuperoCounts(row = {}) {
     pending: Number(row.pending || 0),
     assigned: Number(row.assigned || 0),
     unassigned: Number(row.unassigned || 0),
+    sin_gestion: Number(row.sin_gestion || 0),
+    no_contesta: Number(row.no_contesta || 0),
+    seguimiento: Number(row.seguimiento || 0),
+    rellamar: Number(row.rellamar || 0),
+    dato_erroneo: Number(row.dato_erroneo || 0),
     effectiveness_pct: Number(row.effectiveness_pct || 0)
   };
 }
@@ -28966,6 +28978,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           in_progress: counts.in_progress,
           pending: counts.pending,
           unassigned: counts.unassigned,
+          sin_gestion: counts.sin_gestion,
+          no_contesta: counts.no_contesta,
+          seguimiento: counts.seguimiento,
+          rellamar: counts.rellamar,
+          dato_erroneo: counts.dato_erroneo,
           goal: datasets.reduce((acc, row) => acc + Number(row.goal || 0), 0),
           effectiveness_pct: counts.effectiveness_pct,
           active_sellers: Number(sellersRes.rows[0]?.active_sellers || 0),
@@ -29134,6 +29151,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
                 AND rc.estado = 'disponible'
             )::int AS pending,
+            COUNT(*) FILTER (
+              WHERE rc.estado = 'en_gestion' AND rc.resultado_gestion = 'nuevo'
+            )::int AS sin_gestion,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'no_contesta')::int AS no_contesta,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'seguimiento')::int AS seguimiento,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'rellamar')::int AS rellamar,
+            COUNT(*) FILTER (WHERE rc.resultado_gestion = 'dato_erroneo')::int AS dato_erroneo,
             ROUND(
               100.0
               * COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')
@@ -29162,7 +29186,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               recovered: Number(row.recovered || 0),
               rejected: Number(row.rejected || 0),
               in_progress: Number(row.in_progress || 0),
-              pending: Number(row.pending || 0)
+              pending: Number(row.pending || 0),
+              sin_gestion: Number(row.sin_gestion || 0),
+              no_contesta: Number(row.no_contesta || 0),
+              seguimiento: Number(row.seguimiento || 0),
+              rellamar: Number(row.rellamar || 0),
+              dato_erroneo: Number(row.dato_erroneo || 0)
             },
             effectiveness_pct: Number(row.effectiveness_pct || 0)
           }))
