@@ -21713,6 +21713,10 @@ async function routeRequest(event) {
           return json(200, { ok: true, success: true, data: { items: [] } });
         }
 
+        const contactRelationsColumns = await getTableColumns(client, "contact_relations");
+        const crOrgClause = contactRelationsColumns.has("organization_id")
+          ? "AND ($2::uuid IS NULL OR cr.organization_id = $2)"
+          : "";
         const relationsRes = await client.query(
           `
           SELECT
@@ -21720,9 +21724,10 @@ async function routeRequest(event) {
                  ELSE cr.contact_id_a END AS related_contact_id,
             cr.relation
           FROM contact_relations cr
-          WHERE cr.contact_id_a = $1 OR cr.contact_id_b = $1
+          WHERE (cr.contact_id_a = $1 OR cr.contact_id_b = $1)
+            ${crOrgClause}
           `,
-          [contactId]
+          [contactId, organizationId]
         );
         const relationByContactId = new Map();
         const relatedIds = [];
@@ -21744,8 +21749,9 @@ async function routeRequest(event) {
             WHERE id = ANY($1)
               AND id <> $2
               AND status = 'activo'
+              AND ($3::uuid IS NULL OR organization_id = $3)
             `,
-            [relatedIds, contactId]
+            [relatedIds, contactId, organizationId]
           );
           relatedContacts = relatedRes.rows || [];
         }
@@ -21764,8 +21770,9 @@ async function routeRequest(event) {
             WHERE (telefono = $1 OR celular = $1 OR telefono = $2 OR celular = $2)
               AND id <> $3
               AND status = 'activo'
+              AND ($4::uuid IS NULL OR organization_id = $4)
             `,
-            [phone1, phone2, contactId]
+            [phone1, phone2, contactId, organizationId]
           );
           phoneFallback = fallbackRes.rows || [];
         }
