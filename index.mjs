@@ -30122,11 +30122,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           SELECT id, status
           FROM recupero_import_jobs
           WHERE file_hash = $1
+            AND organization_id = $2
             AND status IN ('queued', 'processing', 'done')
           ORDER BY created_at DESC
           LIMIT 1
           `,
-          [fileHash]
+          [fileHash, organizationId]
         );
         if (existingRes.rows.length) {
           return json(200, {
