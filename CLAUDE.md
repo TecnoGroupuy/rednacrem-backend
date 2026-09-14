@@ -15,29 +15,25 @@ que tocan `organization_id` requiere doble chequeo.
 - Automatizaciones: n8n (ingestión de leads Meta/Google Sheets, SMS vía Dinstar)
 
 ## Rol de Claude en este proyecto
-Codex es el agente de código principal. Claude se usa para:
-- Auditorías read-only del código antes de tocar nada
-- Generar prompts nombrados y separados para Codex (backend y frontend NUNCA mezclados
-  en el mismo prompt)
-- Revisar diffs completos antes de commitear
+Claude Code es el agente de código principal (ya no se usa Codex). Claude se encarga de:
+- Auditorías read-only del código antes de tocar cambios grandes o sensibles
+- Implementación directa de los cambios — backend y frontend siempre en commits/tareas
+  separadas, nunca mezclados
+- Revisar el diff completo antes de commitear
 - Investigación y debugging de bugs de producción
-
-**Por defecto, no edites código directamente en este repo** — priorizá modo Plan o
-generar un prompt de investigación/implementación para pasar a Codex, salvo que se
-te pida explícitamente hacer el cambio vos.
 
 ## Reglas de base de datos — CRÍTICO
 - El schema local **diverge** del de producción (ejemplo conocido: la columna
   `lead_contact_status.organization_id` existe en producción pero no en local).
 - **Nunca** verifiques ni asumas el schema contra la base local.
 - Toda verificación de schema se hace vía `psql` contra RDS producción, y la corre
-  Damián directamente — no Codex ni Claude contra una copia local.
+  Damián directamente — no Claude contra una copia local.
 - Si necesitás confirmar una columna, tabla o constraint, pedile a Damián que lo
   chequee en producción antes de asumir nada.
 
 ## Workflow estándar
 1. Auditoría read-only del código relevante
-2. Generar prompt(s) para Codex — backend y frontend en prompts separados
+2. Implementar el cambio — backend y frontend en tareas/commits separados
 3. Revisar el diff completo generado
 4. Validar con `node --check` (backend) y `npm run build` (frontend)
 5. Commit
