@@ -21708,6 +21708,9 @@ async function routeRequest(event) {
         throw error;
       }
 
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
+
       const client = createDbClient();
       await client.connect();
       try {
@@ -22123,6 +22126,9 @@ async function routeRequest(event) {
         }
         throw error;
       }
+
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
 
       const client = createDbClient();
       await client.connect();
@@ -22720,6 +22726,18 @@ async function routeRequest(event) {
           );
           const leadData = leadDataRes.rows[0] || null;
           ventaOrganizationId = leadData?.organization_id || batchOrganizationId || requestOrganizationId || null;
+          // ventaOrganizationId solo puede quedar null acá si el lead/lote
+          // tampoco tienen organization_id propio Y requestOrganizationId
+          // vino null — lo segundo, según resolveOrganizationId(), solo pasa
+          // para un superadministrador sin ?organization_id= explícito (un
+          // usuario normal siempre resuelve una org real o corta antes con
+          // 403/400). resolveExistingContactId() de más abajo usa esta
+          // variable como filtro opcional; si queda null, sus 4 búsquedas
+          // (documento/email/teléfono/preferredContactId) correrían sin
+          // ningún filtro de organización.
+          if (!ventaOrganizationId) {
+            return json(400, { ok: false, message: "organization_id requerido" });
+          }
           const leadTelefonoDigits = normalizePhoneDigits(leadData?.telefono || "");
           const leadCelularDigits = normalizePhoneDigits(leadData?.celular || "");
           const contactData = body.contact || {};
