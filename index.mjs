@@ -6072,9 +6072,10 @@ async function processClientImportBatch(
                 AND translate(lower(coalesce(apellido, '')),
                   'Ã¡Ã©Ã­Ã³ÃºÃ¤Ã«Ã¯Ã¶Ã¼Ã Ã¨Ã¬Ã²Ã¹Ã¢ÃªÃ®Ã´Ã»Ã±ÃÃ‰ÃÃ“ÃšÃ„Ã‹ÃÃ–ÃœÃ€ÃˆÃŒÃ’Ã™Ã‚ÃŠÃŽÃ”Ã›Ã‘',
                   'aeiouaeiouaeiouaeiounAEIOUAEIOUAEIOUAEIOUN') = $3
+                AND ($4::uuid IS NULL OR organization_id = $4)
               LIMIT 1
               `,
-              [telefonoFamiliar, unaccentSimple(nombreFamiliar), unaccentSimple(apellidoFamiliar)]
+              [telefonoFamiliar, unaccentSimple(nombreFamiliar), unaccentSimple(apellidoFamiliar), organizationId]
             );
             relatedContactId = famRes.rows[0]?.id ?? null;
           }
@@ -33672,6 +33673,16 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
       if (roleError) return roleError;
 
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
       const parseContext = getClientsCsvParseContext(csvText);
       if (parseContext.error) {
         return json(400, { ok: false, message: "CSV vacio" });
@@ -33682,6 +33693,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
+        const contactProductsColumns = await getTableColumns(client, "contact_products");
+        const cpOrgClause = organizationId && contactProductsColumns.has("organization_id")
+          ? "AND organization_id = $2"
+          : "";
+
         let totalCsv = 0;
         let coinciden = 0;
         let altaBdBajaCsv = 0;
@@ -33737,9 +33753,10 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               WHERE documento = $1
                 AND lower(unaccent_simple(nombre)) = lower(unaccent_simple($2))
                 AND lower(unaccent_simple(apellido)) = lower(unaccent_simple($3))
+                AND ($4::uuid IS NULL OR organization_id = $4)
               LIMIT 1
               `,
-              [documento, nombre, apellido]
+              [documento, nombre, apellido, organizationId]
             );
             contactId = contactRes.rows[0]?.id ?? null;
           }
@@ -33763,10 +33780,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             SELECT estado
             FROM contact_products
             WHERE contact_id = $1
+              ${cpOrgClause}
             ORDER BY fecha_alta DESC NULLS LAST, created_at DESC
             LIMIT 1
             `,
-            [contactId]
+            organizationId && contactProductsColumns.has("organization_id")
+              ? [contactId, organizationId]
+              : [contactId]
           );
           const estadoBdRaw = estadoRes.rows[0]?.estado || null;
           const estadoBdNorm = String(estadoBdRaw || "").toLowerCase();
