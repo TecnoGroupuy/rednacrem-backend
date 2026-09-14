@@ -7979,6 +7979,24 @@ async function resolveOrganizationIdForRequest(dbUser, event) {
   }
 }
 
+// resolveOrganizationId() deja pasar organizationId = null para un
+// superadministrador que no mandó ?organization_id= explícito (a
+// diferencia de un usuario normal con varias organizaciones, que ya
+// tira 400 en ese caso). Los endpoints que listan/buscan contactos o
+// ventas deben usar este chequeo después de resolver organizationId
+// para no correr la query sin ningún filtro de organización — "ver
+// todo" para un superadmin debe ser una decisión explícita futura
+// (ej. ?all_orgs=true), no el default al omitir el parámetro.
+function requireExplicitOrganizationId(dbUser, organizationId) {
+  if (!organizationId && dbUser?.role_key === "superadministrador") {
+    return json(400, {
+      ok: false,
+      message: "organization_id requerido"
+    });
+  }
+  return null;
+}
+
 async function aplicarBajaContactProduct(client, {
   contactId,
   productId,
@@ -16398,6 +16416,9 @@ async function routeRequest(event) {
         throw error;
       }
 
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
+
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const search = normalizeText(getQueryParam(event, "search") || "");
@@ -16443,6 +16464,9 @@ async function routeRequest(event) {
         throw error;
       }
 
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
+
       const metrics = await getClientMetrics(organizationId);
 
       return json(200, {
@@ -16483,6 +16507,9 @@ async function routeRequest(event) {
         }
         throw error;
       }
+
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
 
       const sellerId = dbUser?.id || null;
       const client = createDbClient();
@@ -16631,6 +16658,9 @@ async function routeRequest(event) {
         }
         throw error;
       }
+
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
 
       const sellerId = dbUser?.id || null;
       const client = createDbClient();
@@ -20326,6 +20356,9 @@ async function routeRequest(event) {
         }
         throw error;
       }
+
+      let orgRequiredError = requireExplicitOrganizationId(dbUser, organizationId);
+      if (orgRequiredError) return orgRequiredError;
 
       const client = createDbClient();
       await client.connect();
