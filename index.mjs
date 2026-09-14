@@ -27002,6 +27002,219 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     }
   }
 
+  // POST /lead-batches/:id/assign-pool
+  // Body: { contact_ids: [uuid...], seller_ids: [uuid...] }
+  // Asigna una selección puntual de contactos "libres" (estado en
+  // LEAD_REDISTRIBUTION_PENDING_STATES, assigned_to IS NULL) a uno o varios
+  // vendedores ya miembros del lote, round-robin — a diferencia de add-seller,
+  // no agrega vendedores nuevos y no toca contactos fuera de la selección.
+  if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/assign-pool$/)) {
+    const match = path.match(/\/lead-batches\/([^/]+)\/assign-pool$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    const body = safeParseBody(event);
+    if (body === null) {
+      return json(400, { ok: false, message: "Invalid JSON body" });
+    }
+
+    const contactIds = Array.isArray(body?.contact_ids)
+      ? [...new Set(body.contact_ids.filter((id) => typeof id === "string" && id))]
+      : [];
+    const sellerIds = Array.isArray(body?.seller_ids)
+      ? [...new Set(body.seller_ids.filter((id) => typeof id === "string" && id))]
+      : [];
+    if (!contactIds.length) {
+      return json(400, { ok: false, message: "contact_ids es requerido y no puede estar vacío" });
+    }
+    if (!sellerIds.length) {
+      return json(400, { ok: false, message: "seller_ids es requerido y no puede estar vacío" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status && error.status !== 400) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+        }
+        if (!organizationId) {
+          try {
+            organizationId = await resolveOrganizationIdFromLeadBatchId(client, dbUser, batchId);
+          } catch (error) {
+            if (error?.status) return json(error.status, { ok: false, message: error.message });
+            throw error;
+          }
+        }
+
+        const batchParams = [batchId];
+        let orgBatchClause = "";
+        if (organizationId) {
+          batchParams.push(organizationId);
+          orgBatchClause = " AND organization_id = $2";
+        }
+        const batchRes = await client.query(
+          `SELECT id FROM lead_batches WHERE id = $1${orgBatchClause}`,
+          batchParams
+        );
+        if (!batchRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
+        // Validar que los seller_ids son miembros actuales del lote — no se agregan
+        // como side-effect, a diferencia de add-seller.
+        const membersRes = await client.query(
+          `SELECT seller_id FROM lead_batch_sellers WHERE batch_id = $1 AND seller_id = ANY($2::uuid[])`,
+          [batchId, sellerIds]
+        );
+        const memberSellerIds = new Set(membersRes.rows.map((r) => r.seller_id));
+        const invalidSellerIds = sellerIds.filter((id) => !memberSellerIds.has(id));
+        if (invalidSellerIds.length) {
+          return json(400, {
+            ok: false,
+            message: "Uno o más vendedores no son miembros de este lote. Agregalos primero con \"+ Agregar vendedor\".",
+            invalid_seller_ids: invalidSellerIds
+          });
+        }
+
+        // Validar contactos elegibles: pertenecen al lote, están en un estado "libre"
+        // y no tienen vendedor asignado. Lo que no cumpla se excluye y se reporta,
+        // no se falla el request completo (puede haber sido tomado por otra acción
+        // concurrente, o haber cambiado de estado).
+        const eligibleParams = [batchId, contactIds, LEAD_REDISTRIBUTION_PENDING_STATES];
+        let eligibleOrgClause = "";
+        if (organizationId) {
+          eligibleParams.push(organizationId);
+          eligibleOrgClause = " AND organization_id = $4";
+        }
+        const eligibleRes = await client.query(
+          `
+          SELECT contact_id
+          FROM lead_contact_status
+          WHERE batch_id = $1
+            AND contact_id = ANY($2::uuid[])
+            AND estado_venta = ANY($3::text[])
+            AND assigned_to IS NULL
+            ${eligibleOrgClause}
+          `,
+          eligibleParams
+        );
+        const eligibleIds = eligibleRes.rows.map((r) => r.contact_id);
+        const eligibleSet = new Set(eligibleIds);
+        const unassigned = contactIds
+          .filter((id) => !eligibleSet.has(id))
+          .map((contact_id) => ({
+            contact_id,
+            reason: "No pertenece al lote, ya tiene vendedor asignado, o cambió de estado desde que se seleccionó."
+          }));
+
+        if (!eligibleIds.length) {
+          return json(200, {
+            ok: true,
+            message: "Ningún contacto pudo asignarse — ya no cumplían las condiciones.",
+            assigned_by_seller: [],
+            distribution: await getBatchSellerTotals(client, batchId, organizationId),
+            unassigned_contact_ids: unassigned.map((u) => u.contact_id),
+            unassigned
+          });
+        }
+
+        // Reparto round-robin — mismo criterio que redistributeNewContacts
+        // (contactIds[index] -> sellerIds[index % sellerIds.length]).
+        const assignedTo = eligibleIds.map((_contactId, index) => sellerIds[index % sellerIds.length]);
+
+        await client.query("BEGIN");
+        try {
+          const chunkSize = 500;
+          for (let i = 0; i < eligibleIds.length; i += chunkSize) {
+            const contactChunk = eligibleIds.slice(i, i + chunkSize);
+            const assignedChunk = assignedTo.slice(i, i + chunkSize);
+            const updateValues = [contactChunk, assignedChunk, batchId, LEAD_REDISTRIBUTION_PENDING_STATES];
+            let updateOrgClause = "";
+            if (organizationId) {
+              updateValues.push(organizationId);
+              updateOrgClause = " AND lcs.organization_id = $5";
+            }
+            await client.query(
+              `
+              UPDATE lead_contact_status lcs
+              SET assigned_to = v.assigned_to,
+                  updated_at = now()
+              FROM (
+                SELECT UNNEST($1::uuid[]) AS contact_id,
+                       UNNEST($2::uuid[]) AS assigned_to
+              ) v
+              WHERE lcs.contact_id = v.contact_id
+                AND lcs.batch_id = $3
+                AND lcs.estado_venta = ANY($4::text[])
+                AND lcs.assigned_to IS NULL
+                ${updateOrgClause}
+              `,
+              updateValues
+            );
+          }
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+
+        const assignedCountBySeller = {};
+        assignedTo.forEach((sellerId) => {
+          assignedCountBySeller[sellerId] = (assignedCountBySeller[sellerId] || 0) + 1;
+        });
+        const assigned_by_seller = sellerIds.map((seller_id) => ({
+          seller_id,
+          assigned_now: assignedCountBySeller[seller_id] || 0
+        }));
+
+        const distribution = await getBatchSellerTotals(client, batchId, organizationId);
+
+        return json(200, {
+          ok: true,
+          message: unassigned.length
+            ? `Se asignaron ${eligibleIds.length} contacto(s); ${unassigned.length} no se pudieron asignar.`
+            : `Se asignaron ${eligibleIds.length} contacto(s) correctamente.`,
+          assigned_by_seller,
+          distribution,
+          unassigned_contact_ids: unassigned.map((u) => u.contact_id),
+          unassigned
+        });
+      } catch (err) {
+        return json(500, { ok: false, message: err.message });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to assign pool contacts",
+        error: error.message
+      });
+    }
+  }
+
   // POST /lead-batches/:id/redistribute
   // Body: { states: ["no_contesta"|"rellamar"|"seguimiento"] }
   if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/redistribute$/)) {
