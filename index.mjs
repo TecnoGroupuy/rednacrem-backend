@@ -27193,17 +27193,19 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         let eligibleOrgClause = "";
         if (organizationId) {
           eligibleParams.push(organizationId);
-          eligibleOrgClause = " AND organization_id = $4";
+          eligibleOrgClause = " AND lead_contact_status.organization_id = $4";
         }
         const eligibleRes = await client.query(
           `
-          SELECT contact_id
+          SELECT lead_contact_status.contact_id
           FROM lead_contact_status
+          JOIN datos_para_trabajar d ON d.id = lead_contact_status.contact_id
           WHERE batch_id = $1
             AND contact_id = ANY($2::uuid[])
             AND estado_venta = ANY($3::text[])
             AND assigned_to IS NULL
             ${eligibleOrgClause}
+            ${buildFreeContactsEligibilityClause("d")}
           `,
           eligibleParams
         );
