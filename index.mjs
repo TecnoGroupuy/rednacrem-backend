@@ -27203,7 +27203,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           FROM lead_contact_status
           JOIN datos_para_trabajar d ON d.id = lead_contact_status.contact_id
           WHERE batch_id = $1
-            AND contact_id = ANY($2::uuid[])
+            AND lead_contact_status.contact_id = ANY($2::uuid[])
             AND estado_venta = ANY($3::text[])
             AND assigned_to IS NULL
             ${eligibleOrgClause}
