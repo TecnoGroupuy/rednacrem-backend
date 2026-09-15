@@ -25864,6 +25864,34 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
 
 const LEAD_REDISTRIBUTION_PENDING_STATES = ["nuevo", "no_contesta", "rellamar", "seguimiento"];
 
+// Orígenes donde el contacto mostró interés activo u optó por dejar sus datos
+// (opt-in) — para estos, no_call_entries (lista global de no-llamar, matchea
+// por número sin distinguir organización) se ignora. Para prospección fría
+// (guía telefónica, discado automático, captación, o cualquier origen no
+// listado acá — default seguro: filtrar) sí se respeta no_call_entries.
+// origen_dato tiene inconsistencia histórica de mayúsculas/formato, por eso
+// se compara siempre con LOWER().
+const NO_CALL_EXEMPT_ORIGINS = [
+  "facebook", "instagram", "meta", "whatsapp", "sitio_web", "referido", "recupero", "manual"
+];
+
+// Fragmento de WHERE reutilizable: excluye contactos bloqueados (universal,
+// sin excepción por origen) y contactos en no_call_entries salvo que el
+// origen sea opt-in (NO_CALL_EXEMPT_ORIGINS). `dptAlias` es el alias de
+// datos_para_trabajar en la query donde se inserta.
+function buildFreeContactsEligibilityClause(dptAlias) {
+  return `
+    AND ${dptAlias}.estado <> 'bloqueado'
+    AND (
+      LOWER(${dptAlias}.origen_dato) = ANY(ARRAY['${NO_CALL_EXEMPT_ORIGINS.join("','")}'])
+      OR NOT EXISTS (
+        SELECT 1 FROM no_call_entries nce
+        WHERE nce.numero IN (${dptAlias}.telefono, ${dptAlias}.celular)
+      )
+    )
+  `;
+}
+
 async function getNewContactsDistribution(client, batchId, states = ["nuevo"]) {
   const res = await client.query(
     `
@@ -27284,6 +27312,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
   // (el array `contacts` global del frontend, cargado con GET /leads?segment=mixto
   // sin filtro de lote y con LIMIT 50 fijo, que subcontaba drásticamente en lotes
   // con más de ~50 contactos libres en el resto de la organización).
+  // También excluye bloqueados y no_call_entries — ver buildFreeContactsEligibilityClause.
   if (method === "GET" && path.match(/\/lead-batches\/([^/]+)\/free-contacts$/)) {
     const match = path.match(/\/lead-batches\/([^/]+)\/free-contacts$/);
     const batchId = match?.[1];
@@ -27358,10 +27387,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           `
           SELECT lcs.estado_venta, COUNT(*)::int AS total
           FROM lead_contact_status lcs
+          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
           WHERE lcs.batch_id = $1
             AND lcs.assigned_to IS NULL
             AND lcs.estado_venta = ANY($2::text[])
             ${lcsOrgClause}
+            ${buildFreeContactsEligibilityClause("d")}
           GROUP BY lcs.estado_venta
           `,
           countsValues
@@ -27399,6 +27430,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             AND lcs.assigned_to IS NULL
             AND lcs.estado_venta = ANY($2::text[])
             ${itemsOrgClause}
+            ${buildFreeContactsEligibilityClause("d")}
           ORDER BY d.created_at DESC
           LIMIT $3 OFFSET $4
           `,
