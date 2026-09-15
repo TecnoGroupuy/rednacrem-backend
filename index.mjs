@@ -27274,6 +27274,157 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     }
   }
 
+  // GET /lead-batches/:id/free-contacts
+  // Query: ?estado=nuevo|no_contesta|rellamar|seguimiento (opcional, default: los 4),
+  //        ?page=1&limit=200
+  // Devuelve los contactos "libres" del lote (estado en
+  // LEAD_REDISTRIBUTION_PENDING_STATES, assigned_to IS NULL) directamente contra
+  // lead_contact_status/datos_para_trabajar, paginado y con el conteo real por
+  // estado — reemplaza a la fuente anterior del modal "Asignar datos libres"
+  // (el array `contacts` global del frontend, cargado con GET /leads?segment=mixto
+  // sin filtro de lote y con LIMIT 50 fijo, que subcontaba drásticamente en lotes
+  // con más de ~50 contactos libres en el resto de la organización).
+  if (method === "GET" && path.match(/\/lead-batches\/([^/]+)\/free-contacts$/)) {
+    const match = path.match(/\/lead-batches\/([^/]+)\/free-contacts$/);
+    const batchId = match?.[1];
+    if (!batchId) {
+      return json(400, { ok: false, message: "Batch id requerido" });
+    }
+
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const estadoParam = String(getQueryParam(event, "estado") || "").trim().toLowerCase();
+      const states = LEAD_REDISTRIBUTION_PENDING_STATES.includes(estadoParam)
+        ? [estadoParam]
+        : LEAD_REDISTRIBUTION_PENDING_STATES;
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(1000, Math.max(1, Number(getQueryParam(event, "limit") || 500)));
+      const offset = (page - 1) * limit;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        let organizationId = null;
+        try {
+          organizationId = await resolveOrganizationId(client, dbUser, event);
+        } catch (error) {
+          if (error?.status && error.status !== 400) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+        }
+        if (!organizationId) {
+          try {
+            organizationId = await resolveOrganizationIdFromLeadBatchId(client, dbUser, batchId);
+          } catch (error) {
+            if (error?.status) return json(error.status, { ok: false, message: error.message });
+            throw error;
+          }
+        }
+
+        const batchParams = [batchId];
+        let orgBatchClause = "";
+        if (organizationId) {
+          batchParams.push(organizationId);
+          orgBatchClause = " AND organization_id = $2";
+        }
+        const batchRes = await client.query(
+          `SELECT id FROM lead_batches WHERE id = $1${orgBatchClause}`,
+          batchParams
+        );
+        if (!batchRes.rows.length) {
+          return json(404, { ok: false, message: "Lote no encontrado" });
+        }
+
+        const lcsColumns = await getTableColumns(client, "lead_contact_status");
+        const lcsOrgClause = organizationId && lcsColumns.has("organization_id")
+          ? " AND lcs.organization_id = $3"
+          : "";
+        const countsValues = [batchId, LEAD_REDISTRIBUTION_PENDING_STATES];
+        if (lcsOrgClause) countsValues.push(organizationId);
+        const countsRes = await client.query(
+          `
+          SELECT lcs.estado_venta, COUNT(*)::int AS total
+          FROM lead_contact_status lcs
+          WHERE lcs.batch_id = $1
+            AND lcs.assigned_to IS NULL
+            AND lcs.estado_venta = ANY($2::text[])
+            ${lcsOrgClause}
+          GROUP BY lcs.estado_venta
+          `,
+          countsValues
+        );
+        const counts = { nuevo: 0, no_contesta: 0, rellamar: 0, seguimiento: 0 };
+        for (const row of countsRes.rows) {
+          if (Object.prototype.hasOwnProperty.call(counts, row.estado_venta)) {
+            counts[row.estado_venta] = row.total;
+          }
+        }
+        const total = LEAD_REDISTRIBUTION_PENDING_STATES
+          .filter((s) => states.includes(s))
+          .reduce((sum, s) => sum + (counts[s] || 0), 0);
+
+        const itemsOrgClause = organizationId && lcsColumns.has("organization_id")
+          ? " AND lcs.organization_id = $5"
+          : "";
+        const itemsValues = [batchId, states, limit, offset];
+        if (itemsOrgClause) itemsValues.push(organizationId);
+        const itemsRes = await client.query(
+          `
+          SELECT
+            d.id,
+            d.nombre,
+            d.apellido,
+            d.telefono,
+            d.celular,
+            d.documento,
+            lcs.estado_venta,
+            lcs.intentos,
+            lcs.proxima_accion
+          FROM lead_contact_status lcs
+          JOIN datos_para_trabajar d ON d.id = lcs.contact_id
+          WHERE lcs.batch_id = $1
+            AND lcs.assigned_to IS NULL
+            AND lcs.estado_venta = ANY($2::text[])
+            ${itemsOrgClause}
+          ORDER BY d.created_at DESC
+          LIMIT $3 OFFSET $4
+          `,
+          itemsValues
+        );
+
+        return json(200, {
+          ok: true,
+          items: itemsRes.rows,
+          total,
+          counts,
+          page,
+          limit
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to load free contacts",
+        error: error.message
+      });
+    }
+  }
+
   // POST /lead-batches/:id/redistribute
   // Body: { states: ["no_contesta"|"rellamar"|"seguimiento"] }
   if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/redistribute$/)) {
