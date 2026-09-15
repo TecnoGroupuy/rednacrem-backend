@@ -4909,6 +4909,36 @@ async function findMetaSheetIdempotentRetry(client, organizationId, telefono, ce
   return existingRes.rows[0] || null;
 }
 
+// Orígenes donde el contacto mostró interés activo u optó por dejar sus datos
+// (opt-in) — para estos, no_call_entries (lista global de no-llamar, matchea
+// por número sin distinguir organización) se ignora. Para prospección fría
+// (guía telefónica, discado automático, captación, o cualquier origen no
+// listado acá — default seguro: filtrar) sí se respeta no_call_entries.
+// origen_dato tiene inconsistencia histórica de mayúsculas/formato, por eso
+// se compara siempre con LOWER(). Declarado a nivel de módulo (no dentro de
+// routeRequest) porque evaluarEstadoLead() también lo necesita y es una
+// función aparte, fuera del scope de routeRequest.
+const NO_CALL_EXEMPT_ORIGINS = [
+  "facebook", "instagram", "meta", "whatsapp", "sitio_web", "referido", "recupero", "manual"
+];
+
+// Fragmento de WHERE reutilizable: excluye contactos bloqueados (universal,
+// sin excepción por origen) y contactos en no_call_entries salvo que el
+// origen sea opt-in (NO_CALL_EXEMPT_ORIGINS). `dptAlias` es el alias de
+// datos_para_trabajar en la query donde se inserta.
+function buildFreeContactsEligibilityClause(dptAlias) {
+  return `
+    AND ${dptAlias}.estado <> 'bloqueado'
+    AND (
+      LOWER(${dptAlias}.origen_dato) = ANY(ARRAY['${NO_CALL_EXEMPT_ORIGINS.join("','")}'])
+      OR NOT EXISTS (
+        SELECT 1 FROM no_call_entries nce
+        WHERE nce.numero IN (${dptAlias}.telefono, ${dptAlias}.celular)
+      )
+    )
+  `;
+}
+
 async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobId, extra = {}) {
   const readOnly = extra?.readOnly === true;
   const isDuplicateInImport = extra?.isDuplicateInImport === true;
@@ -5203,8 +5233,8 @@ async function evaluarEstadoLead(client, tel, cel, origenDato, orgId, importJobI
       [tel || null, cel || null]
     );
     if (noCall.rows.length) {
-      const esMeta = origenDato && String(origenDato).toLowerCase().includes("facebook");
-      if (!esMeta) {
+      const esOrigenExento = origenDato && NO_CALL_EXEMPT_ORIGINS.includes(String(origenDato).trim().toLowerCase());
+      if (!esOrigenExento) {
         return {
           estado: "bloqueado",
           motivoBloqueo: "no_llamar",
@@ -25864,34 +25894,6 @@ async function redistributeNewContacts(client, batchId, fromSellerId = null, opt
 
 const LEAD_REDISTRIBUTION_PENDING_STATES = ["nuevo", "no_contesta", "rellamar", "seguimiento"];
 
-// Orígenes donde el contacto mostró interés activo u optó por dejar sus datos
-// (opt-in) — para estos, no_call_entries (lista global de no-llamar, matchea
-// por número sin distinguir organización) se ignora. Para prospección fría
-// (guía telefónica, discado automático, captación, o cualquier origen no
-// listado acá — default seguro: filtrar) sí se respeta no_call_entries.
-// origen_dato tiene inconsistencia histórica de mayúsculas/formato, por eso
-// se compara siempre con LOWER().
-const NO_CALL_EXEMPT_ORIGINS = [
-  "facebook", "instagram", "meta", "whatsapp", "sitio_web", "referido", "recupero", "manual"
-];
-
-// Fragmento de WHERE reutilizable: excluye contactos bloqueados (universal,
-// sin excepción por origen) y contactos en no_call_entries salvo que el
-// origen sea opt-in (NO_CALL_EXEMPT_ORIGINS). `dptAlias` es el alias de
-// datos_para_trabajar en la query donde se inserta.
-function buildFreeContactsEligibilityClause(dptAlias) {
-  return `
-    AND ${dptAlias}.estado <> 'bloqueado'
-    AND (
-      LOWER(${dptAlias}.origen_dato) = ANY(ARRAY['${NO_CALL_EXEMPT_ORIGINS.join("','")}'])
-      OR NOT EXISTS (
-        SELECT 1 FROM no_call_entries nce
-        WHERE nce.numero IN (${dptAlias}.telefono, ${dptAlias}.celular)
-      )
-    )
-  `;
-}
-
 async function getNewContactsDistribution(client, batchId, states = ["nuevo"]) {
   const res = await client.query(
     `
@@ -28385,12 +28387,14 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         await client.query(
           `
           UPDATE datos_para_trabajar d
-          SET estado = 'bloqueado', updated_at = now()
-          WHERE EXISTS (
-            SELECT 1
-            FROM no_call_entries n
-            WHERE n.numero IN (${normalizedCelular}, ${normalizedTelefono})
-          )
+          SET estado = 'bloqueado', motivo_bloqueo = 'no_llamar', updated_at = now()
+          WHERE d.estado <> 'bloqueado'
+            AND EXISTS (
+              SELECT 1
+              FROM no_call_entries n
+              WHERE n.numero IN (${normalizedCelular}, ${normalizedTelefono})
+            )
+            AND LOWER(COALESCE(d.origen_dato, '')) <> ALL(ARRAY['${NO_CALL_EXEMPT_ORIGINS.join("','")}'])
           `
         );
 
