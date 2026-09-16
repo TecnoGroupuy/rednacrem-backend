@@ -2537,7 +2537,8 @@ function getRecuperoDatasetSchemaMissing(schema, { requireAssignments = true } =
     "dataset_source",
     "dataset_status",
     "goal",
-    "clientes_sync_at"
+    "clientes_sync_at",
+    "is_system_dataset"
   ]) {
     if (!schema.jobCols.has(col)) missing.push(`recupero_import_jobs.${col}`);
   }
