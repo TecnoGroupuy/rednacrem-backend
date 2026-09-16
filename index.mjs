@@ -2416,8 +2416,69 @@ function buildRecuperoDatasetPayload(row = {}) {
     expires_on: row.expires_on || null,
     status: normalizeRecuperoDatasetStatus(row.dataset_status),
     goal: Number(row.goal || 0),
-    clientes_sync_at: row.clientes_sync_at || null
+    clientes_sync_at: row.clientes_sync_at || null,
+    is_system_dataset: Boolean(row.is_system_dataset)
   };
+}
+
+// Los dos lotes fijos que deben existir siempre por organización (creados
+// por el sistema, no por el supervisor). El nombre es lo único que el
+// frontend puede matchear hoy para preseleccionarlos, pero la identidad
+// real para el resto del backend es is_system_dataset — así un supervisor
+// puede crear a mano un dataset con el mismo nombre sin que se confunda con
+// el fijo (dos filas is_system_dataset=false/true conviven sin problema).
+const RECUPERO_FIXED_DATASETS = ["Prioritario — 0 a 3 meses", "General de recupero"];
+
+// Aprovisiona los datasets fijos de una organización si todavía no existen
+// (idempotente: se fija por is_system_dataset + dataset_name, no crea
+// duplicados en llamadas repetidas). Se llama al resolver GET
+// /recovery/datasets — el punto de entrada natural cada vez que se abre la
+// pestaña Lotes de Recupero.
+async function ensureRecuperoSystemDatasets(client, organizationId, createdBy) {
+  if (!organizationId) return;
+  const existingRes = await client.query(
+    `
+    SELECT dataset_name
+    FROM recupero_import_jobs
+    WHERE organization_id = $1
+      AND is_system_dataset = true
+      AND dataset_name = ANY($2::text[])
+    `,
+    [organizationId, RECUPERO_FIXED_DATASETS]
+  );
+  const existingNames = new Set(existingRes.rows.map((row) => row.dataset_name));
+  const missingNames = RECUPERO_FIXED_DATASETS.filter((name) => !existingNames.has(name));
+  if (!missingNames.length) return;
+
+  for (const datasetName of missingNames) {
+    const fileHash = crypto
+      .createHash("sha256")
+      .update(`system-dataset:${organizationId}:${datasetName}`)
+      .digest("hex");
+    try {
+      await client.query(
+        `
+        INSERT INTO recupero_import_jobs (
+          file_name, file_hash, status, total_rows, processed_rows, updated_rows,
+          error_rows, duplicate_rows, invalid_rows, not_found_rows, csv_text,
+          created_by, organization_id, dataset_name, dataset_source, dataset_status,
+          goal, max_attempts, is_system_dataset, started_at, finished_at
+        )
+        VALUES (
+          $1, $2, 'done', 0, 0, 0, 0, 0, 0, 0, '',
+          $3, $4, $5, $6, 'activo',
+          0, '{"calls": 3, "whatsapp": 1}'::jsonb, true, NOW(), NOW()
+        )
+        `,
+        [datasetName, fileHash, createdBy || null, organizationId, datasetName, RECUPERO_DATASET_SOURCE_DEFAULT]
+      );
+    } catch (error) {
+      // 23505 = unique_violation — otra request concurrente ya lo creó
+      // (protegido por recupero_import_jobs_system_dataset_unique_idx). No es
+      // un error real, es exactamente el caso que la idempotencia debe cubrir.
+      if (error?.code !== "23505") throw error;
+    }
+  }
 }
 
 // Valida que cada seller_id sea un vendedor activo/aprobado de la organización
@@ -2521,6 +2582,7 @@ async function loadRecuperoDatasetRow(client, { datasetId, organizationId }) {
       dataset_status,
       goal,
       clientes_sync_at,
+      is_system_dataset,
       created_at,
       finished_at,
       COALESCE(finished_at, created_at) AS imported_at
@@ -29570,6 +29632,10 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
         }
 
+        // Punto de entrada natural: se dispara cada vez que se abre la
+        // pestaña Lotes de Recupero. Idempotente — ver ensureRecuperoSystemDatasets.
+        await ensureRecuperoSystemDatasets(client, organizationId, dbUser?.id);
+
         const result = await client.query(
           `
           WITH candidate_counts AS (
@@ -29613,6 +29679,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             rij.file_name,
             rij.dataset_name,
             rij.dataset_status,
+            rij.is_system_dataset,
             COALESCE(rij.finished_at, rij.created_at) AS imported_at,
             COALESCE(cc.total, 0) AS total,
             COALESCE(cc.recovered, 0) AS recovered,
@@ -29640,6 +29707,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             source_file: row.file_name || null,
             imported_at: row.imported_at || null,
             status: normalizeRecuperoDatasetStatus(row.dataset_status),
+            is_system_dataset: Boolean(row.is_system_dataset),
             counts: {
               total: Number(row.total || 0),
               recovered: Number(row.recovered || 0),
