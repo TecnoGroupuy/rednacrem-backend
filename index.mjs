@@ -29853,14 +29853,19 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
 
         const [counts, assignmentsRes, sampleRes] = await Promise.all([
           loadRecuperoDatasetCounts(client, datasetId, organizationId),
+          // Desglose por vendedor calculado directo desde recupero_candidatos
+          // (agrupando por seller_id), no desde recupero_asignaciones_rango —
+          // así cuenta por igual a los candidatos que llegaron a tener
+          // vendedor por /assignments (rango), por /direct-assignments
+          // (checkbox puntual) o por /distribute, sin importar cuál de los 3
+          // mecanismos se usó. La tabla de rangos sigue existiendo para lo
+          // que sí le compete (bloquear rangos contiguos contra reasignación
+          // en /assignments), pero ya no es la fuente de este desglose.
           client.query(
             `
             SELECT
-              ra.id,
-              ra.seller_id,
+              rc.seller_id,
               COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
-              ra.row_from,
-              ra.row_to,
               COUNT(rc.id)::int AS assigned,
               COUNT(rc.id) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recovered,
               COUNT(rc.id) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rejected,
@@ -29872,37 +29877,37 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                 WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
                   AND rc.estado = 'disponible'
               )::int AS pending
-            FROM recupero_asignaciones_rango ra
-            LEFT JOIN users u ON u.id = ra.seller_id
-            LEFT JOIN recupero_candidatos rc
-              ON rc.dataset_id = ra.dataset_id
-             AND rc.organization_id = ra.organization_id
-             AND rc.row_number BETWEEN ra.row_from AND ra.row_to
-            WHERE ra.dataset_id = $1
-              AND ra.organization_id = $2
-              AND ra.released_at IS NULL
-            GROUP BY ra.id, ra.seller_id, u.nombre, u.apellido, u.id, ra.row_from, ra.row_to
-            ORDER BY ra.row_from ASC
+            FROM recupero_candidatos rc
+            LEFT JOIN users u ON u.id = rc.seller_id
+            WHERE rc.dataset_id = $1
+              AND rc.organization_id = $2
+              AND rc.seller_id IS NOT NULL
+            GROUP BY rc.seller_id, u.nombre, u.apellido
+            ORDER BY seller_name ASC NULLS LAST
             `,
             [datasetId, organizationId]
           ),
           client.query(
             `
             SELECT
-              row_number,
-              nombre,
-              apellido,
-              documento,
-              COALESCE(NULLIF(celular, ''), telefono) AS phone,
-              precio_anterior AS debt_amount,
-              COALESCE(NULLIF(motivo_baja_detalle, ''), motivo_baja) AS churn_reason,
-              producto_anterior AS previous_plan,
-              estado,
-              resultado_gestion
-            FROM recupero_candidatos
-            WHERE dataset_id = $1
-              AND organization_id = $2
-            ORDER BY row_number ASC NULLS LAST, created_at ASC
+              rc.row_number,
+              rc.nombre,
+              rc.apellido,
+              rc.documento,
+              COALESCE(NULLIF(rc.celular, ''), rc.telefono) AS phone,
+              rc.precio_anterior AS debt_amount,
+              COALESCE(NULLIF(rc.motivo_baja_detalle, ''), rc.motivo_baja) AS churn_reason,
+              rc.fecha_baja,
+              rc.producto_anterior AS previous_plan,
+              rc.seller_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
+              rc.estado,
+              rc.resultado_gestion
+            FROM recupero_candidatos rc
+            LEFT JOIN users u ON u.id = rc.seller_id
+            WHERE rc.dataset_id = $1
+              AND rc.organization_id = $2
+            ORDER BY rc.row_number ASC NULLS LAST, rc.created_at ASC
             LIMIT 5
             `,
             [datasetId, organizationId]
@@ -29919,11 +29924,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             pending: counts.pending
           },
           assignments: assignmentsRes.rows.map((row) => ({
-            id: row.id,
             seller_id: row.seller_id,
             seller_name: row.seller_name || null,
-            row_from: Number(row.row_from || 0),
-            row_to: Number(row.row_to || 0),
             counts: {
               assigned: Number(row.assigned || 0),
               recovered: Number(row.recovered || 0),
@@ -29934,6 +29936,9 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           })),
           sample: sampleRes.rows.map((row) => ({
             row_number: Number(row.row_number || 0),
+            fecha_baja: row.fecha_baja || null,
+            seller_id: row.seller_id || null,
+            seller_name: row.seller_name || null,
             client_name: [row.nombre, row.apellido].filter(Boolean).join(" ").trim(),
             document: row.documento || null,
             phone: row.phone || null,
