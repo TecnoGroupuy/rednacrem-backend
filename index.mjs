@@ -2420,6 +2420,42 @@ function buildRecuperoDatasetPayload(row = {}) {
   };
 }
 
+// Valida que cada seller_id sea un vendedor activo/aprobado de la organización
+// (no un usuario cualquiera de cualquier organización — la sola FK a users no
+// alcanza). Reutilizado por distribute, por el endpoint de rangos existente y
+// por la asignación directa nueva, para no duplicar el chequeo tres veces.
+// Tira {status:422} si seller_ids viene vacío o si alguno no califica.
+async function validateRecuperoSellerIds(client, organizationId, sellerIds) {
+  const normalizedSellerIds = [...new Set((Array.isArray(sellerIds) ? sellerIds : []).filter(Boolean))];
+  if (!normalizedSellerIds.length) {
+    const error = new Error("seller_ids es requerido y no puede estar vacío");
+    error.status = 422;
+    throw error;
+  }
+  const sellersRes = await client.query(
+    `
+    SELECT u.id,
+           COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre, u.email) AS seller_name
+    FROM users u
+    JOIN organization_users ou ON ou.user_id = u.id
+    WHERE ou.organization_id = $1
+      AND ou.activo = true
+      AND u.role_key = 'vendedor'
+      AND u.status = 'approved'
+      AND (u.is_test IS NULL OR u.is_test = false)
+      AND u.id = ANY($2::uuid[])
+    ORDER BY u.nombre ASC, u.apellido ASC, u.id ASC
+    `,
+    [organizationId, normalizedSellerIds]
+  );
+  if (sellersRes.rows.length !== normalizedSellerIds.length) {
+    const error = new Error("Uno o más seller_ids no pertenecen a vendedores activos de la organización");
+    error.status = 422;
+    throw error;
+  }
+  return { sellerIds: normalizedSellerIds, sellers: sellersRes.rows };
+}
+
 async function getRecuperoDatasetSchema(client) {
   const [jobCols, candidateCols, assignmentTableRes] = await Promise.all([
     getTableColumns(client, "recupero_import_jobs"),
@@ -25926,27 +25962,7 @@ async function distributeRecuperoDatasetPendingCandidates(client, datasetId, sel
     return { distributedCount: 0, distribution: [] };
   }
 
-  const sellersRes = await client.query(
-    `
-    SELECT u.id,
-           COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre, u.email) AS seller_name
-    FROM users u
-    JOIN organization_users ou ON ou.user_id = u.id
-    WHERE ou.organization_id = $1
-      AND ou.activo = true
-      AND u.role_key = 'vendedor'
-      AND u.status = 'approved'
-      AND (u.is_test IS NULL OR u.is_test = false)
-      AND u.id = ANY($2::uuid[])
-    ORDER BY u.nombre ASC, u.apellido ASC, u.id ASC
-    `,
-    [organizationId, normalizedSellerIds]
-  );
-  if (sellersRes.rows.length !== normalizedSellerIds.length) {
-    const error = new Error("Uno o mas seller_ids no pertenecen a vendedores activos de la organizacion");
-    error.status = 422;
-    throw error;
-  }
+  const { sellers } = await validateRecuperoSellerIds(client, organizationId, normalizedSellerIds);
 
   const candidatesRes = await client.query(
     `
@@ -25965,7 +25981,7 @@ async function distributeRecuperoDatasetPendingCandidates(client, datasetId, sel
   if (!candidatesRes.rows.length) {
     return {
       distributedCount: 0,
-      distribution: sellersRes.rows.map((row) => ({
+      distribution: sellers.map((row) => ({
         seller_id: row.id,
         seller_name: row.seller_name || null,
         assigned: 0
@@ -26008,7 +26024,7 @@ async function distributeRecuperoDatasetPendingCandidates(client, datasetId, sel
 
   return {
     distributedCount: candidateIds.length,
-    distribution: sellersRes.rows.map((row) => ({
+    distribution: sellers.map((row) => ({
       seller_id: row.id,
       seller_name: row.seller_name || null,
       assigned: Number(distributionCounts.get(row.id) || 0)
@@ -29846,6 +29862,17 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         }
         if (normalizeRecuperoDatasetStatus(datasetRow.dataset_status) !== "activo") {
           return json(409, { ok: false, message: "Solo se pueden asignar datasets activos" });
+        }
+
+        // seller_id solo tenía la FK a users — sin esto, un uuid de cualquier
+        // organización (o de un usuario no-vendedor) pasaba igual.
+        try {
+          await validateRecuperoSellerIds(client, organizationId, [sellerId]);
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
         }
 
         await client.query("BEGIN");
