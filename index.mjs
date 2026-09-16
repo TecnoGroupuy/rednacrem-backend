@@ -2597,6 +2597,97 @@ async function loadRecuperoDatasetRow(client, { datasetId, organizationId }) {
   return res.rows[0] || null;
 }
 
+// Mueve candidatos "no terminales" a otro dataset, preservando
+// seller_id/estado/resultado_gestion — solo cambia dataset_id y row_number
+// (continuando la numeración de fila desde el máximo ya existente en el
+// destino). Mismo criterio de reasignación de row_number que ya usan
+// POST .../direct-assignments y el script (descartado)
+// tools/redistribuir_candidatos_lotes_fijos.mjs. No se unificó con
+// direct-assignments porque ese endpoint además reasigna seller_id/estado al
+// mover (responsabilidad distinta); si aparece un tercer caso con las mismas
+// necesidades exactas que este (mover sin tocar seller_id/estado), vale la
+// pena consolidar los tres en una limpieza aparte.
+async function moveRecuperoCandidatesToDataset(client, {
+  candidateIds,
+  targetDatasetId,
+  organizationId,
+  tipoEvento,
+  nota,
+  actorUserId
+}) {
+  if (!candidateIds.length) {
+    return { movedCount: 0 };
+  }
+
+  const maxRowRes = await client.query(
+    `SELECT COALESCE(MAX(row_number), 0)::int AS max_row FROM recupero_candidatos WHERE dataset_id = $1`,
+    [targetDatasetId]
+  );
+  let nextRowNumber = Number(maxRowRes.rows[0]?.max_row || 0) + 1;
+  const rowNumbers = candidateIds.map(() => nextRowNumber++);
+
+  const chunkSize = 500;
+  const movedRows = [];
+  for (let i = 0; i < candidateIds.length; i += chunkSize) {
+    const idChunk = candidateIds.slice(i, i + chunkSize);
+    const rowNumberChunk = rowNumbers.slice(i, i + chunkSize);
+    const updateRes = await client.query(
+      `
+      UPDATE recupero_candidatos rc
+      SET dataset_id = $1,
+          row_number = v.row_number,
+          updated_at = NOW()
+      FROM (
+        SELECT UNNEST($2::uuid[]) AS id, UNNEST($3::int[]) AS row_number
+      ) v
+      WHERE rc.id = v.id
+        AND rc.organization_id = $4
+        AND rc.resultado_gestion NOT IN ('venta', 'rechazo', 'dato_erroneo')
+      RETURNING rc.id, rc.seller_id, rc.estado
+      `,
+      [targetDatasetId, idChunk, rowNumberChunk, organizationId]
+    );
+    movedRows.push(...updateRes.rows);
+  }
+
+  if (movedRows.length) {
+    // seller_id puede venir NULL (candidato todavía 'disponible', sin
+    // vendedor) — el historial exige un actor, así que ante ausencia se
+    // usa quien ejecuta la finalización (mismo fallback que ya existe en
+    // el registro de venta manual, ver POST /api/recupero/candidatos/:id/venta).
+    await client.query(
+      `
+      INSERT INTO recupero_candidatos_historial
+        (candidato_id, estado_anterior, estado_nuevo, tipo_evento, seller_id, nota, created_at)
+      SELECT v.id, v.estado, v.estado, $4, COALESCE(v.seller_id, $5::uuid), $6, NOW()
+      FROM (
+        SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::text[]) AS estado, UNNEST($3::uuid[]) AS seller_id
+      ) v
+      `,
+      [
+        movedRows.map((r) => r.id),
+        movedRows.map((r) => r.estado),
+        movedRows.map((r) => r.seller_id),
+        tipoEvento,
+        actorUserId || null,
+        nota
+      ]
+    );
+
+    await client.query(
+      `
+      UPDATE recupero_import_jobs
+      SET total_rows = GREATEST(total_rows, (SELECT COALESCE(MAX(row_number), 0) FROM recupero_candidatos WHERE dataset_id = $1)),
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [targetDatasetId]
+    );
+  }
+
+  return { movedCount: movedRows.length };
+}
+
 function countCsvRows(csvText) {
   if (!csvText) return 0;
   let count = 0;
@@ -30494,6 +30585,143 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to create direct recovery assignment", error: error.message });
+    }
+  }
+  // POST /recovery/datasets/:id/finalize
+  // Body: ninguno (o vacío).
+  // Cierra un lote ad-hoc de Recupero: mueve todo candidato que todavía se
+  // puede gestionar (resultado_gestion NOT IN ('venta', 'rechazo',
+  // 'dato_erroneo') — los tres estados terminales, ver
+  // backend-spec-recupero.md) al lote fijo "General de recupero"
+  // (is_system_dataset=true), preservando seller_id/estado/resultado_gestion.
+  // Los candidatos en estado terminal no se mueven — quedan en el lote
+  // original para preservar su reporte histórico, que pasa a
+  // dataset_status='cerrado'. Reemplaza a
+  // tools/redistribuir_candidatos_lotes_fijos.mjs (migración de una sola vez
+  // preparada en una sesión anterior, nunca corrida en producción, ahora
+  // obsoleta): esto es la versión permanente, disparable en cualquier
+  // momento por el botón "Finalizar" de cada tarjeta de lote.
+  if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/finalize$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/finalize$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+        if (datasetRow.is_system_dataset) {
+          return json(422, { ok: false, message: "No se puede finalizar un lote fijo del sistema" });
+        }
+        if (normalizeRecuperoDatasetStatus(datasetRow.dataset_status) === "cerrado") {
+          return json(409, { ok: false, message: "El lote ya está cerrado" });
+        }
+
+        // Red de seguridad: normalmente ya existen (se aprovisionan al abrir
+        // la pestaña Lotes, ver ensureRecuperoSystemDatasets en GET
+        // /recovery/datasets), pero por si esta es la primera llamada a
+        // /recovery/* de la organización.
+        await ensureRecuperoSystemDatasets(client, organizationId, dbUser?.id);
+        const generalDatasetRes = await client.query(
+          `
+          SELECT id FROM recupero_import_jobs
+          WHERE organization_id = $1 AND is_system_dataset = true AND dataset_name = $2
+          LIMIT 1
+          `,
+          [organizationId, RECUPERO_FIXED_DATASETS[1]]
+        );
+        const generalDatasetId = generalDatasetRes.rows[0]?.id || null;
+        if (!generalDatasetId) {
+          return json(500, { ok: false, message: 'No se pudo localizar el lote fijo "General de recupero"' });
+        }
+
+        await client.query("BEGIN");
+        try {
+          const eligibleRes = await client.query(
+            `
+            SELECT id
+            FROM recupero_candidatos
+            WHERE dataset_id = $1
+              AND organization_id = $2
+              AND resultado_gestion NOT IN ('venta', 'rechazo', 'dato_erroneo')
+            ORDER BY row_number ASC NULLS LAST, created_at ASC, id ASC
+            `,
+            [datasetId, organizationId]
+          );
+          const candidateIds = eligibleRes.rows.map((r) => r.id);
+
+          const { movedCount } = await moveRecuperoCandidatesToDataset(client, {
+            candidateIds,
+            targetDatasetId: generalDatasetId,
+            organizationId,
+            tipoEvento: "finalizacion_lote",
+            nota: `Finalización del lote "${datasetRow.dataset_name || datasetRow.file_name || datasetId}"`,
+            actorUserId: dbUser?.id
+          });
+
+          const terminalCountRes = await client.query(
+            `
+            SELECT COUNT(*)::int AS terminal_count
+            FROM recupero_candidatos
+            WHERE dataset_id = $1
+              AND organization_id = $2
+              AND resultado_gestion IN ('venta', 'rechazo', 'dato_erroneo')
+            `,
+            [datasetId, organizationId]
+          );
+          const terminalCount = terminalCountRes.rows[0]?.terminal_count || 0;
+
+          await client.query(
+            `UPDATE recupero_import_jobs SET dataset_status = 'cerrado', updated_at = NOW() WHERE id = $1 AND organization_id = $2`,
+            [datasetId, organizationId]
+          );
+
+          await client.query("COMMIT");
+
+          const updatedDatasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+          return json(200, {
+            ok: true,
+            message: `Lote finalizado: ${movedCount} candidato(s) movidos a "${RECUPERO_FIXED_DATASETS[1]}", ${terminalCount} quedaron sin mover (estado terminal).`,
+            moved_count: movedCount,
+            terminal_count: terminalCount,
+            dataset: buildRecuperoDatasetPayload(updatedDatasetRow)
+          });
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to finalize recovery dataset", error: error.message });
     }
   }
   if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/distribute$/)) {
