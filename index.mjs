@@ -29477,6 +29477,77 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery summary", error: error.message });
     }
   }
+  // POST /recovery/datasets — crea un dataset vacío (sin CSV), solo con
+  // nombre. A diferencia de POST /recovery/imports (multipart, exige un CSV
+  // no vacío), este es el equivalente a "crear lote" del modal de Recupero:
+  // un recupero_import_jobs con total_rows=0 al que después se le van
+  // sumando candidatos vía /direct-assignments. Placeholders sintéticos
+  // (file_name/file_hash/csv_text) para satisfacer las columnas NOT NULL de
+  // la tabla, que fue pensada originalmente solo para bookkeeping de import.
+  if (method === "POST" && recoveryPath === "/recovery/datasets") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+      const datasetName = normalizeText(body?.dataset_name || body?.name || "");
+      if (!datasetName) {
+        return json(422, { ok: false, message: "dataset_name es requerido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const fileHash = crypto
+          .createHash("sha256")
+          .update(`manual-dataset:${organizationId}:${datasetName}:${Date.now()}:${Math.random()}`)
+          .digest("hex");
+
+        const jobRes = await client.query(
+          `
+          INSERT INTO recupero_import_jobs (
+            file_name, file_hash, status, total_rows, processed_rows, updated_rows,
+            error_rows, duplicate_rows, invalid_rows, not_found_rows, csv_text,
+            created_by, organization_id, dataset_name, dataset_source, dataset_status,
+            goal, max_attempts, started_at, finished_at
+          )
+          VALUES (
+            $1, $2, 'done', 0, 0, 0, 0, 0, 0, 0, '',
+            $3, $4, $5, $6, 'activo',
+            0, '{"calls": 3, "whatsapp": 1}'::jsonb, NOW(), NOW()
+          )
+          RETURNING id
+          `,
+          [datasetName, fileHash, dbUser.id, organizationId, datasetName, RECUPERO_DATASET_SOURCE_DEFAULT]
+        );
+        const datasetId = jobRes.rows[0].id;
+        const row = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+
+        return json(201, { ok: true, dataset: buildRecuperoDatasetPayload(row) });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to create recovery dataset", error: error.message });
+    }
+  }
   if (method === "GET" && recoveryPath === "/recovery/datasets") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -30017,6 +30088,239 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     } catch (error) {
       return json(500, { ok: false, message: "Failed to create recovery assignment", error: error.message });
+    }
+  }
+  // POST /recovery/datasets/:id/direct-assignments
+  // Body: { candidato_ids: [uuid...], seller_ids: [uuid...] }
+  // Asigna una selección puntual de candidatos (checkbox, no un rango
+  // contiguo) a uno o varios vendedores — análogo a
+  // POST /lead-batches/:id/assign-pool en Lotes de captación, para el mismo
+  // caso de uso: la pestaña Recupero deja filtrar y tildar contactos sueltos
+  // que pueden venir de distintos datasets de origen (o de ninguno —
+  // aplicarBajaContactProduct crea candidatos sin dataset_id/row_number).
+  // A diferencia de /assignments (rango), acá no se toca
+  // recupero_asignaciones_rango — no hay un "rango contiguo" que proteger,
+  // cada candidato se mueve individualmente al dataset destino.
+  if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/direct-assignments$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/direct-assignments$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+      const candidatoIds = Array.isArray(body?.candidato_ids)
+        ? [...new Set(body.candidato_ids.filter((id) => typeof id === "string" && id))]
+        : [];
+      const sellerIdsRaw = Array.isArray(body?.seller_ids)
+        ? [...new Set(body.seller_ids.filter((id) => typeof id === "string" && id))]
+        : [];
+      if (!candidatoIds.length) {
+        return json(400, { ok: false, message: "candidato_ids es requerido y no puede estar vacío" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+        if (normalizeRecuperoDatasetStatus(datasetRow.dataset_status) !== "activo") {
+          return json(409, { ok: false, message: "Solo se pueden asignar datasets activos" });
+        }
+
+        let sellerIds;
+        try {
+          ({ sellerIds } = await validateRecuperoSellerIds(client, organizationId, sellerIdsRaw));
+        } catch (error) {
+          if (error?.status) {
+            return json(error.status, { ok: false, message: error.message });
+          }
+          throw error;
+        }
+
+        await client.query("BEGIN");
+        try {
+          const eligibleRes = await client.query(
+            `
+            SELECT id, dataset_id, row_number
+            FROM recupero_candidatos
+            WHERE id = ANY($1::uuid[])
+              AND organization_id = $2
+              AND estado = 'disponible'
+              AND seller_id IS NULL
+              AND resultado_gestion NOT IN ('venta', 'rechazo')
+            ORDER BY row_number ASC NULLS LAST, created_at ASC, id ASC
+            `,
+            [candidatoIds, organizationId]
+          );
+          const eligibleRows = eligibleRes.rows;
+          const eligibleSet = new Set(eligibleRows.map((r) => r.id));
+          const unassigned = candidatoIds
+            .filter((id) => !eligibleSet.has(id))
+            .map((candidato_id) => ({
+              candidato_id,
+              reason: "No pertenece a esta organización, ya tiene vendedor asignado, o cambió de estado desde que se seleccionó."
+            }));
+
+          if (!eligibleRows.length) {
+            await client.query("ROLLBACK");
+            const counts = await loadRecuperoDatasetCounts(client, datasetId, organizationId);
+            return json(200, {
+              ok: true,
+              message: "Ningún candidato pudo asignarse — ya no cumplían las condiciones.",
+              assigned_by_seller: [],
+              counts,
+              unassigned_candidato_ids: unassigned.map((u) => u.candidato_id),
+              unassigned
+            });
+          }
+
+          // row_number es único por dataset (no hay constraint que lo obligue,
+          // pero /assignments y /distribute lo asumen así) — a los candidatos
+          // que ya estaban en el dataset destino se les conserva su
+          // row_number; a los que vienen de otro dataset (o de ninguno) se
+          // les asigna uno nuevo, continuando desde el máximo actual.
+          const maxRowRes = await client.query(
+            `SELECT COALESCE(MAX(row_number), 0)::int AS max_row FROM recupero_candidatos WHERE dataset_id = $1`,
+            [datasetId]
+          );
+          let nextRowNumber = Number(maxRowRes.rows[0]?.max_row || 0) + 1;
+
+          const assignedSellerIds = eligibleRows.map((_row, index) => sellerIds[index % sellerIds.length]);
+          const targetDatasetIds = [];
+          const targetRowNumbers = [];
+          for (const row of eligibleRows) {
+            if (String(row.dataset_id || "") === String(datasetId) && row.row_number != null) {
+              targetDatasetIds.push(datasetId);
+              targetRowNumbers.push(row.row_number);
+            } else {
+              targetDatasetIds.push(datasetId);
+              targetRowNumbers.push(nextRowNumber);
+              nextRowNumber += 1;
+            }
+          }
+          const eligibleIds = eligibleRows.map((r) => r.id);
+
+          const chunkSize = 500;
+          const updatedIds = [];
+          for (let i = 0; i < eligibleIds.length; i += chunkSize) {
+            const idChunk = eligibleIds.slice(i, i + chunkSize);
+            const datasetChunk = targetDatasetIds.slice(i, i + chunkSize);
+            const rowNumberChunk = targetRowNumbers.slice(i, i + chunkSize);
+            const sellerChunk = assignedSellerIds.slice(i, i + chunkSize);
+            const updateRes = await client.query(
+              `
+              UPDATE recupero_candidatos rc
+              SET dataset_id = v.dataset_id,
+                  row_number = v.row_number,
+                  seller_id = v.seller_id,
+                  estado = 'en_gestion',
+                  fecha_asignacion = NOW(),
+                  updated_at = NOW()
+              FROM (
+                SELECT
+                  UNNEST($1::uuid[]) AS id,
+                  UNNEST($2::uuid[]) AS dataset_id,
+                  UNNEST($3::int[]) AS row_number,
+                  UNNEST($4::uuid[]) AS seller_id
+              ) v
+              WHERE rc.id = v.id
+                AND rc.organization_id = $5
+                AND rc.estado = 'disponible'
+                AND rc.seller_id IS NULL
+                AND rc.resultado_gestion NOT IN ('venta', 'rechazo')
+              RETURNING rc.id, v.seller_id
+              `,
+              [idChunk, datasetChunk, rowNumberChunk, sellerChunk, organizationId]
+            );
+            updatedIds.push(...updateRes.rows.map((r) => ({ id: r.id, seller_id: r.seller_id })));
+          }
+
+          if (updatedIds.length) {
+            await client.query(
+              `
+              INSERT INTO recupero_candidatos_historial
+                (candidato_id, estado_anterior, estado_nuevo, tipo_evento, seller_id, nota, created_at)
+              SELECT v.id, 'disponible', 'en_gestion', 'asignacion_directa', v.seller_id, $3, NOW()
+              FROM (
+                SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::uuid[]) AS seller_id
+              ) v
+              `,
+              [
+                updatedIds.map((u) => u.id),
+                updatedIds.map((u) => u.seller_id),
+                `Asignación directa al dataset "${datasetRow.dataset_name || datasetRow.file_name || datasetId}"`
+              ]
+            );
+
+            const highestRowNumber = Math.max(datasetRow.total_rows || 0, ...targetRowNumbers);
+            await client.query(
+              `UPDATE recupero_import_jobs SET total_rows = $1, updated_at = NOW() WHERE id = $2`,
+              [highestRowNumber, datasetId]
+            );
+          }
+
+          await client.query("COMMIT");
+
+          const assignedCountBySeller = {};
+          for (const u of updatedIds) {
+            assignedCountBySeller[u.seller_id] = (assignedCountBySeller[u.seller_id] || 0) + 1;
+          }
+          const assigned_by_seller = sellerIds.map((seller_id) => ({
+            seller_id,
+            assigned_now: assignedCountBySeller[seller_id] || 0
+          }));
+          const updatedIdSet = new Set(updatedIds.map((u) => u.id));
+          const notActuallyUpdated = eligibleIds
+            .filter((id) => !updatedIdSet.has(id))
+            .map((candidato_id) => ({
+              candidato_id,
+              reason: "Cambió de estado en el momento de asignar (asignación concurrente)."
+            }));
+          const allUnassigned = [...unassigned, ...notActuallyUpdated];
+          const counts = await loadRecuperoDatasetCounts(client, datasetId, organizationId);
+
+          return json(200, {
+            ok: true,
+            message: allUnassigned.length
+              ? `Se asignaron ${updatedIds.length} candidato(s); ${allUnassigned.length} no se pudieron asignar.`
+              : `Se asignaron ${updatedIds.length} candidato(s) correctamente.`,
+            assigned_by_seller,
+            counts,
+            unassigned_candidato_ids: allUnassigned.map((u) => u.candidato_id),
+            unassigned: allUnassigned
+          });
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to create direct recovery assignment", error: error.message });
     }
   }
   if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/distribute$/)) {
