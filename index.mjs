@@ -2597,27 +2597,44 @@ async function loadRecuperoDatasetRow(client, { datasetId, organizationId }) {
   return res.rows[0] || null;
 }
 
-// Mueve candidatos "no terminales" a otro dataset, preservando
-// seller_id/estado/resultado_gestion — solo cambia dataset_id y row_number
-// (continuando la numeración de fila desde el máximo ya existente en el
-// destino). Mismo criterio de reasignación de row_number que ya usan
+// Mueve candidatos "no terminales" a otro dataset — siempre cambia
+// dataset_id y row_number (continuando la numeración de fila desde el
+// máximo ya existente en el destino, mismo criterio que ya usan
 // POST .../direct-assignments y el script (descartado)
-// tools/redistribuir_candidatos_lotes_fijos.mjs. No se unificó con
-// direct-assignments porque ese endpoint además reasigna seller_id/estado al
-// mover (responsabilidad distinta); si aparece un tercer caso con las mismas
-// necesidades exactas que este (mover sin tocar seller_id/estado), vale la
-// pena consolidar los tres en una limpieza aparte.
+// tools/redistribuir_candidatos_lotes_fijos.mjs). Con resetAssignment=true
+// (caso de /finalize) también desasigna: seller_id -> NULL, estado ->
+// 'disponible', para que el candidato quede libre para redistribuir — sin
+// resetAssignment (default) preserva seller_id/estado tal cual, por si
+// aparece a futuro un caso que solo necesite mover de dataset. En ningún
+// caso se toca resultado_gestion (el historial de gestión ya conocido del
+// candidato no se pierde). No se unificó con direct-assignments porque ese
+// endpoint asigna a un vendedor nuevo en vez de desasignar (flujo inverso);
+// si aparece un tercer caso con necesidades iguales, vale la pena
+// consolidar los tres en una limpieza aparte.
 async function moveRecuperoCandidatesToDataset(client, {
   candidateIds,
   targetDatasetId,
   organizationId,
   tipoEvento,
   nota,
-  actorUserId
+  actorUserId,
+  resetAssignment = false
 }) {
   if (!candidateIds.length) {
     return { movedCount: 0 };
   }
+
+  // Estado ANTERIOR al UPDATE — capturado ANTES de tocar nada. Con
+  // resetAssignment=true, seller_id pasa a NULL en la misma sentencia que
+  // mueve el candidato: si se leyera con RETURNING de ese UPDATE ya vendría
+  // el valor nuevo (NULL), perdiendo el dato de quién lo tenía asignado
+  // justo antes de la desasignación — por eso el historial se arma con
+  // esta lectura previa, no con el resultado del UPDATE.
+  const priorRes = await client.query(
+    `SELECT id, seller_id, estado FROM recupero_candidatos WHERE id = ANY($1::uuid[])`,
+    [candidateIds]
+  );
+  const priorById = new Map(priorRes.rows.map((row) => [row.id, row]));
 
   const maxRowRes = await client.query(
     `SELECT COALESCE(MAX(row_number), 0)::int AS max_row FROM recupero_candidatos WHERE dataset_id = $1`,
@@ -2627,7 +2644,7 @@ async function moveRecuperoCandidatesToDataset(client, {
   const rowNumbers = candidateIds.map(() => nextRowNumber++);
 
   const chunkSize = 500;
-  const movedRows = [];
+  const movedIds = [];
   for (let i = 0; i < candidateIds.length; i += chunkSize) {
     const idChunk = candidateIds.slice(i, i + chunkSize);
     const rowNumberChunk = rowNumbers.slice(i, i + chunkSize);
@@ -2636,6 +2653,7 @@ async function moveRecuperoCandidatesToDataset(client, {
       UPDATE recupero_candidatos rc
       SET dataset_id = $1,
           row_number = v.row_number,
+          ${resetAssignment ? "seller_id = NULL, estado = 'disponible'," : ""}
           updated_at = NOW()
       FROM (
         SELECT UNNEST($2::uuid[]) AS id, UNNEST($3::int[]) AS row_number
@@ -2643,31 +2661,42 @@ async function moveRecuperoCandidatesToDataset(client, {
       WHERE rc.id = v.id
         AND rc.organization_id = $4
         AND rc.resultado_gestion NOT IN ('venta', 'rechazo', 'dato_erroneo')
-      RETURNING rc.id, rc.seller_id, rc.estado
+      RETURNING rc.id
       `,
       [targetDatasetId, idChunk, rowNumberChunk, organizationId]
     );
-    movedRows.push(...updateRes.rows);
+    movedIds.push(...updateRes.rows.map((row) => row.id));
   }
 
-  if (movedRows.length) {
-    // seller_id puede venir NULL (candidato todavía 'disponible', sin
-    // vendedor) — el historial exige un actor, así que ante ausencia se
-    // usa quien ejecuta la finalización (mismo fallback que ya existe en
-    // el registro de venta manual, ver POST /api/recupero/candidatos/:id/venta).
+  if (movedIds.length) {
+    const priorSellerIds = movedIds.map((id) => priorById.get(id)?.seller_id || null);
+    const priorEstados = movedIds.map((id) => priorById.get(id)?.estado || null);
+    const nuevoEstados = movedIds.map((id) => (resetAssignment ? "disponible" : (priorById.get(id)?.estado || null)));
+
+    // seller_id del historial es siempre el ANTERIOR al movimiento (nunca
+    // NULL solo porque se desasignó ahora). Puede venir NULL igual si el
+    // candidato ya estaba sin vendedor de antes — el historial exige un
+    // actor, así que ante esa ausencia se usa quien ejecuta la operación
+    // (mismo fallback que ya existe en el registro de venta manual, ver
+    // POST /api/recupero/candidatos/:id/venta).
     await client.query(
       `
       INSERT INTO recupero_candidatos_historial
         (candidato_id, estado_anterior, estado_nuevo, tipo_evento, seller_id, nota, created_at)
-      SELECT v.id, v.estado, v.estado, $4, COALESCE(v.seller_id, $5::uuid), $6, NOW()
+      SELECT v.id, v.estado_anterior, v.estado_nuevo, $5, COALESCE(v.seller_id, $6::uuid), $7, NOW()
       FROM (
-        SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::text[]) AS estado, UNNEST($3::uuid[]) AS seller_id
+        SELECT
+          UNNEST($1::uuid[]) AS id,
+          UNNEST($2::text[]) AS estado_anterior,
+          UNNEST($3::text[]) AS estado_nuevo,
+          UNNEST($4::uuid[]) AS seller_id
       ) v
       `,
       [
-        movedRows.map((r) => r.id),
-        movedRows.map((r) => r.estado),
-        movedRows.map((r) => r.seller_id),
+        movedIds,
+        priorEstados,
+        nuevoEstados,
+        priorSellerIds,
         tipoEvento,
         actorUserId || null,
         nota
@@ -2685,7 +2714,7 @@ async function moveRecuperoCandidatesToDataset(client, {
     );
   }
 
-  return { movedCount: movedRows.length };
+  return { movedCount: movedIds.length };
 }
 
 function countCsvRows(csvText) {
@@ -30683,7 +30712,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             organizationId,
             tipoEvento: "finalizacion_lote",
             nota: `Finalización del lote "${datasetRow.dataset_name || datasetRow.file_name || datasetId}"`,
-            actorUserId: dbUser?.id
+            actorUserId: dbUser?.id,
+            resetAssignment: true
           });
 
           const terminalCountRes = await client.query(
