@@ -29956,6 +29956,105 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery dataset detail", error: error.message });
     }
   }
+  // GET /recovery/datasets/:id/candidates?page=&limit=
+  // Listado completo y paginado de los candidatos de un dataset — el
+  // `sample` de GET /recovery/datasets/:id es un top-5 fijo pensado solo
+  // para una vista rápida, no alcanza para recorrer un lote entero.
+  if (method === "GET" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/candidates$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/candidates$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const offset = (page - 1) * limit;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+
+        const [countRes, itemsRes] = await Promise.all([
+          client.query(
+            `SELECT COUNT(*)::int AS total FROM recupero_candidatos WHERE dataset_id = $1 AND organization_id = $2`,
+            [datasetId, organizationId]
+          ),
+          client.query(
+            `
+            SELECT
+              rc.id,
+              rc.row_number,
+              rc.nombre,
+              rc.apellido,
+              rc.documento,
+              COALESCE(NULLIF(rc.celular, ''), rc.telefono) AS phone,
+              COALESCE(NULLIF(rc.motivo_baja_detalle, ''), rc.motivo_baja) AS churn_reason,
+              rc.fecha_baja,
+              rc.producto_anterior AS previous_plan,
+              rc.seller_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
+              rc.estado,
+              rc.resultado_gestion
+            FROM recupero_candidatos rc
+            LEFT JOIN users u ON u.id = rc.seller_id
+            WHERE rc.dataset_id = $1
+              AND rc.organization_id = $2
+            ORDER BY rc.row_number ASC NULLS LAST, rc.created_at ASC
+            LIMIT $3 OFFSET $4
+            `,
+            [datasetId, organizationId, limit, offset]
+          )
+        ]);
+
+        return json(200, {
+          ok: true,
+          items: itemsRes.rows.map((row) => ({
+            id: row.id,
+            row_number: Number(row.row_number || 0),
+            client_name: [row.nombre, row.apellido].filter(Boolean).join(" ").trim(),
+            document: row.documento || null,
+            phone: row.phone || null,
+            churn_reason: row.churn_reason || null,
+            fecha_baja: row.fecha_baja || null,
+            previous_plan: row.previous_plan || null,
+            seller_id: row.seller_id || null,
+            seller_name: row.seller_name || null,
+            status: getRecuperoCollapsedStatus(row.estado, row.resultado_gestion),
+            resultado_gestion: row.resultado_gestion || null
+          })),
+          total: Number(countRes.rows[0]?.total || 0),
+          page,
+          limit
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery dataset candidates", error: error.message });
+    }
+  }
   if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/)) {
     const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/assignments$/);
     const datasetId = match?.[1] || null;
