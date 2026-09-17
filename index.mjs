@@ -30072,6 +30072,18 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           )
         ]);
 
+        // contact_pct ("% de contactabilidad"): candidatos donde hubo una
+        // conversación real con la persona — rellamar/seguimiento/rechazo/
+        // venta, no solo que se intentó llamar (nuevo/no_contesta quedan
+        // afuera) ni que el número ni siquiera era válido (dato_erroneo
+        // queda afuera). effectiveness_pct ya viene calculado por
+        // mapRecuperoCounts con la misma fórmula que usa
+        // GET /recovery/summary (recuperado/(recuperado+rechazado), sin
+        // dato_erroneo en el denominador) — no se reinventa acá, solo se
+        // expone también a nivel de un dataset individual.
+        const contactados = counts.recovered + counts.rejected + counts.seguimiento + counts.rellamar;
+        const contactPct = counts.total > 0 ? Math.round((contactados / counts.total) * 100) : 0;
+
         return json(200, {
           dataset: buildRecuperoDatasetPayload(datasetRow),
           counts: {
@@ -30079,7 +30091,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             recovered: counts.recovered,
             rejected: counts.rejected,
             in_progress: counts.in_progress,
-            pending: counts.pending
+            pending: counts.pending,
+            assigned: counts.assigned,
+            unassigned: counts.unassigned,
+            effectiveness_pct: counts.effectiveness_pct,
+            contact_pct: contactPct
           },
           assignments: assignmentsRes.rows.map((row) => ({
             seller_id: row.seller_id,
