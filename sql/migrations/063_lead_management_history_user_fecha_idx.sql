@@ -1,0 +1,40 @@
+-- Incidente de rendimiento (ráfaga de consultas lentas contra rednacrem-db,
+-- wait_event DataFileRead/BufferIo, 20-70+s por consulta) — confirmado en
+-- código: lead_management_history solo tiene índice en (contact_id) además
+-- de la PK. Tanto GET /api/supervisor/sellers-summary como
+-- GET /leads/daily-stats filtran esta tabla por
+--   WHERE user_id = ANY(...)/= $1
+--     AND (fecha_gestion AT TIME ZONE 'America/Montevideo')::date = $N::date
+-- sin ningún índice que cubra ninguna de esas dos columnas — hoy fuerza un
+-- Seq Scan completo de la tabla en cada llamada a cualquiera de los dos
+-- endpoints. Esta es la tabla que más probablemente explica el I/O pesado,
+-- porque crece sin límite con cada gestión registrada en toda la operación
+-- (a diferencia de lead_batches, que es chica).
+--
+-- CONCURRENTLY porque es producción en vivo bajo el incidente — no tomar un
+-- lock que bloquee escrituras mientras se construye el índice. No correr
+-- esto dentro de una transacción (CONCURRENTLY no lo permite). Si falla a
+-- mitad de camino puede quedar un índice INVALID — confirmar con
+-- \d lead_management_history después y, si aparece inválido, hacer
+-- DROP INDEX CONCURRENTLY antes de reintentar.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS lead_management_history_user_fecha_idx
+  ON public.lead_management_history (user_id, fecha_gestion);
+
+-- Candidatos de menor confianza, NO incluidos acá — necesitan EXPLAIN
+-- (ANALYZE, BUFFERS) contra producción real antes de decidir si hacen
+-- falta (ver tarea-incidente-consultas-lentas.md):
+--   - lead_contact_status(assigned_to, estado_venta): hoy ya existe un
+--     índice simple en (assigned_to); no está confirmado que agregar
+--     estado_venta cambie el plan, porque en varias de las consultas el
+--     filtro por estado_venta va dentro de un FILTER(...) de un agregado,
+--     no en el WHERE (no reduce las filas a leer, solo las que se cuentan).
+--   - sales(seller_user_id, fecha_venta) o los nombres reales de columna
+--     que tenga producción — el "sales" local no tiene columnas
+--     seller_user_id/fecha_venta/sale_amount en absoluto (diverge de lo que
+--     usa el código real), así que no pude confirmar ni qué índices existen
+--     hoy ni si faltan. Necesito que Damián corra \d sales contra RDS antes
+--     de proponer algo concreto acá.
+--   - lead_batches(organization_id, tipo, estado): lead_batches es una
+--     tabla chica (lotes/campañas, no candidatos individuales) — poco
+--     probable que sea el cuello de botella, pero queda para confirmar si
+--     el resto no alcanza.
