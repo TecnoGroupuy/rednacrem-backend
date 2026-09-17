@@ -27183,7 +27183,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
   }
 
   // POST /lead-batches/:id/add-seller
-  // Body: { seller_id: uuid }
+  // Body: { seller_id: uuid, distribute?: boolean }
+  // distribute (default true, retrocompatible con quien no lo mande) decide
+  // si se corre la redistribución automática de datos "libres" (estados
+  // LEAD_REDISTRIBUTION_PENDING_STATES) entre los vendedores actuales del
+  // lote apenas se agrega el nuevo — pasar distribute:false lo agrega sin
+  // tocar ningún dato ("Sin datos" en el modal de "Agregar vendedor").
   if (method === "POST" && path.match(/\/lead-batches\/([^/]+)\/add-seller$/)) {
     const match = path.match(/\/lead-batches\/([^/]+)\/add-seller$/);
     const batchId = match?.[1];
@@ -27199,6 +27204,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     if (!sellerId) {
       return json(400, { ok: false, message: "seller_id es requerido" });
     }
+    const shouldDistribute = body?.distribute !== false;
 
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -27258,14 +27264,16 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
              ON CONFLICT DO NOTHING`,
             [batchId, sellerId]
           );
-          await redistributeNewContacts(client, batchId, null, {
-            states: LEAD_REDISTRIBUTION_PENDING_STATES
-          }, organizationId);
-          distribution = await getNewContactsDistribution(
-            client,
-            batchId,
-            LEAD_REDISTRIBUTION_PENDING_STATES
-          );
+          if (shouldDistribute) {
+            await redistributeNewContacts(client, batchId, null, {
+              states: LEAD_REDISTRIBUTION_PENDING_STATES
+            }, organizationId);
+            distribution = await getNewContactsDistribution(
+              client,
+              batchId,
+              LEAD_REDISTRIBUTION_PENDING_STATES
+            );
+          }
           await client.query("COMMIT");
         } catch (err) {
           await client.query("ROLLBACK");
@@ -27273,7 +27281,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         }
         return json(200, {
           ok: true,
-          message: "Vendedor agregado al lote",
+          message: shouldDistribute ? "Vendedor agregado al lote" : "Vendedor agregado al lote sin asignarle datos",
           distribution
         });
       } catch (err) {
