@@ -3700,7 +3700,34 @@ async function applyInactividadSiCorresponde(client, agenteId, now) {
   };
 }
 
+// Cache en memoria de getTeamSummary, con TTL corto — mitiga el incidente de
+// saturación del 17/09: emitRealtime("team_update", ...) se dispara sin
+// límite de frecuencia desde POST /leads/:id/management, /api/agent/event y
+// /api/agent/call (cada gestión/evento/llamada), y hasta ahora cada emisión
+// recalculaba este summary desde cero (varias consultas sobre sales,
+// lead_management_history, eventos_turno...). El fix del lado del cliente
+// (throttle de refreshSellerSummary) protege el caso de hoy; esto protege
+// la causa de fondo — cualquier llamador futuro de getTeamSummary (hay 6
+// hoy, no solo los 3 que emiten team_update) reutiliza el resultado si ya
+// se calculó hace menos de TEAM_SUMMARY_CACHE_TTL_MS para la misma
+// organización+fecha, en vez de volver a pegarle a la base.
+//
+// Nota: esto es un Map en memoria del proceso — en Lambda solo deduplica
+// invocaciones que caen en el mismo contenedor "warm" (container reuse), no
+// entre contenedores concurrentes distintos bajo carga alta. No es una
+// deduplicación global (eso requeriría un cache compartido tipo
+// ElastiCache/Redis), pero reduce meaningfully la carga sin agregar
+// infraestructura nueva — acorde a no sobre-diseñar la solución.
+const TEAM_SUMMARY_CACHE_TTL_MS = 10_000;
+const teamSummaryCache = new Map();
+
 async function getTeamSummary(client, fecha, now = new Date(), organizationId = null) {
+  const cacheKey = `${organizationId || "global"}:${fecha}`;
+  const cached = teamSummaryCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
   const config = await getConfigMap(client);
   const sellersRes = await client.query(
     `
@@ -3980,7 +4007,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
       : null
   }));
 
-  return {
+  const result = {
     fecha,
     resumen_equipo,
     alertas_activas,
@@ -3988,6 +4015,8 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     summary,
     agents
   };
+  teamSummaryCache.set(cacheKey, { data: result, expiresAt: Date.now() + TEAM_SUMMARY_CACHE_TTL_MS });
+  return result;
 }
 
 async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new Date(), filterUserId = null, organizationId = null) {
