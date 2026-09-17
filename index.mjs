@@ -30136,6 +30136,15 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             pending: counts.pending,
             assigned: counts.assigned,
             unassigned: counts.unassigned,
+            // Desglose de los 4 estados que hoy quedan mezclados dentro de
+            // in_progress (bug ya conocido de esa categoría) — ya venían
+            // calculados por mapRecuperoCounts (misma fuente que usa
+            // pendientes_gestion por vendedor, commit beb06c2), solo no se
+            // exponían a nivel de todo el dataset.
+            no_contesta: counts.no_contesta,
+            rellamar: counts.rellamar,
+            seguimiento: counts.seguimiento,
+            dato_erroneo: counts.dato_erroneo,
             effectiveness_pct: counts.effectiveness_pct,
             contact_pct: contactPct
           },
