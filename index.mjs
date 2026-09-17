@@ -29831,6 +29831,25 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             LEFT JOIN users u ON u.id = rc.seller_id
             WHERE rij.organization_id = $1
             GROUP BY rc.dataset_id
+          ),
+          -- "Última actualización" real del lote: la gestión más reciente
+          -- sobre sus candidatos (llamada/resultado registrado), no
+          -- recupero_import_jobs.updated_at — esa columna solo se toca al
+          -- mover/agregar contactos o cerrar el lote, nunca cuando un
+          -- vendedor gestiona un candidato ya asignado. Mismo criterio
+          -- tipo_evento ya usado en GET /recovery/datasets/:id
+          -- (management_range, commit 6e26b96): tipo_evento IS NULL cubre
+          -- las filas que realmente escriben hoy /venta y /gestionar.
+          last_management AS (
+            SELECT
+              rc.dataset_id,
+              MAX(rch.created_at) AS last_management_at
+            FROM recupero_candidatos_historial rch
+            JOIN recupero_candidatos rc ON rc.id = rch.candidato_id
+            JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+            WHERE rij.organization_id = $1
+              AND (rch.tipo_evento IS NULL OR rch.tipo_evento = 'gestion')
+            GROUP BY rc.dataset_id
           )
           SELECT
             rij.id,
@@ -29847,10 +29866,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             COALESCE(cc.assigned_rows, 0) AS assigned_rows,
             COALESCE(cc.unassigned_rows, 0) AS unassigned_rows,
             COALESCE(ac.assignees_count, 0) AS assignees_count,
-            ac.assignee_name
+            ac.assignee_name,
+            lm.last_management_at
           FROM recupero_import_jobs rij
           LEFT JOIN candidate_counts cc ON cc.dataset_id = rij.id
           LEFT JOIN assignee_counts ac ON ac.dataset_id = rij.id
+          LEFT JOIN last_management lm ON lm.dataset_id = rij.id
           WHERE rij.organization_id = $1
           ORDER BY COALESCE(rij.finished_at, rij.created_at) DESC, rij.created_at DESC
           `,
@@ -29864,6 +29885,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             name: row.dataset_name || row.file_name || null,
             source_file: row.file_name || null,
             imported_at: row.imported_at || null,
+            last_activity_at: row.last_management_at || null,
             status: normalizeRecuperoDatasetStatus(row.dataset_status),
             is_system_dataset: Boolean(row.is_system_dataset),
             counts: {
