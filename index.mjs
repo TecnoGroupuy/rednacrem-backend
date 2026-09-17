@@ -30034,7 +30034,18 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               COUNT(rc.id) FILTER (
                 WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
                   AND rc.estado = 'disponible'
-              )::int AS pending
+              )::int AS pending,
+              -- "Gestiones pendientes" para la tarjeta de vendedor: los 4
+              -- estados donde todavía falta hacer algo con el candidato
+              -- (nunca gestionado, no atendió, o pidió que lo llamen
+              -- después/en otro momento) — a diferencia de in_progress/
+              -- pending de arriba, que se basan en estado (en_gestion/
+              -- disponible) y por eso mezclan dato_erroneo adentro. Acá se
+              -- filtra directo por resultado_gestion, dato_erroneo queda
+              -- afuera a propósito.
+              COUNT(rc.id) FILTER (
+                WHERE rc.resultado_gestion IN ('no_contesta', 'seguimiento', 'rellamar', 'nuevo')
+              )::int AS pendientes_gestion
             FROM recupero_candidatos rc
             LEFT JOIN users u ON u.id = rc.seller_id
             WHERE rc.dataset_id = $1
@@ -30105,7 +30116,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               recovered: Number(row.recovered || 0),
               rejected: Number(row.rejected || 0),
               in_progress: Number(row.in_progress || 0),
-              pending: Number(row.pending || 0)
+              pending: Number(row.pending || 0),
+              pendientes_gestion: Number(row.pendientes_gestion || 0)
             }
           })),
           sample: sampleRes.rows.map((row) => ({
