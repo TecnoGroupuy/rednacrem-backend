@@ -30009,7 +30009,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           return json(404, { ok: false, message: "Dataset no encontrado" });
         }
 
-        const [counts, assignmentsRes, sampleRes] = await Promise.all([
+        const [counts, assignmentsRes, sampleRes, managementRangeRes] = await Promise.all([
           loadRecuperoDatasetCounts(client, datasetId, organizationId),
           // Desglose por vendedor calculado directo desde recupero_candidatos
           // (agrupando por seller_id), no desde recupero_asignaciones_rango —
@@ -30080,6 +30080,31 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             LIMIT 5
             `,
             [datasetId, organizationId]
+          ),
+          // Rango de fechas de gestión (cuándo se llamó/gestionó al
+          // contacto, no fecha_baja). recupero_candidatos_historial no tiene
+          // una columna fecha_gestion separada — se usa created_at.
+          // tipo_evento IS NULL cubre las filas que realmente registra hoy
+          // el flujo de gestión (POST .../venta y .../gestionar insertan sin
+          // especificar tipo_evento, así que queda NULL — comprobado
+          // leyendo esos dos INSERT); 'gestion' queda por si en el futuro
+          // se empieza a escribir explícito (hoy ningún INSERT del código
+          // lo usa, aunque el check constraint ya lo permite). Se excluyen
+          // a propósito 'asignacion'/'asignacion_directa'/'asignacion_rango'/
+          // 'finalizacion_lote' — son movimientos administrativos, no una
+          // gestión real con la persona.
+          client.query(
+            `
+            SELECT
+              MIN(rch.created_at) AS first_management_at,
+              MAX(rch.created_at) AS last_management_at
+            FROM recupero_candidatos_historial rch
+            JOIN recupero_candidatos rc ON rc.id = rch.candidato_id
+            WHERE rc.dataset_id = $1
+              AND rc.organization_id = $2
+              AND (rch.tipo_evento IS NULL OR rch.tipo_evento = 'gestion')
+            `,
+            [datasetId, organizationId]
           )
         ]);
 
@@ -30095,6 +30120,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         const contactados = counts.recovered + counts.rejected + counts.seguimiento + counts.rellamar;
         const contactPct = counts.total > 0 ? Math.round((contactados / counts.total) * 100) : 0;
 
+        const firstManagementAt = managementRangeRes.rows[0]?.first_management_at || null;
+        const lastManagementAt = managementRangeRes.rows[0]?.last_management_at || null;
+        const managementDays = firstManagementAt && lastManagementAt
+          ? Math.max(0, Math.round((new Date(lastManagementAt) - new Date(firstManagementAt)) / (1000 * 60 * 60 * 24)))
+          : null;
+
         return json(200, {
           dataset: buildRecuperoDatasetPayload(datasetRow),
           counts: {
@@ -30107,6 +30138,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             unassigned: counts.unassigned,
             effectiveness_pct: counts.effectiveness_pct,
             contact_pct: contactPct
+          },
+          management_range: {
+            first_at: firstManagementAt,
+            last_at: lastManagementAt,
+            days: managementDays
           },
           assignments: assignmentsRes.rows.map((row) => ({
             seller_id: row.seller_id,
