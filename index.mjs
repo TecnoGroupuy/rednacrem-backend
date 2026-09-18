@@ -2429,6 +2429,21 @@ function buildRecuperoDatasetPayload(row = {}) {
 // el fijo (dos filas is_system_dataset=false/true conviven sin problema).
 const RECUPERO_FIXED_DATASETS = ["Prioritario — 0 a 3 meses", "General de recupero"];
 
+// Los 7 valores posibles de recupero_candidatos.resultado_gestion (mismo
+// set usado en todos los cálculos de counts/effectiveness de esta sesión) —
+// usado para validar el filtro ?resultado_gestion= de
+// GET /recovery/datasets/:id/candidates y para devolverlos como opciones
+// fijas de ese filtro.
+const RECUPERO_RESULTADO_GESTION_VALUES = [
+  "nuevo",
+  "no_contesta",
+  "seguimiento",
+  "rellamar",
+  "rechazo",
+  "dato_erroneo",
+  "venta"
+];
+
 // Aprovisiona los datasets fijos de una organización si todavía no existen
 // (idempotente: se fija por is_system_dataset + dataset_name, no crea
 // duplicados en llamadas repetidas). Se llama al resolver GET
@@ -30233,6 +30248,21 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
       const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
       const offset = (page - 1) * limit;
+      // Búsqueda por teléfono/celular: parcial, tolerante a formato (con/sin
+      // código de país, guiones, espacios) — se comparan solo los dígitos
+      // de ambos lados, ni el término de búsqueda ni el numero guardado se
+      // usan tal cual.
+      const searchRaw = String(getQueryParam(event, "search") || "").trim();
+      const searchDigits = searchRaw.replace(/\D/g, "");
+      const motivoBajaFilter = String(getQueryParam(event, "motivo_baja") || "").trim();
+      const resultadoGestionFilter = String(getQueryParam(event, "resultado_gestion") || "").trim().toLowerCase();
+      if (resultadoGestionFilter && !RECUPERO_RESULTADO_GESTION_VALUES.includes(resultadoGestionFilter)) {
+        return json(422, {
+          ok: false,
+          message: `resultado_gestion inválido: ${resultadoGestionFilter}`,
+          valid_values: RECUPERO_RESULTADO_GESTION_VALUES
+        });
+      }
 
       const client = createDbClient();
       await client.connect();
@@ -30249,10 +30279,28 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           return json(404, { ok: false, message: "Dataset no encontrado" });
         }
 
-        const [countRes, itemsRes] = await Promise.all([
+        // WHERE dinámico — filtros opcionales, cada uno se agrega solo si
+        // vino en la query string, compartido entre el COUNT y el SELECT
+        // paginado para que "total" refleje el mismo subconjunto filtrado.
+        const filterValues = [datasetId, organizationId];
+        let filterClause = "";
+        if (searchDigits) {
+          filterValues.push(`%${searchDigits}%`);
+          filterClause += ` AND regexp_replace(COALESCE(NULLIF(rc.celular, ''), rc.telefono, ''), '\\D', '', 'g') LIKE $${filterValues.length}`;
+        }
+        if (motivoBajaFilter) {
+          filterValues.push(motivoBajaFilter);
+          filterClause += ` AND rc.motivo_baja = $${filterValues.length}`;
+        }
+        if (resultadoGestionFilter) {
+          filterValues.push(resultadoGestionFilter);
+          filterClause += ` AND rc.resultado_gestion = $${filterValues.length}`;
+        }
+
+        const [countRes, itemsRes, filterOptionsRes] = await Promise.all([
           client.query(
-            `SELECT COUNT(*)::int AS total FROM recupero_candidatos WHERE dataset_id = $1 AND organization_id = $2`,
-            [datasetId, organizationId]
+            `SELECT COUNT(*)::int AS total FROM recupero_candidatos rc WHERE rc.dataset_id = $1 AND rc.organization_id = $2${filterClause}`,
+            filterValues
           ),
           client.query(
             `
@@ -30274,10 +30322,28 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             LEFT JOIN users u ON u.id = rc.seller_id
             WHERE rc.dataset_id = $1
               AND rc.organization_id = $2
+              ${filterClause}
             ORDER BY rc.row_number ASC NULLS LAST, rc.created_at ASC
-            LIMIT $3 OFFSET $4
+            LIMIT $${filterValues.length + 1} OFFSET $${filterValues.length + 2}
             `,
-            [datasetId, organizationId, limit, offset]
+            [...filterValues, limit, offset]
+          ),
+          // Opciones disponibles para poblar el filtro de motivo de baja —
+          // solo los valores que efectivamente existen en este lote, no
+          // todos los posibles del sistema. resultado_gestion no necesita
+          // esto: son los mismos 7 valores fijos ya conocidos en el resto
+          // de Recupero (RECUPERO_RESULTADO_GESTION_VALUES).
+          client.query(
+            `
+            SELECT DISTINCT rc.motivo_baja
+            FROM recupero_candidatos rc
+            WHERE rc.dataset_id = $1
+              AND rc.organization_id = $2
+              AND rc.motivo_baja IS NOT NULL
+              AND rc.motivo_baja <> ''
+            ORDER BY rc.motivo_baja ASC
+            `,
+            [datasetId, organizationId]
           )
         ]);
 
@@ -30299,7 +30365,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           })),
           total: Number(countRes.rows[0]?.total || 0),
           page,
-          limit
+          limit,
+          filters: {
+            motivo_baja: filterOptionsRes.rows.map((row) => row.motivo_baja).filter(Boolean),
+            resultado_gestion: RECUPERO_RESULTADO_GESTION_VALUES
+          }
         });
       } finally {
         await client.end();
