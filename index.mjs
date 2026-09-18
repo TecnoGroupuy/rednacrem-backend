@@ -29826,7 +29826,19 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                   AND rc.estado = 'disponible'
               )::int AS pending,
               COUNT(*) FILTER (WHERE rc.seller_id IS NOT NULL)::int AS assigned_rows,
-              COUNT(*) FILTER (WHERE rc.seller_id IS NULL)::int AS unassigned_rows
+              COUNT(*) FILTER (WHERE rc.seller_id IS NULL)::int AS unassigned_rows,
+              -- Misma fórmula que buildRecuperoCountsSelect (usada por
+              -- /recovery/summary y /recovery/datasets/:id) — se repite acá
+              -- en vez de reutilizar el helper porque esta CTE ya trae sus
+              -- propios nombres de columna (assigned_rows/unassigned_rows en
+              -- vez de assigned/unassigned) y refactorizarla es un cambio
+              -- más grande que el que pide esta tarea.
+              ROUND(
+                100.0
+                * COUNT(*) FILTER (WHERE rc.resultado_gestion = 'venta')
+                / NULLIF(COUNT(*) FILTER (WHERE rc.resultado_gestion IN ('venta', 'rechazo')), 0),
+                0
+              )::int AS effectiveness_pct
             FROM recupero_candidatos rc
             JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
             WHERE rij.organization_id = $1
@@ -29880,6 +29892,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             COALESCE(cc.pending, 0) AS pending,
             COALESCE(cc.assigned_rows, 0) AS assigned_rows,
             COALESCE(cc.unassigned_rows, 0) AS unassigned_rows,
+            cc.effectiveness_pct,
             COALESCE(ac.assignees_count, 0) AS assignees_count,
             ac.assignee_name,
             lm.last_management_at
@@ -29908,7 +29921,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               recovered: Number(row.recovered || 0),
               rejected: Number(row.rejected || 0),
               in_progress: Number(row.in_progress || 0),
-              pending: Number(row.pending || 0)
+              pending: Number(row.pending || 0),
+              effectiveness_pct: Number(row.effectiveness_pct || 0)
             },
             assigned_rows: Number(row.assigned_rows || 0),
             unassigned_rows: Number(row.unassigned_rows || 0),
