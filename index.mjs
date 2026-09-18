@@ -2533,15 +2533,23 @@ async function validateRecuperoSellerIds(client, organizationId, sellerIds) {
 }
 
 async function getRecuperoDatasetSchema(client) {
-  const [jobCols, candidateCols, assignmentTableRes] = await Promise.all([
+  const [jobCols, candidateCols, assignmentTableRes, sellersRosterTableRes] = await Promise.all([
     getTableColumns(client, "recupero_import_jobs"),
     getTableColumns(client, "recupero_candidatos"),
-    client.query(`SELECT to_regclass('public.recupero_asignaciones_rango') AS table_name`)
+    client.query(`SELECT to_regclass('public.recupero_asignaciones_rango') AS table_name`),
+    client.query(`SELECT to_regclass('public.recupero_dataset_sellers') AS table_name`)
   ]);
   return {
     jobCols,
     candidateCols,
-    hasAssignmentsTable: Boolean(assignmentTableRes.rows[0]?.table_name)
+    hasAssignmentsTable: Boolean(assignmentTableRes.rows[0]?.table_name),
+    // Migración 064 — opcional/gateada a propósito (no se agrega a
+    // getRecuperoDatasetSchemaMissing): si todavía no corrió en producción,
+    // Agregar/Quitar vendedor y el desglose por vendedor siguen funcionando
+    // igual que antes, solo sin la persistencia de "vendedor sin datos
+    // todavía" — no hace falta bloquear todos los endpoints de Recupero por
+    // esta pieza nueva.
+    hasSellersRosterTable: Boolean(sellersRosterTableRes.rows[0]?.table_name)
   };
 }
 
@@ -30182,18 +30190,60 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           return json(404, { ok: false, message: "Dataset no encontrado" });
         }
 
-        const [counts, assignmentsRes, sampleRes, managementRangeRes] = await Promise.all([
-          loadRecuperoDatasetCounts(client, datasetId, organizationId),
-          // Desglose por vendedor calculado directo desde recupero_candidatos
-          // (agrupando por seller_id), no desde recupero_asignaciones_rango —
-          // así cuenta por igual a los candidatos que llegaron a tener
-          // vendedor por /assignments (rango), por /direct-assignments
-          // (checkbox puntual) o por /distribute, sin importar cuál de los 3
-          // mecanismos se usó. La tabla de rangos sigue existiendo para lo
-          // que sí le compete (bloquear rangos contiguos contra reasignación
-          // en /assignments), pero ya no es la fuente de este desglose.
-          client.query(
+        // Desglose por vendedor calculado directo desde recupero_candidatos
+        // (agrupando por seller_id), no desde recupero_asignaciones_rango —
+        // así cuenta por igual a los candidatos que llegaron a tener
+        // vendedor por /assignments (rango), por /direct-assignments
+        // (checkbox puntual) o por /distribute, sin importar cuál de los 3
+        // mecanismos se usó. La tabla de rangos sigue existiendo para lo
+        // que sí le compete (bloquear rangos contiguos contra reasignación
+        // en /assignments), pero ya no es la fuente de este desglose.
+        //
+        // seller_ids_union junta a los vendedores que ya tienen candidatos
+        // en este dataset CON los del roster (migración 064) que todavía
+        // no recibieron ninguno — sin esto, un vendedor agregado a un lote
+        // vacío desaparecía de "Vendedores asignados" al recargar la
+        // página, porque este query solo miraba recupero_candidatos.
+        const assignmentsQuery = schema.hasSellersRosterTable
+          ? `
+            WITH seller_ids_union AS (
+              SELECT DISTINCT rc.seller_id
+              FROM recupero_candidatos rc
+              WHERE rc.dataset_id = $1
+                AND rc.organization_id = $2
+                AND rc.seller_id IS NOT NULL
+              UNION
+              SELECT rds.seller_id
+              FROM recupero_dataset_sellers rds
+              WHERE rds.dataset_id = $1
+            )
+            SELECT
+              siu.seller_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
+              COUNT(rc.id)::int AS assigned,
+              COUNT(rc.id) FILTER (WHERE rc.resultado_gestion = 'venta')::int AS recovered,
+              COUNT(rc.id) FILTER (WHERE rc.resultado_gestion = 'rechazo')::int AS rejected,
+              COUNT(rc.id) FILTER (
+                WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                  AND rc.estado = 'en_gestion'
+              )::int AS in_progress,
+              COUNT(rc.id) FILTER (
+                WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                  AND rc.estado = 'disponible'
+              )::int AS pending,
+              COUNT(rc.id) FILTER (
+                WHERE rc.resultado_gestion IN ('no_contesta', 'seguimiento', 'rellamar', 'nuevo')
+              )::int AS pendientes_gestion
+            FROM seller_ids_union siu
+            LEFT JOIN users u ON u.id = siu.seller_id
+            LEFT JOIN recupero_candidatos rc
+              ON rc.seller_id = siu.seller_id
+              AND rc.dataset_id = $1
+              AND rc.organization_id = $2
+            GROUP BY siu.seller_id, u.nombre, u.apellido
+            ORDER BY seller_name ASC NULLS LAST
             `
+          : `
             SELECT
               rc.seller_id,
               COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
@@ -30226,9 +30276,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               AND rc.seller_id IS NOT NULL
             GROUP BY rc.seller_id, u.nombre, u.apellido
             ORDER BY seller_name ASC NULLS LAST
-            `,
-            [datasetId, organizationId]
-          ),
+            `;
+
+        const [counts, assignmentsRes, sampleRes, managementRangeRes] = await Promise.all([
+          loadRecuperoDatasetCounts(client, datasetId, organizationId),
+          client.query(assignmentsQuery, [datasetId, organizationId]),
           client.query(
             `
             SELECT
@@ -31146,6 +31198,22 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             sellerIds,
             organizationId
           );
+          // Roster persistente (migración 064) — el vendedor queda "en el
+          // lote" aunque no haya habido nada libre para repartirle
+          // (distributedCount puede ser 0). Sin esto, un vendedor agregado
+          // a un lote vacío no quedaba registrado en ningún lado: "Vendedores
+          // asignados" se arma agrupando seller_id sobre recupero_candidatos,
+          // así que desaparecía al recargar.
+          if (schema.hasSellersRosterTable) {
+            await client.query(
+              `
+              INSERT INTO recupero_dataset_sellers (dataset_id, seller_id)
+              SELECT $1, UNNEST($2::uuid[])
+              ON CONFLICT (dataset_id, seller_id) DO NOTHING
+              `,
+              [datasetId, sellerIds]
+            );
+          }
           await client.query("COMMIT");
           const counts = await loadRecuperoDatasetCounts(client, datasetId, organizationId);
           return json(200, {
@@ -31275,17 +31343,29 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             );
             movedCount = updateRes.rowCount || 0;
           } else if (mode === "roundrobin") {
+            // "Vendedores restantes del lote" incluye tanto a los que ya
+            // tienen candidatos acá como a los del roster (migración 064)
+            // que todavía no recibieron ninguno — un vendedor agregado a un
+            // lote vacío sigue siendo un destino válido de redistribución.
             const remainingRes = await client.query(
               `
-              SELECT DISTINCT rc.seller_id
-              FROM recupero_candidatos rc
-              JOIN users u ON u.id = rc.seller_id
-              WHERE rc.dataset_id = $1
-                AND rc.organization_id = $2
-                AND rc.seller_id IS NOT NULL
-                AND rc.seller_id != $3
-                AND u.status = 'approved'
-              ORDER BY rc.seller_id ASC
+              SELECT DISTINCT u.id AS seller_id
+              FROM users u
+              WHERE u.status = 'approved'
+                AND u.id != $3
+                AND (
+                  EXISTS (
+                    SELECT 1 FROM recupero_candidatos rc
+                    WHERE rc.dataset_id = $1 AND rc.organization_id = $2 AND rc.seller_id = u.id
+                  )
+                  ${schema.hasSellersRosterTable ? `
+                  OR EXISTS (
+                    SELECT 1 FROM recupero_dataset_sellers rds
+                    WHERE rds.dataset_id = $1 AND rds.seller_id = u.id
+                  )
+                  ` : ''}
+                )
+              ORDER BY u.id ASC
               `,
               [datasetId, organizationId, sellerId]
             );
@@ -31363,6 +31443,15 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               [datasetId, organizationId, sellerId]
             );
             movedCount = unassignRes.rowCount || 0;
+          }
+
+          // Roster persistente (migración 064) — "quitar" saca al vendedor
+          // del lote de verdad, no solo le desasigna los datos que tenía.
+          if (schema.hasSellersRosterTable) {
+            await client.query(
+              `DELETE FROM recupero_dataset_sellers WHERE dataset_id = $1 AND seller_id = $2`,
+              [datasetId, sellerId]
+            );
           }
 
           await client.query("COMMIT");
