@@ -30095,6 +30095,61 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery activity trend", error: error.message });
     }
   }
+  // GET /recovery/stale-pending — candidatos sin resolver (no vendidos ni
+  // rechazados) que llevan 15+ días sin ninguna gestión real, a nivel de
+  // toda la organización. Umbral fijo a propósito (no query param): es una
+  // alerta operativa simple, no una configuración que el equipo vaya a
+  // andar tocando — si 15 no sirve en la práctica, es un cambio de una
+  // línea acá, no vale la pena pagar el costo de UI de un selector desde
+  // el día uno.
+  if (method === "GET" && recoveryPath === "/recovery/stale-pending") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const result = await client.query(
+          `
+          SELECT
+            COUNT(*) FILTER (
+              WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+            )::int AS total_pending,
+            COUNT(*) FILTER (
+              WHERE rc.resultado_gestion NOT IN ('venta', 'rechazo')
+                AND (rc.fecha_ultimo_contacto IS NULL OR rc.fecha_ultimo_contacto < now() - interval '15 days')
+            )::int AS stale_count
+          FROM recupero_candidatos rc
+          JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+          WHERE rij.organization_id = $1
+          `,
+          [organizationId]
+        );
+
+        const row = result.rows[0] || {};
+        return json(200, {
+          ok: true,
+          threshold_days: 15,
+          total_pending: Number(row.total_pending || 0),
+          stale_count: Number(row.stale_count || 0)
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery stale pending", error: error.message });
+    }
+  }
   if (method === "GET" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/)) {
     const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/);
     const datasetId = match?.[1] || null;
