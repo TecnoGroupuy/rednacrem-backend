@@ -30028,6 +30028,73 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to load recovery sellers", error: error.message });
     }
   }
+  // GET /recovery/activity-trend?days=14 — gestiones reales por día en los
+  // últimos N días, agregado a nivel de toda la organización (cruza todos
+  // los datasets, no uno a la vez) — la vista "En producción" no tenía
+  // ninguna noción de ritmo/tendencia, solo fotos estáticas por lote.
+  // Mismo filtro tipo_evento IS NULL/'gestion' que management_range en
+  // GET /recovery/datasets/:id y el CTE last_management de
+  // GET /recovery/datasets (commit 6e26b96) — cubre las filas que hoy
+  // escriben /venta y /gestionar, no asignaciones ni cierres de lote.
+  if (method === "GET" && recoveryPath === "/recovery/activity-trend") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const days = Math.min(30, Math.max(1, Number(getQueryParam(event, "days") || 14)));
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const result = await client.query(
+          `
+          SELECT
+            date_trunc('day', rch.created_at) AS day,
+            COUNT(*)::int AS count
+          FROM recupero_candidatos_historial rch
+          JOIN recupero_candidatos rc ON rc.id = rch.candidato_id
+          WHERE rc.organization_id = $1
+            AND rch.created_at >= (now() - ($2::int * interval '1 day'))
+            AND (rch.tipo_evento IS NULL OR rch.tipo_evento = 'gestion')
+          GROUP BY 1
+          ORDER BY 1
+          `,
+          [organizationId, days]
+        );
+
+        // Se completan los días sin ninguna gestión con count:0 — un gráfico
+        // de tendencia con huecos (solo los días que tuvieron actividad)
+        // sería engañoso, parecería que el eje X salta de fecha en fecha en
+        // vez de mostrar un día realmente inactivo.
+        const countByDay = new Map(
+          result.rows.map((row) => [new Date(row.day).toISOString().slice(0, 10), Number(row.count || 0)])
+        );
+        const series = [];
+        const today = new Date();
+        for (let i = days - 1; i >= 0; i -= 1) {
+          const d = new Date(today);
+          d.setUTCDate(d.getUTCDate() - i);
+          const key = d.toISOString().slice(0, 10);
+          series.push({ date: key, count: countByDay.get(key) || 0 });
+        }
+
+        return json(200, { ok: true, days, series });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery activity trend", error: error.message });
+    }
+  }
   if (method === "GET" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/)) {
     const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)$/);
     const datasetId = match?.[1] || null;
