@@ -31175,6 +31175,213 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       return json(500, { ok: false, message: "Failed to distribute recovery dataset", error: error.message });
     }
   }
+  // POST /recovery/datasets/:id/remove-seller
+  // Body: { seller_id: uuid, mode: 'specific'|'roundrobin'|'pool', new_seller_id?: uuid }
+  // Reemplaza a POST /lead-batches/:id/remove-seller, que operaba sobre
+  // lead_batches/lead_batch_sellers — un id de Recupero (recupero_import_jobs)
+  // nunca matcheaba ahí, así que este flujo devolvía siempre 404 "Lote no
+  // encontrado". No existe un roster de vendedores por lote en Recupero (ver
+  // GET /recovery/datasets/:id -> assignments, que sale de un GROUP BY
+  // rc.seller_id sobre recupero_candidatos) — "vendedores restantes del
+  // lote" para el modo roundrobin se deriva de los candidatos, no de una
+  // tabla aparte.
+  // Mismos 3 modos que ya ofrece el modal "Quitar vendedor" del frontend
+  // (specific/roundrobin/pool); solo se tocan candidatos NO terminales
+  // (resultado_gestion NOT IN venta/rechazo) — una venta o rechazo ya
+  // registrado mantiene su seller_id como parte del historial, igual que en
+  // /distribute y en DELETE /recovery/assignments/:id.
+  if (method === "POST" && recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/remove-seller$/)) {
+    const match = recoveryPath.match(/^\/recovery\/datasets\/([^/]+)\/remove-seller$/);
+    const datasetId = match?.[1] || null;
+    if (!isValidUuid(datasetId)) {
+      return json(400, { ok: false, message: "dataset_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const body = safeParseBody(event);
+      if (body === null) {
+        return json(400, { ok: false, message: "Invalid JSON body" });
+      }
+      const sellerId = String(body?.seller_id || "").trim();
+      const mode = String(body?.mode || "").trim();
+      const newSellerId = String(body?.new_seller_id || "").trim() || null;
+
+      if (!isValidUuid(sellerId)) {
+        return json(400, { ok: false, message: "seller_id es requerido" });
+      }
+      if (!["specific", "roundrobin", "pool"].includes(mode)) {
+        return json(400, { ok: false, message: "mode debe ser specific, roundrobin o pool" });
+      }
+      if (mode === "specific") {
+        if (!newSellerId) {
+          return json(400, { ok: false, message: "new_seller_id es requerido para mode=specific" });
+        }
+        if (newSellerId === sellerId) {
+          return json(400, { ok: false, message: "El vendedor destino debe ser distinto al vendedor a retirar" });
+        }
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+        const schema = await getRecuperoDatasetSchema(client);
+        const missing = getRecuperoDatasetSchemaMissing(schema, { requireAssignments: false });
+        if (missing.length) {
+          return json(409, { ok: false, message: "Migracion de recovery datasets pendiente", missing });
+        }
+
+        const datasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
+        if (!datasetRow) {
+          return json(404, { ok: false, message: "Dataset no encontrado" });
+        }
+
+        if (mode === "specific") {
+          try {
+            await validateRecuperoSellerIds(client, organizationId, [newSellerId]);
+          } catch (error) {
+            if (error?.status) return json(error.status, { ok: false, message: error.message });
+            throw error;
+          }
+        }
+
+        await client.query("BEGIN");
+        try {
+          let movedCount = 0;
+
+          if (mode === "specific") {
+            const updateRes = await client.query(
+              `
+              UPDATE recupero_candidatos
+              SET seller_id = $3,
+                  estado = 'en_gestion',
+                  fecha_asignacion = NOW(),
+                  updated_at = NOW()
+              WHERE dataset_id = $1
+                AND organization_id = $2
+                AND seller_id = $4
+                AND resultado_gestion NOT IN ('venta', 'rechazo')
+              `,
+              [datasetId, organizationId, newSellerId, sellerId]
+            );
+            movedCount = updateRes.rowCount || 0;
+          } else if (mode === "roundrobin") {
+            const remainingRes = await client.query(
+              `
+              SELECT DISTINCT rc.seller_id
+              FROM recupero_candidatos rc
+              JOIN users u ON u.id = rc.seller_id
+              WHERE rc.dataset_id = $1
+                AND rc.organization_id = $2
+                AND rc.seller_id IS NOT NULL
+                AND rc.seller_id != $3
+                AND u.status = 'approved'
+              ORDER BY rc.seller_id ASC
+              `,
+              [datasetId, organizationId, sellerId]
+            );
+            const remainingSellerIds = remainingRes.rows.map((row) => row.seller_id);
+
+            if (remainingSellerIds.length) {
+              const candidatesRes = await client.query(
+                `
+                SELECT id
+                FROM recupero_candidatos
+                WHERE dataset_id = $1
+                  AND organization_id = $2
+                  AND seller_id = $3
+                  AND resultado_gestion NOT IN ('venta', 'rechazo')
+                ORDER BY row_number ASC NULLS LAST, created_at ASC, id ASC
+                `,
+                [datasetId, organizationId, sellerId]
+              );
+              const candidateIds = candidatesRes.rows.map((row) => row.id);
+              const assignedSellerIds = candidateIds.map((_id, index) => remainingSellerIds[index % remainingSellerIds.length]);
+              const chunkSize = 500;
+              for (let i = 0; i < candidateIds.length; i += chunkSize) {
+                const idChunk = candidateIds.slice(i, i + chunkSize);
+                const sellerChunk = assignedSellerIds.slice(i, i + chunkSize);
+                await client.query(
+                  `
+                  UPDATE recupero_candidatos rc
+                  SET seller_id = v.seller_id,
+                      estado = 'en_gestion',
+                      fecha_asignacion = NOW(),
+                      updated_at = NOW()
+                  FROM (
+                    SELECT UNNEST($1::uuid[]) AS id,
+                           UNNEST($2::uuid[]) AS seller_id
+                  ) v
+                  WHERE rc.id = v.id
+                  `,
+                  [idChunk, sellerChunk]
+                );
+              }
+              movedCount = candidateIds.length;
+            } else {
+              // Sin otros vendedores en el lote — mismo fallback que la
+              // versión de Lotes de captación: queda sin asignar.
+              const unassignRes = await client.query(
+                `
+                UPDATE recupero_candidatos
+                SET seller_id = NULL,
+                    fecha_asignacion = NULL,
+                    estado = 'disponible',
+                    updated_at = NOW()
+                WHERE dataset_id = $1
+                  AND organization_id = $2
+                  AND seller_id = $3
+                  AND resultado_gestion NOT IN ('venta', 'rechazo')
+                `,
+                [datasetId, organizationId, sellerId]
+              );
+              movedCount = unassignRes.rowCount || 0;
+            }
+          } else {
+            // mode === 'pool'
+            const unassignRes = await client.query(
+              `
+              UPDATE recupero_candidatos
+              SET seller_id = NULL,
+                  fecha_asignacion = NULL,
+                  estado = 'disponible',
+                  updated_at = NOW()
+              WHERE dataset_id = $1
+                AND organization_id = $2
+                AND seller_id = $3
+                AND resultado_gestion NOT IN ('venta', 'rechazo')
+              `,
+              [datasetId, organizationId, sellerId]
+            );
+            movedCount = unassignRes.rowCount || 0;
+          }
+
+          await client.query("COMMIT");
+          return json(200, {
+            ok: true,
+            message: "Vendedor retirado correctamente",
+            moved_count: movedCount
+          });
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to remove recovery dataset seller", error: error.message });
+    }
+  }
   if (method === "DELETE" && recoveryPath.match(/^\/recovery\/assignments\/([^/]+)$/)) {
     const match = recoveryPath.match(/^\/recovery\/assignments\/([^/]+)$/);
     const assignmentId = match?.[1] || null;
