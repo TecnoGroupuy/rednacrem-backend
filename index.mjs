@@ -19941,6 +19941,89 @@ async function routeRequest(event) {
       return json(500, { ok: false, message: "Failed to register recupero management", error: error.message });
     }
   }
+  // GET /api/recupero/candidatos/:id/historial
+  // Secuencia completa de gestiones reales de un candidato (para "Ver
+  // historial" en la pestaña Resultados) — no existía ningún endpoint que
+  // devolviera esto todavía. estado_nuevo en recupero_candidatos_historial
+  // guarda el resultado_gestion resultante de cada evento (confirmado
+  // leyendo los INSERT de /venta y /gestionar), así que la secuencia de
+  // estado_nuevo ordenada por created_at ASC es directamente
+  // no_contesta → seguimiento → venta (el ejemplo de la tarea). No se
+  // usa estado_anterior para reconstruir la cadena — el INSERT de /venta
+  // lo deja hardcodeado en 'en_gestion' en vez del resultado_gestion previo
+  // real, así que no es confiable como fuente de la secuencia (aunque no
+  // hace falta para mostrarla: created_at + estado_nuevo alcanza).
+  if (method === "GET" && path.match(/\/api\/recupero\/candidatos\/([^/]+)\/historial$/)) {
+    const match = path.match(/\/api\/recupero\/candidatos\/([^/]+)\/historial$/);
+    const candidatoId = match?.[1] || null;
+    if (!isValidUuid(candidatoId)) {
+      return json(400, { ok: false, message: "candidato_id invalido" });
+    }
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        const candidatoRes = await client.query(
+          `SELECT id, nombre, apellido FROM recupero_candidatos WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [candidatoId, organizationId]
+        );
+        const candidato = candidatoRes.rows[0];
+        if (!candidato) {
+          return json(404, { ok: false, message: "Candidato no encontrado" });
+        }
+
+        const historialRes = await client.query(
+          `
+          SELECT
+            rch.id,
+            rch.estado_nuevo AS resultado_gestion,
+            rch.created_at,
+            rch.seller_id,
+            COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
+            rch.nota
+          FROM recupero_candidatos_historial rch
+          LEFT JOIN users u ON u.id = rch.seller_id
+          WHERE rch.candidato_id = $1
+            AND (rch.tipo_evento IS NULL OR rch.tipo_evento = 'gestion')
+          ORDER BY rch.created_at ASC, rch.id ASC
+          `,
+          [candidatoId]
+        );
+
+        return json(200, {
+          ok: true,
+          candidato: {
+            id: candidato.id,
+            contacto: [candidato.nombre, candidato.apellido].filter(Boolean).join(" ").trim() || null
+          },
+          historial: historialRes.rows.map((row) => ({
+            id: row.id,
+            resultado_gestion: row.resultado_gestion,
+            fecha: row.created_at,
+            seller_id: row.seller_id || null,
+            seller_name: row.seller_name || null,
+            nota: row.nota || null
+          }))
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recupero candidate historial", error: error.message });
+    }
+  }
   if (method === "GET" && path.endsWith("/api/recupero/daily-stats")) {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
@@ -30148,6 +30231,185 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
   // andar tocando — si 15 no sirve en la práctica, es un cambio de una
   // línea acá, no vale la pena pagar el costo de UI de un selector desde
   // el día uno.
+  // GET /recovery/resultados?page=&limit=&desde=&hasta=&vendedor_id=&medio_pago=
+  // Listado de "Resultados": todo candidato con al menos una gestión real
+  // (resultado_gestion <> 'nuevo'), cruzando todos los lotes/datasets de la
+  // organización — no solo los que llegaron a un resultado final
+  // (venta/rechazo/dato_erroneo). Reemplaza el banner "datos de ejemplo" de
+  // la pestaña Resultados, que hasta ahora no tenía ningún endpoint real
+  // detrás (confirmado leyendo RecuperoResultadosView.jsx — el propio
+  // comentario del componente decía "no existe hoy ningún endpoint").
+  //
+  // No filtra por dataset_status ni hace join contra recupero_import_jobs
+  // a propósito — organization_id ya es una columna directa y NOT NULL en
+  // recupero_candidatos (a diferencia de dataset_id, que puede ser NULL
+  // para candidatos creados vía aplicarBajaContactProduct sin pasar por un
+  // dataset). Un resultado de gestión sigue siendo válido aunque el lote
+  // que lo originó ya se haya cerrado.
+  if (method === "GET" && recoveryPath === "/recovery/resultados") {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      if (roleError) return roleError;
+
+      const page = Math.max(1, Number(getQueryParam(event, "page") || 1));
+      const limit = Math.min(200, Math.max(1, Number(getQueryParam(event, "limit") || 50)));
+      const offset = (page - 1) * limit;
+      const desde = String(getQueryParam(event, "desde") || "").trim() || null;
+      const hasta = String(getQueryParam(event, "hasta") || "").trim() || null;
+      const vendedorId = String(getQueryParam(event, "vendedor_id") || "").trim() || null;
+      const medioPago = String(getQueryParam(event, "medio_pago") || "").trim() || null;
+      if (vendedorId && !isValidUuid(vendedorId)) {
+        return json(400, { ok: false, message: "vendedor_id invalido" });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const organizationId = await resolveOrganizationId(client, dbUser, event);
+
+        // WHERE dinámico — mismo patrón ya usado en GET
+        // /recovery/datasets/:id/candidates: cada filtro se agrega solo si
+        // vino en la query string, compartido entre el COUNT y el SELECT
+        // paginado.
+        const filterValues = [organizationId];
+        let filterClause = "";
+        if (desde) {
+          filterValues.push(desde);
+          filterClause += ` AND rc.fecha_ultimo_contacto >= $${filterValues.length}::date`;
+        }
+        if (hasta) {
+          filterValues.push(hasta);
+          filterClause += ` AND rc.fecha_ultimo_contacto < ($${filterValues.length}::date + interval '1 day')`;
+        }
+        if (vendedorId) {
+          filterValues.push(vendedorId);
+          filterClause += ` AND rc.seller_id = $${filterValues.length}::uuid`;
+        }
+        // medio_pago solo puede matchear ventas (es la única fuente de ese
+        // dato) — el LEFT JOIN LATERAL de abajo ya deja medio_pago en NULL
+        // para todo lo que no sea resultado_gestion = 'venta', así que
+        // agregar esta condición al WHERE excluye naturalmente al resto sin
+        // necesidad de un caso especial.
+        if (medioPago) {
+          filterValues.push(medioPago);
+          filterClause += ` AND s.medio_pago = $${filterValues.length}`;
+        }
+
+        const [countRes, itemsRes, vendedoresRes, mediosPagoRes] = await Promise.all([
+          client.query(
+            `
+            SELECT COUNT(*)::int AS total
+            FROM recupero_candidatos rc
+            LEFT JOIN LATERAL (
+              SELECT sl.medio_pago
+              FROM sales sl
+              WHERE sl.contact_id = rc.contact_id
+              ORDER BY sl.created_at DESC
+              LIMIT 1
+            ) s ON rc.resultado_gestion = 'venta'
+            WHERE rc.organization_id = $1
+              AND rc.resultado_gestion <> 'nuevo'
+              ${filterClause}
+            `,
+            filterValues
+          ),
+          client.query(
+            `
+            SELECT
+              rc.id,
+              rc.nombre,
+              rc.apellido,
+              rc.resultado_gestion,
+              rc.seller_id,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS seller_name,
+              rc.fecha_ultimo_contacto,
+              s.medio_pago,
+              COALESCE(hc.n, 0) AS historial_count
+            FROM recupero_candidatos rc
+            LEFT JOIN users u ON u.id = rc.seller_id
+            LEFT JOIN LATERAL (
+              SELECT sl.medio_pago
+              FROM sales sl
+              WHERE sl.contact_id = rc.contact_id
+              ORDER BY sl.created_at DESC
+              LIMIT 1
+            ) s ON rc.resultado_gestion = 'venta'
+            LEFT JOIN (
+              SELECT candidato_id, COUNT(*)::int AS n
+              FROM recupero_candidatos_historial
+              WHERE tipo_evento IS NULL OR tipo_evento = 'gestion'
+              GROUP BY candidato_id
+            ) hc ON hc.candidato_id = rc.id
+            WHERE rc.organization_id = $1
+              AND rc.resultado_gestion <> 'nuevo'
+              ${filterClause}
+            ORDER BY rc.fecha_ultimo_contacto DESC NULLS LAST, rc.id ASC
+            LIMIT $${filterValues.length + 1} OFFSET $${filterValues.length + 2}
+            `,
+            [...filterValues, limit, offset]
+          ),
+          client.query(
+            `
+            SELECT DISTINCT rc.seller_id AS value,
+              COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre) AS label
+            FROM recupero_candidatos rc
+            JOIN users u ON u.id = rc.seller_id
+            WHERE rc.organization_id = $1
+              AND rc.resultado_gestion <> 'nuevo'
+            ORDER BY label ASC
+            `,
+            [organizationId]
+          ),
+          client.query(
+            `
+            SELECT DISTINCT sl.medio_pago AS value
+            FROM sales sl
+            JOIN recupero_candidatos rc ON rc.contact_id = sl.contact_id
+            WHERE rc.organization_id = $1
+              AND rc.resultado_gestion = 'venta'
+              AND sl.medio_pago IS NOT NULL
+              AND sl.medio_pago <> ''
+            ORDER BY sl.medio_pago ASC
+            `,
+            [organizationId]
+          )
+        ]);
+
+        return json(200, {
+          ok: true,
+          items: itemsRes.rows.map((row) => ({
+            id: row.id,
+            contacto: [row.nombre, row.apellido].filter(Boolean).join(" ").trim() || null,
+            resultado_gestion: row.resultado_gestion,
+            seller_id: row.seller_id || null,
+            seller_name: row.seller_name || null,
+            fecha_ultimo_contacto: row.fecha_ultimo_contacto || null,
+            medio_pago: row.medio_pago || null,
+            historial_count: Number(row.historial_count || 0),
+            has_historial: Number(row.historial_count || 0) > 1
+          })),
+          total: Number(countRes.rows[0]?.total || 0),
+          page,
+          limit,
+          filters: {
+            vendedores: vendedoresRes.rows.map((row) => ({ value: row.value, label: row.label })),
+            medios_pago: mediosPagoRes.rows.map((row) => row.value).filter(Boolean)
+          }
+        });
+      } finally {
+        await client.end();
+      }
+    } catch (error) {
+      return json(500, { ok: false, message: "Failed to load recovery resultados", error: error.message });
+    }
+  }
   if (method === "GET" && recoveryPath === "/recovery/stale-pending") {
     try {
       const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
