@@ -1168,6 +1168,7 @@ const RECUPERO_SIMPLE_FILTER_FIELDS = new Set([
   "producto",
   "departamento",
   "vendedor_asignado",
+  "vendedor_origen",
   "precio_min",
   "precio_max",
   "lote"
@@ -1329,6 +1330,18 @@ async function fetchRecuperoContactos({
   if (lotes.length) {
     conditions.push(`rc.batch_id = ANY($${idx}::uuid[])`);
     values.push(lotes);
+    idx += 1;
+  }
+
+  // vendedor_origen: quién tenía al cliente antes de la baja (columna de
+  // texto libre en recupero_candidatos, no un user_id) — a diferencia de
+  // vendedor_asignado (seller_id, quién lo está gestionando ahora).
+  const vendedoresOrigen = simpleFilters?.vendedor_origen
+    ? (Array.isArray(simpleFilters.vendedor_origen) ? simpleFilters.vendedor_origen : [simpleFilters.vendedor_origen])
+    : [];
+  if (vendedoresOrigen.length) {
+    conditions.push(`LOWER(rc.vendedor_origen) = ANY($${idx}::text[])`);
+    values.push(vendedoresOrigen.map((v) => v.toLowerCase()));
     idx += 1;
   }
 
@@ -20293,7 +20306,8 @@ async function routeRequest(event) {
           vendedoresRes,
           lotesRes,
           hasMotivoNullRes,
-          hasEstadoNullRes
+          hasEstadoNullRes,
+          vendedorOrigenRes
         ] = await Promise.all([
           client.query(
             `
@@ -20453,6 +20467,25 @@ async function routeRequest(event) {
             `
             ,
             [organizationId]
+          ),
+          // A diferencia de motivo/producto/departamento/vendedor_asignado
+          // de arriba (que salen de contact_products/contacts/lead_batches,
+          // el modelo viejo de Recupero), vendedor_origen es una columna
+          // directa de recupero_candidatos — se lee de ahí para que las
+          // opciones del dropdown coincidan con los valores reales que
+          // fetchRecuperoContactos puede filtrar.
+          client.query(
+            `
+            SELECT LOWER(TRIM(rc.vendedor_origen)) AS value, MAX(TRIM(rc.vendedor_origen)) AS label
+            FROM recupero_candidatos rc
+            WHERE rc.organization_id = $1
+              AND rc.vendedor_origen IS NOT NULL
+              AND rc.vendedor_origen <> ''
+            GROUP BY LOWER(TRIM(rc.vendedor_origen))
+            ORDER BY label
+            `
+            ,
+            [organizationId]
           )
         ]);
 
@@ -20497,6 +20530,10 @@ async function routeRequest(event) {
           lote: lotesRes.rows.map((row) => ({
             value: row.value,
             label: toLabel(row.value, row.label)
+          })),
+          vendedor_origen: vendedorOrigenRes.rows.map((row) => ({
+            value: row.value,
+            label: toLabel(row.value, row.label)
           }))
         };
 
@@ -20508,7 +20545,8 @@ async function routeRequest(event) {
             data.producto.length === 0 &&
             data.departamento.length === 0 &&
             data.vendedor_asignado.length === 0 &&
-            data.lote.length === 0,
+            data.lote.length === 0 &&
+            data.vendedor_origen.length === 0,
           meta: { source: "recupero-filtros", request_id: requestId }
         });
       } finally {
