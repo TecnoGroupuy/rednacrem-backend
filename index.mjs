@@ -30427,6 +30427,12 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       try {
         const organizationId = await resolveOrganizationId(client, dbUser, event);
 
+        // organization_id directo en recupero_candidatos, sin join contra
+        // recupero_import_jobs — un candidato puede tener dataset_id NULL
+        // (creado vía aplicarBajaContactProduct sin pasar por un dataset),
+        // y el INNER JOIN anterior lo excluía en silencio del conteo. Bug
+        // encontrado durante la tarea de "Resultados" (commit 9d95584),
+        // corregido acá por separado.
         const result = await client.query(
           `
           SELECT
@@ -30438,8 +30444,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                 AND (rc.fecha_ultimo_contacto IS NULL OR rc.fecha_ultimo_contacto < now() - interval '15 days')
             )::int AS stale_count
           FROM recupero_candidatos rc
-          JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
-          WHERE rij.organization_id = $1
+          WHERE rc.organization_id = $1
           `,
           [organizationId]
         );
