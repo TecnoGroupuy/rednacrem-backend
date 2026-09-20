@@ -29938,6 +29938,58 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         // pestaña Lotes de Recupero. Idempotente — ver ensureRecuperoSystemDatasets.
         await ensureRecuperoSystemDatasets(client, organizationId, dbUser?.id);
 
+        // Mismo criterio que la unión candidatos ∪ roster ya usada en
+        // GET /recovery/datasets/:id (assignments, commit 4d2d866) —
+        // gateado igual, con schema.hasSellersRosterTable. Sin esto, un
+        // vendedor agregado a un lote sin datos libres quedaba invisible
+        // en la tarjeta del listado (assignee_name/assignees_count),
+        // aunque el detalle del lote ya lo mostrara bien.
+        const assigneeCountsCte = schema.hasSellersRosterTable
+          ? `
+            assignee_counts AS (
+              WITH seller_ids_union AS (
+                SELECT rc.dataset_id, rc.seller_id
+                FROM recupero_candidatos rc
+                JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+                WHERE rij.organization_id = $1
+                  AND rc.seller_id IS NOT NULL
+                UNION
+                SELECT rds.dataset_id, rds.seller_id
+                FROM recupero_dataset_sellers rds
+                JOIN recupero_import_jobs rij2 ON rij2.id = rds.dataset_id
+                WHERE rij2.organization_id = $1
+              )
+              SELECT
+                siu.dataset_id,
+                COUNT(DISTINCT siu.seller_id)::int AS assignees_count,
+                CASE
+                  WHEN COUNT(DISTINCT siu.seller_id) = 1
+                    THEN MAX(COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre))
+                  ELSE NULL
+                END AS assignee_name
+              FROM seller_ids_union siu
+              LEFT JOIN users u ON u.id = siu.seller_id
+              GROUP BY siu.dataset_id
+            )
+            `
+          : `
+            assignee_counts AS (
+              SELECT
+                rc.dataset_id,
+                COUNT(DISTINCT rc.seller_id) FILTER (WHERE rc.seller_id IS NOT NULL)::int AS assignees_count,
+                CASE
+                  WHEN COUNT(DISTINCT rc.seller_id) FILTER (WHERE rc.seller_id IS NOT NULL) = 1
+                    THEN MAX(COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre))
+                  ELSE NULL
+                END AS assignee_name
+              FROM recupero_candidatos rc
+              JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
+              LEFT JOIN users u ON u.id = rc.seller_id
+              WHERE rij.organization_id = $1
+              GROUP BY rc.dataset_id
+            )
+            `;
+
         const result = await client.query(
           `
           WITH candidate_counts AS (
@@ -29973,21 +30025,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             WHERE rij.organization_id = $1
             GROUP BY rc.dataset_id
           ),
-          assignee_counts AS (
-            SELECT
-              rc.dataset_id,
-              COUNT(DISTINCT rc.seller_id) FILTER (WHERE rc.seller_id IS NOT NULL)::int AS assignees_count,
-              CASE
-                WHEN COUNT(DISTINCT rc.seller_id) FILTER (WHERE rc.seller_id IS NOT NULL) = 1
-                  THEN MAX(COALESCE(NULLIF(TRIM(CONCAT(u.nombre, ' ', u.apellido)), ''), u.nombre))
-                ELSE NULL
-              END AS assignee_name
-            FROM recupero_candidatos rc
-            JOIN recupero_import_jobs rij ON rij.id = rc.dataset_id
-            LEFT JOIN users u ON u.id = rc.seller_id
-            WHERE rij.organization_id = $1
-            GROUP BY rc.dataset_id
-          ),
+          ${assigneeCountsCte},
           -- "Última actualización" real del lote: la gestión más reciente
           -- sobre sus candidatos (llamada/resultado registrado), no
           -- recupero_import_jobs.updated_at — esa columna solo se toca al
