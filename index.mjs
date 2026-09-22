@@ -26361,6 +26361,7 @@ async function distributeRecuperoDatasetPendingCandidates(client, datasetId, sel
       UPDATE recupero_candidatos rc
       SET seller_id = v.seller_id,
           estado = 'en_gestion',
+          resultado_gestion = 'nuevo',
           fecha_asignacion = NOW(),
           updated_at = NOW()
       FROM (
@@ -31061,6 +31062,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           UPDATE recupero_candidatos
           SET seller_id = $1,
               estado = 'en_gestion',
+              resultado_gestion = 'nuevo',
               fecha_asignacion = NOW(),
               updated_at = NOW()
           WHERE dataset_id = $2
@@ -31263,6 +31265,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                   row_number = v.row_number,
                   seller_id = v.seller_id,
                   estado = 'en_gestion',
+                  resultado_gestion = 'nuevo',
                   fecha_asignacion = NOW(),
                   updated_at = NOW()
               FROM (
@@ -31675,6 +31678,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
               UPDATE recupero_candidatos
               SET seller_id = $3,
                   estado = 'en_gestion',
+                  resultado_gestion = 'nuevo',
                   fecha_asignacion = NOW(),
                   updated_at = NOW()
               WHERE dataset_id = $1
@@ -31738,6 +31742,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                   UPDATE recupero_candidatos rc
                   SET seller_id = v.seller_id,
                       estado = 'en_gestion',
+                      resultado_gestion = 'nuevo',
                       fecha_asignacion = NOW(),
                       updated_at = NOW()
                   FROM (
