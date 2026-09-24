@@ -1412,6 +1412,7 @@ async function fetchRecuperoContactos({
       rc.requiere_revision,
       rc.fecha_baja,
       rc.fecha_venta AS fecha_alta,
+      rc.medio_pago,
       rc.motivo_baja,
       rc.motivo_baja_detalle,
       rc.motivo_baja AS motivo_normalizado,
