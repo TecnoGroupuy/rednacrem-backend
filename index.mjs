@@ -1162,6 +1162,12 @@ const RECUPERO_SIMPLE_FILTER_FIELDS = new Set([
   "edad_max",
   "fecha_baja_desde",
   "fecha_baja_hasta",
+  // Segmentación Prioritario/Resto del listado principal de Recupero usa
+  // fecha_venta (la venta original), no fecha_baja — son dos filtros de
+  // fecha independientes que se AND-ean, no se combinan entre sí. Ver
+  // buildFiltersPayload en SupervisorContractsModule.jsx.
+  "fecha_venta_desde",
+  "fecha_venta_hasta",
   "motivo_baja",
   "motivo_normalizado",
   "ultimo_estado",
@@ -1209,6 +1215,17 @@ function validateSimpleFilters(filters) {
     return { valid: false, message: "Rango de fecha invalido" };
   }
   if (desdeTs !== null && hastaTs !== null && desdeTs > hastaTs) {
+    return { valid: false, message: "Rango de fecha invalido" };
+  }
+
+  const fechaVentaDesde = normalizeTextValue(filters.fecha_venta_desde);
+  const fechaVentaHasta = normalizeTextValue(filters.fecha_venta_hasta);
+  const ventaDesdeTs = fechaVentaDesde ? Date.parse(fechaVentaDesde) : null;
+  const ventaHastaTs = fechaVentaHasta ? Date.parse(fechaVentaHasta) : null;
+  if ((fechaVentaDesde && Number.isNaN(ventaDesdeTs)) || (fechaVentaHasta && Number.isNaN(ventaHastaTs))) {
+    return { valid: false, message: "Rango de fecha invalido" };
+  }
+  if (ventaDesdeTs !== null && ventaHastaTs !== null && ventaDesdeTs > ventaHastaTs) {
     return { valid: false, message: "Rango de fecha invalido" };
   }
 
@@ -1294,6 +1311,26 @@ async function fetchRecuperoContactos({
   } else if (fechaHasta) {
     conditions.push(`rc.fecha_baja <= $${idx}::date`);
     values.push(fechaHasta);
+    idx += 1;
+  }
+
+  // Segmentación Prioritario/Resto de la vista Recupero: filtra por
+  // fecha_venta (la venta original), independiente del filtro manual de
+  // columna "Fecha de baja" de arriba — ambos se AND-ean si vienen juntos,
+  // no se pisan entre sí.
+  const fechaVentaDesde = simpleFilters?.fecha_venta_desde;
+  const fechaVentaHasta = simpleFilters?.fecha_venta_hasta;
+  if (fechaVentaDesde && fechaVentaHasta) {
+    conditions.push(`rc.fecha_venta BETWEEN $${idx}::date AND $${idx + 1}::date`);
+    values.push(fechaVentaDesde, fechaVentaHasta);
+    idx += 2;
+  } else if (fechaVentaDesde) {
+    conditions.push(`rc.fecha_venta >= $${idx}::date`);
+    values.push(fechaVentaDesde);
+    idx += 1;
+  } else if (fechaVentaHasta) {
+    conditions.push(`rc.fecha_venta <= $${idx}::date`);
+    values.push(fechaVentaHasta);
     idx += 1;
   }
 
