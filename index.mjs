@@ -1392,6 +1392,12 @@ async function fetchRecuperoContactos({
   const orderDir = sortDir === 'ASC' ? 'ASC' : 'DESC';
   const where = conditions.join(' AND ');
 
+  // "Fecha de alta original" en el detalle expandido del frontend
+  // (SupervisorContractsModule.jsx) leía row.fecha_alta_original /
+  // row.fecha_alta, pero esta consulta nunca los devolvía — por eso salía
+  // "—" para el 100% de los contactos, tuvieran o no fecha_venta cargada.
+  // fecha_venta es la fecha de la venta original (mismo campo que ya usa
+  // el segmento Prioritario/Resto), así que es el alta.
   const itemsRes = await client.query(
     `SELECT
       rc.id,
@@ -1405,6 +1411,7 @@ async function fetchRecuperoContactos({
       rc.precio_anterior AS precio,
       rc.requiere_revision,
       rc.fecha_baja,
+      rc.fecha_venta AS fecha_alta,
       rc.motivo_baja,
       rc.motivo_baja_detalle,
       rc.motivo_baja AS motivo_normalizado,
