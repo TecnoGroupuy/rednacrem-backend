@@ -38089,19 +38089,52 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       const client = createDbClient();
       await client.connect();
       try {
-        const res = await client.query(
+        // Antes consultaba lead_batch_sellers/lead_batches (tipo='recupero')
+        // — el sistema VIEJO de Recupero, reemplazado por
+        // recupero_candidatos/recupero_import_jobs/recupero_dataset_sellers.
+        // Un vendedor asignado solo en el sistema nuevo (el caso normal desde
+        // que existe) tenía 0 filas ahí, así que este endpoint le devolvía
+        // recupero:false y el ítem de nav desaparecía aunque sí tuviera
+        // trabajo real asignado (bug real, confirmado con un caso de
+        // Global Assist).
+        //
+        // "Tiene acceso a Recupero" ahora es CUALQUIERA de:
+        // 1. Al menos un candidato propio no cerrado (resultado_gestion no
+        //    terminal) — trabajo activo pendiente.
+        // 2. Al menos una fila en recupero_dataset_sellers (roster
+        //    persistente, migración 064) — ya está "en el equipo" de un lote
+        //    aunque todavía no le tocaron datos. Sin esto, un vendedor recién
+        //    agregado a un lote vacío volvería a quedar sin acceso hasta que
+        //    le lleguen candidatos — el mismo problema de raíz que el roster
+        //    ya resolvió en otro lugar del sistema.
+        const candidatosRes = await client.query(
           `
-          SELECT COUNT(*)::int AS count
-          FROM lead_batch_sellers lbs
-          JOIN lead_batches lb ON lb.id = lbs.batch_id
-          WHERE lbs.seller_id = $1
-            AND lb.tipo = 'recupero'
-            AND lb.estado IN ('activo', 'asignado')
+          SELECT EXISTS (
+            SELECT 1
+            FROM recupero_candidatos
+            WHERE seller_id = $1
+              AND resultado_gestion NOT IN ('venta', 'rechazo', 'dato_erroneo')
+          ) AS tiene_trabajo_activo
           `,
           [dbUser.id]
         );
-        const count = res.rows[0]?.count ?? 0;
-        return json(200, { ok: true, modulos: { recupero: count > 0 } });
+        let tieneRecupero = Boolean(candidatosRes.rows[0]?.tiene_trabajo_activo);
+
+        if (!tieneRecupero) {
+          const rosterTableRes = await client.query(
+            `SELECT to_regclass('public.recupero_dataset_sellers') AS table_name`
+          );
+          const hasRosterTable = Boolean(rosterTableRes.rows[0]?.table_name);
+          if (hasRosterTable) {
+            const rosterRes = await client.query(
+              `SELECT EXISTS (SELECT 1 FROM recupero_dataset_sellers WHERE seller_id = $1) AS en_roster`,
+              [dbUser.id]
+            );
+            tieneRecupero = Boolean(rosterRes.rows[0]?.en_roster);
+          }
+        }
+
+        return json(200, { ok: true, modulos: { recupero: tieneRecupero } });
       } finally {
         await client.end();
       }
