@@ -23,8 +23,20 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
 - Investigación y debugging de bugs de producción
 
 ## Reglas de base de datos — CRÍTICO
-- El schema local **diverge** del de producción (ejemplo conocido: la columna
-  `lead_contact_status.organization_id` existe en producción pero no en local).
+- El schema local **diverge** del de producción. Divergencias conocidas confirmadas
+  contra RDS (no asumir que la lista está completa):
+  - `lead_contact_status.organization_id` existe en producción pero no en local.
+  - `manual_tickets.organization_id` y `contact_products.organization_id` existen
+    en producción pero no en local.
+  - `contact_products_motivo_baja_check` (el `CHECK` de `motivo_baja`) tiene una
+    lista de valores **distinta** en producción (`'voluntaria'`, `'baja_bps'`,
+    `'sin_pago_bps'`, `'baja_antel'`, `'sin_liquidez'`, `'fallecimiento'`,
+    `'falta_de_pago'`, `'auditoria'`, `'error_activacion'`, `'administrativa'`,
+    `'no_llamar'`, `'otro_servicio'` — todo minúscula, sin tildes) que la que define
+    `sql/migrations/048_update_motivo_baja_constraint.sql` en este repo (`'Auditoría'`,
+    `'Medio de pago'`, `'Voluntaria'`, etc., capitalizado). Esa migración solo corrió
+    en local — nunca escribas `motivo_baja` basándote en el valor de la 048 sin
+    confirmar antes contra RDS.
 - **Nunca** verifiques ni asumas el schema contra la base local.
 - Toda verificación de schema se hace vía `psql` contra RDS producción, y la corre
   Damián directamente — no Claude contra una copia local.

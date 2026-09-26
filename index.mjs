@@ -10217,12 +10217,16 @@ async function closeManualTicket({ ticketId, outcome, note, actorName, organizat
           await client.query("ROLLBACK");
           return { error: "La solicitud de baja requiere producto_contrato_id." };
         }
+        // 'voluntaria' (minúscula, sin tilde) — el CHECK real de RDS
+        // (confirmado por Damián contra producción) no coincide con el de
+        // la migración 048 de este repo, que solo existe/corrió en local.
+        // Ver nota en sql/migrations/048_update_motivo_baja_constraint.sql.
         await client.query(
           `
           UPDATE contact_products
           SET
             estado = 'baja',
-            motivo_baja = 'otro',
+            motivo_baja = 'voluntaria',
             motivo_baja_detalle = $2,
             fecha_baja = now()::date,
             updated_at = now()
