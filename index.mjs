@@ -7092,6 +7092,7 @@ function normalizeManualTicketPatch(body) {
   const prioridad = normalizeText(body?.prioridad || "").toLowerCase();
   const estado = normalizeText(body?.estado || "").toLowerCase();
   const productoContratoId = normalizeText(body?.productoContratoId || body?.producto_contrato_id);
+  const assignedTo = normalizeText(body?.assignedTo || body?.assigned_to);
 
   const errors = {};
   const patch = {};
@@ -7153,6 +7154,14 @@ function normalizeManualTicketPatch(body) {
   }
 
   if (productoContratoId) patch.productoContratoId = productoContratoId;
+
+  if (assignedTo) {
+    if (!isValidUuid(assignedTo)) {
+      errors.assignedTo = ["assignedTo invalido"];
+    } else {
+      patch.assignedTo = assignedTo;
+    }
+  }
 
   if (Object.keys(errors).length > 0) {
     return { valid: false, errors };
@@ -9892,6 +9901,7 @@ function mapManualTicketRowToApi(row) {
     prioridad: row.prioridad,
     estado: row.estado,
     productoContratoId: row.producto_contrato_id,
+    assignedTo: row.assigned_to || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -9937,23 +9947,35 @@ async function createManualTicket(payload, organizationId) {
   }
 }
 
-async function listManualTickets({ clienteId, organizationId } = {}) {
+async function listManualTickets({ clienteId, organizationId, unassigned, assignedTo } = {}) {
   const client = createDbClient();
 
   try {
     await client.connect();
     const values = [];
-    let where = "";
+    const conditions = [];
     if (clienteId) {
       values.push(clienteId);
-      where = `WHERE cliente_id = $${values.length}`;
+      conditions.push(`cliente_id = $${values.length}`);
     }
     if (organizationId) {
       values.push(organizationId);
-      where = where
-        ? `${where} AND organization_id = $${values.length}`
-        : `WHERE organization_id = $${values.length}`;
+      conditions.push(`organization_id = $${values.length}`);
     }
+    // Cola del supervisor (Retención): tickets de baja todavía sin asignar
+    // a nadie. Solo tiene sentido para solicitud_baja — el resto de los
+    // tipos de ticket no pasan por asignación.
+    if (unassigned) {
+      conditions.push(`assigned_to IS NULL`);
+      conditions.push(`tipo_solicitud = 'solicitud_baja'`);
+    }
+    // Vista del vendedor (Retención): solo lo que el supervisor le asignó
+    // a él específicamente.
+    if (assignedTo) {
+      values.push(assignedTo);
+      conditions.push(`assigned_to = $${values.length}`);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const result = await client.query(
       `
@@ -10109,7 +10131,8 @@ async function updateManualTicket(ticketId, patch, organizationId) {
       patch.serviceRequest ? JSON.stringify(patch.serviceRequest) : null,
       patch.prioridad || null,
       patch.estado || null,
-      patch.productoContratoId || null
+      patch.productoContratoId || null,
+      patch.assignedTo || null
     ];
     let orgClause = "";
     if (organizationId) {
@@ -10127,6 +10150,7 @@ async function updateManualTicket(ticketId, patch, organizationId) {
         prioridad = COALESCE($6, prioridad),
         estado = COALESCE($7, estado),
         producto_contrato_id = COALESCE($8, producto_contrato_id),
+        assigned_to = COALESCE($9, assigned_to),
         updated_at = now()
       WHERE id = $1
       ${orgClause}
@@ -10183,7 +10207,7 @@ async function addManualTicketNote(ticketId, { texto, autor }, organizationId) {
   }
 }
 
-async function closeManualTicket({ ticketId, outcome, note, actorName, organizationId }) {
+async function closeManualTicket({ ticketId, outcome, note, actorName, actorId, actorRoleKey, organizationId }) {
   const client = createDbClient();
 
   try {
@@ -10204,6 +10228,17 @@ async function closeManualTicket({ ticketId, outcome, note, actorName, organizat
     if (!ticket) {
       await client.query("ROLLBACK");
       return { notFound: true };
+    }
+
+    // Retención: un vendedor solo puede cerrar el ticket que el supervisor
+    // le asignó a él. Tickets sin asignar (assigned_to NULL — incluye todo
+    // lo creado antes de que existiera esta columna) mantienen el
+    // comportamiento de siempre, sin restricción, para no romper nada
+    // retroactivo. Supervisor/director/superadministrador/operaciones/
+    // atencion_cliente siguen pudiendo cerrar cualquiera, igual que hoy.
+    if (actorRoleKey === "vendedor" && ticket.assigned_to && ticket.assigned_to !== actorId) {
+      await client.query("ROLLBACK");
+      return { forbidden: "Este ticket está asignado a otro vendedor." };
     }
 
     if (ticket.tipo_solicitud === "solicitud_baja") {
@@ -17287,9 +17322,15 @@ async function routeRequest(event) {
       }
 
       const clienteId = event?.queryStringParameters?.clienteId || event?.queryStringParameters?.cliente_id;
+      const unassigned = String(event?.queryStringParameters?.unassigned || "").toLowerCase() === "true";
+      const assignedTo = normalizeText(
+        event?.queryStringParameters?.assignedTo || event?.queryStringParameters?.assigned_to
+      );
       const items = await listManualTickets({
         clienteId: normalizeText(clienteId) || null,
-        organizationId
+        organizationId,
+        unassigned,
+        assignedTo: assignedTo || null
       });
       return json(200, { ok: true, items });
     } catch (error) {
@@ -17342,6 +17383,34 @@ async function routeRequest(event) {
           return json(error.status, { ok: false, message: error.message });
         }
         throw error;
+      }
+
+      if (validation.data.assignedTo) {
+        const assignClient = createDbClient();
+        await assignClient.connect();
+        let assigneeValid = false;
+        try {
+          const assigneeRes = await assignClient.query(
+            `
+            SELECT 1
+            FROM users u
+            JOIN organization_users ou ON ou.user_id = u.id
+            WHERE u.id = $1
+              AND u.role_key = 'vendedor'
+              AND u.status = 'approved'
+              AND ou.organization_id = $2
+              AND ou.activo = true
+            LIMIT 1
+            `,
+            [validation.data.assignedTo, organizationId]
+          );
+          assigneeValid = assigneeRes.rows.length > 0;
+        } finally {
+          await assignClient.end();
+        }
+        if (!assigneeValid) {
+          return json(422, { ok: false, message: "assignedTo no pertenece a un vendedor activo de la organización" });
+        }
       }
 
       const item = await updateManualTicket(manualTicketMatch[1], validation.data, organizationId);
@@ -17454,11 +17523,17 @@ async function routeRequest(event) {
         outcome: normalizeText(body.outcome || ""),
         note: normalizeText(body.note || ""),
         actorName: body.actorName || body.actor_name || dbUser?.nombre || "",
+        actorId: dbUser?.id || null,
+        actorRoleKey: dbUser?.role_key || null,
         organizationId
       });
 
       if (result?.notFound) {
         return json(404, { ok: false, message: "Manual ticket not found" });
+      }
+
+      if (result?.forbidden) {
+        return json(403, { ok: false, message: result.forbidden });
       }
 
       if (result?.error) {
