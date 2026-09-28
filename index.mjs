@@ -10238,12 +10238,26 @@ async function closeManualTicket({ ticketId, outcome, note, actorName, actorId, 
       return { notFound: true };
     }
 
+    // Retención: atencion_cliente crea el ticket de solicitud_baja pero no lo
+    // gestiona — pasa a la cola de Retención para que un supervisor lo
+    // asigne a un vendedor, y es ese ciclo (vendedor asignado o supervisor
+    // por caso excepcional) el que decide el cierre. Solo aplica a
+    // solicitud_baja — el resto de los tipos de ticket (consulta
+    // informativa, solicitud de servicio, etc.) siguen sin esta
+    // restricción, atencion_cliente los cierra igual que siempre.
+    // Supervisor/director/superadministrador conservan la posibilidad de
+    // cerrar cualquier solicitud_baja directamente para casos excepcionales.
+    if (actorRoleKey === "atencion_cliente" && ticket.tipo_solicitud === "solicitud_baja") {
+      await client.query("ROLLBACK");
+      return { forbidden: "Atención al cliente no puede cerrar una solicitud de baja — la gestiona Retención." };
+    }
+
     // Retención: un vendedor solo puede cerrar el ticket que el supervisor
     // le asignó a él. Tickets sin asignar (assigned_to NULL — incluye todo
     // lo creado antes de que existiera esta columna) mantienen el
     // comportamiento de siempre, sin restricción, para no romper nada
-    // retroactivo. Supervisor/director/superadministrador/operaciones/
-    // atencion_cliente siguen pudiendo cerrar cualquiera, igual que hoy.
+    // retroactivo. Supervisor/director/superadministrador/operaciones
+    // siguen pudiendo cerrar cualquiera, igual que hoy.
     if (actorRoleKey === "vendedor" && ticket.assigned_to && ticket.assigned_to !== actorId) {
       await client.query("ROLLBACK");
       return { forbidden: "Este ticket está asignado a otro vendedor." };
