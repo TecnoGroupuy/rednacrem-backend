@@ -1162,10 +1162,11 @@ const RECUPERO_SIMPLE_FILTER_FIELDS = new Set([
   "edad_max",
   "fecha_baja_desde",
   "fecha_baja_hasta",
-  // Segmentación Prioritario/Resto del listado principal de Recupero usa
-  // fecha_venta (la venta original), no fecha_baja — son dos filtros de
-  // fecha independientes que se AND-ean, no se combinan entre sí. Ver
-  // buildFiltersPayload en SupervisorContractsModule.jsx.
+  // Filtro independiente por fecha_venta (la venta original), no fecha_baja
+  // — se AND-ea con el filtro de fecha_baja de arriba si vienen juntos, no
+  // se combinan entre sí. El frontend ya no lo usa (era para la
+  // segmentación Prioritario/Resto de Recupero, retirada), pero queda
+  // soportado acá por si sirve a futuro.
   "fecha_venta_desde",
   "fecha_venta_hasta",
   "motivo_baja",
@@ -1314,10 +1315,11 @@ async function fetchRecuperoContactos({
     idx += 1;
   }
 
-  // Segmentación Prioritario/Resto de la vista Recupero: filtra por
-  // fecha_venta (la venta original), independiente del filtro manual de
-  // columna "Fecha de baja" de arriba — ambos se AND-ean si vienen juntos,
-  // no se pisan entre sí.
+  // Filtro por fecha_venta (la venta original), independiente del filtro
+  // manual de columna "Fecha de baja" de arriba — ambos se AND-ean si vienen
+  // juntos, no se pisan entre sí. Sin consumidor en el frontend hoy (era
+  // para la segmentación Prioritario/Resto de Recupero, retirada), soportado
+  // por si sirve a futuro.
   const fechaVentaDesde = simpleFilters?.fecha_venta_desde;
   const fechaVentaHasta = simpleFilters?.fecha_venta_hasta;
   if (fechaVentaDesde && fechaVentaHasta) {
@@ -2479,13 +2481,19 @@ function buildRecuperoDatasetPayload(row = {}) {
   };
 }
 
-// Los dos lotes fijos que deben existir siempre por organización (creados
-// por el sistema, no por el supervisor). El nombre es lo único que el
-// frontend puede matchear hoy para preseleccionarlos, pero la identidad
-// real para el resto del backend es is_system_dataset — así un supervisor
-// puede crear a mano un dataset con el mismo nombre sin que se confunda con
-// el fijo (dos filas is_system_dataset=false/true conviven sin problema).
-const RECUPERO_FIXED_DATASETS = ["Prioritario — 0 a 3 meses", "General de recupero"];
+// El único lote fijo que debe existir siempre por organización (creado por
+// el sistema, no por el supervisor) — desde que Recupero pasó a ser un
+// acumulado único (sin segmentación Prioritario/Resto), "Prioritario — 0 a 3
+// meses" dejó de aprovisionarse acá (ver migración 067_recupero_prioritario_a_comun.sql,
+// que convierte el que ya existía en producción en un lote común en vez de
+// borrarlo). El nombre es lo único que el frontend puede matchear hoy para
+// preseleccionarlo, pero la identidad real para el resto del backend es
+// is_system_dataset — así un supervisor puede crear a mano un dataset con el
+// mismo nombre sin que se confunda con el fijo (dos filas
+// is_system_dataset=false/true conviven sin problema). Referenciado por
+// nombre (RECUPERO_GENERAL_DATASET_NAME), no por posición en el array.
+const RECUPERO_GENERAL_DATASET_NAME = "General de recupero";
+const RECUPERO_FIXED_DATASETS = [RECUPERO_GENERAL_DATASET_NAME];
 
 // Los 7 valores posibles de recupero_candidatos.resultado_gestion (mismo
 // set usado en todos los cálculos de counts/effectiveness de esta sesión) —
@@ -31544,7 +31552,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           WHERE organization_id = $1 AND is_system_dataset = true AND dataset_name = $2
           LIMIT 1
           `,
-          [organizationId, RECUPERO_FIXED_DATASETS[1]]
+          [organizationId, RECUPERO_GENERAL_DATASET_NAME]
         );
         const generalDatasetId = generalDatasetRes.rows[0]?.id || null;
         if (!generalDatasetId) {
@@ -31598,7 +31606,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           const updatedDatasetRow = await loadRecuperoDatasetRow(client, { datasetId, organizationId });
           return json(200, {
             ok: true,
-            message: `Lote finalizado: ${movedCount} candidato(s) movidos a "${RECUPERO_FIXED_DATASETS[1]}", ${terminalCount} quedaron sin mover (estado terminal).`,
+            message: `Lote finalizado: ${movedCount} candidato(s) movidos a "${RECUPERO_GENERAL_DATASET_NAME}", ${terminalCount} quedaron sin mover (estado terminal).`,
             moved_count: movedCount,
             terminal_count: terminalCount,
             dataset: buildRecuperoDatasetPayload(updatedDatasetRow)
