@@ -9897,7 +9897,13 @@ async function updateProductRecord(productId, payload, organizationId) {
   }
 }
 
+// El producto va embebido cuando la consulta que trae la fila hace el LEFT
+// JOIN contra contact_products (producto_nombre/producto_estado/etc. como
+// alias) — ver listManualTickets y getManualTicketById. Sin ese JOIN, la
+// fila no trae esas columnas y product queda null (mismo comportamiento de
+// antes, sin romper otros llamadores de este mapper).
 function mapManualTicketRowToApi(row) {
+  const hasProduct = row.producto_nombre !== undefined && row.producto_nombre !== null;
   return {
     id: row.id,
     numero: row.numero,
@@ -9909,6 +9915,14 @@ function mapManualTicketRowToApi(row) {
     prioridad: row.prioridad,
     estado: row.estado,
     productoContratoId: row.producto_contrato_id,
+    product: hasProduct
+      ? {
+          nombreProducto: row.producto_nombre,
+          estado: row.producto_estado,
+          fechaAlta: row.producto_fecha_alta,
+          precio: row.producto_precio
+        }
+      : null,
     assignedTo: row.assigned_to || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -9964,33 +9978,39 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
     const conditions = [];
     if (clienteId) {
       values.push(clienteId);
-      conditions.push(`cliente_id = $${values.length}`);
+      conditions.push(`mt.cliente_id = $${values.length}`);
     }
     if (organizationId) {
       values.push(organizationId);
-      conditions.push(`organization_id = $${values.length}`);
+      conditions.push(`mt.organization_id = $${values.length}`);
     }
     // Cola del supervisor (Retención): tickets de baja todavía sin asignar
     // a nadie. Solo tiene sentido para solicitud_baja — el resto de los
     // tipos de ticket no pasan por asignación.
     if (unassigned) {
-      conditions.push(`assigned_to IS NULL`);
-      conditions.push(`tipo_solicitud = 'solicitud_baja'`);
+      conditions.push(`mt.assigned_to IS NULL`);
+      conditions.push(`mt.tipo_solicitud = 'solicitud_baja'`);
     }
     // Vista del vendedor (Retención): solo lo que el supervisor le asignó
     // a él específicamente.
     if (assignedTo) {
       values.push(assignedTo);
-      conditions.push(`assigned_to = $${values.length}`);
+      conditions.push(`mt.assigned_to = $${values.length}`);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const result = await client.query(
       `
-      SELECT *
-      FROM manual_tickets
+      SELECT
+        mt.*,
+        cp.nombre_producto AS producto_nombre,
+        cp.estado AS producto_estado,
+        cp.fecha_alta AS producto_fecha_alta,
+        cp.precio AS producto_precio
+      FROM manual_tickets mt
+      LEFT JOIN contact_products cp ON cp.id = mt.producto_contrato_id
       ${where}
-      ORDER BY created_at DESC
+      ORDER BY mt.created_at DESC
       `,
       values
     );
@@ -10065,13 +10085,19 @@ async function getManualTicketById(ticketId, organizationId) {
     let orgClause = "";
     if (organizationId) {
       values.push(organizationId);
-      orgClause = `AND organization_id = $2`;
+      orgClause = `AND mt.organization_id = $2`;
     }
     const result = await client.query(
       `
-      SELECT *
-      FROM manual_tickets
-      WHERE id = $1
+      SELECT
+        mt.*,
+        cp.nombre_producto AS producto_nombre,
+        cp.estado AS producto_estado,
+        cp.fecha_alta AS producto_fecha_alta,
+        cp.precio AS producto_precio
+      FROM manual_tickets mt
+      LEFT JOIN contact_products cp ON cp.id = mt.producto_contrato_id
+      WHERE mt.id = $1
       ${orgClause}
       LIMIT 1
       `,
