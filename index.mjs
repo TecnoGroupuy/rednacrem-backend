@@ -595,7 +595,7 @@ function normalizeNamePart(value) {
     .trim()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "");
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 // El match por telefono/celular en upsertContact (POST /contacts) puede
@@ -15273,19 +15273,21 @@ async function routeRequest(event) {
                     ))
                   )
                 ORDER BY updated_at DESC NULLS LAST, created_at DESC
-                LIMIT 1
+                LIMIT 10
                 `,
                 [organizationId || null, telDigits || "", celDigits || ""]
               );
-              const phoneMatchRow = existingRes.rows[0] || null;
               // Compartir telefono no alcanza: si no es la misma persona
               // (nombre/apellido distintos, o documentos en conflicto), se
+              // ignora esa fila -- puede haber varios contactos con el
+              // mismo telefono (pareja, familiar), asi que se revisan
+              // hasta 10 candidatos (mas recientes primero) y se queda con
+              // el primero que sea la misma persona. Si ninguno lo es, se
               // ignora el match y mas abajo se inserta un contacto nuevo
               // con ese mismo telefono -- eso esta permitido (ver
               // isSamePersonForPhoneMatch).
-              existingId = (phoneMatchRow && isSamePersonForPhoneMatch(phoneMatchRow, fields))
-                ? phoneMatchRow.id
-                : null;
+              const phoneMatchRow = existingRes.rows.find((row) => isSamePersonForPhoneMatch(row, fields)) || null;
+              existingId = phoneMatchRow ? phoneMatchRow.id : null;
 
               if (existingId) {
                 const activeValues = [existingId];
