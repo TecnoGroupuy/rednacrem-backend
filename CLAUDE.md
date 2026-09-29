@@ -26,8 +26,18 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
 - El schema local **diverge** del de producción. Divergencias conocidas confirmadas
   contra RDS (no asumir que la lista está completa):
   - `lead_contact_status.organization_id` existe en producción pero no en local.
-  - `manual_tickets.organization_id` y `contact_products.organization_id` existen
-    en producción pero no en local.
+  - `manual_tickets.organization_id` existe en producción pero no en local.
+  - `contact_products.organization_id`, `sales.organization_id` y
+    `datos_para_trabajar.contact_id` existen en producción pero no existían en
+    local (confirmado contra RDS en el PASO 0 de la segunda ronda de fixes de
+    POST /contacts) — corregido en local por
+    `sql/migrations/072_add_missing_org_id_contact_id_columns.sql`. Sin esas
+    3 columnas, las ramas `hasContactIdCol`/`hasContactProductOrgId`/
+    `organizationId` de `index.mjs` que SÍ corren en producción nunca se
+    ejercitaban en pruebas locales. Importante: `datos_para_trabajar.contact_id`
+    referencia `contacts(id)` (igual que `sales.contact_id` y
+    `contact_products.contact_id`) — no confundir con `lead_contact_status.contact_id`,
+    que referencia `datos_para_trabajar(id)`, no `contacts(id)`.
   - `contact_products_motivo_baja_check` (el `CHECK` de `motivo_baja`) tiene una
     lista de valores **distinta** en producción (`'voluntaria'`, `'baja_bps'`,
     `'sin_pago_bps'`, `'baja_antel'`, `'sin_liquidez'`, `'fallecimiento'`,
