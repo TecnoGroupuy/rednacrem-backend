@@ -11354,6 +11354,18 @@ async function ensureParentRow(client, tableName, id, organizationId, extraWhere
 async function getPersonalDetail(client, personalId, organizationId) {
   const person = await getOrganizationRowById(client, "su_personal", personalId, organizationId);
   if (!person) return null;
+  // Movil del enfermero fijo (regimen_turno = 'fijo', ver migracion 069):
+  // numero_interno no vive en su_personal, se resuelve con una consulta
+  // aparte en vez de tocar el SELECT generico de getOrganizationRowById
+  // (compartido por otras tablas su_*).
+  let vehiculoNumeroInterno = null;
+  if (person.vehiculo_id) {
+    const vehiculoRes = await client.query(
+      `SELECT numero_interno FROM su_vehiculos WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+      [person.vehiculo_id, organizationId]
+    ).catch(() => ({ rows: [] }));
+    vehiculoNumeroInterno = vehiculoRes.rows[0]?.numero_interno || null;
+  }
   const [roles, habilitaciones, capacitaciones, carnetSalud] = await Promise.all([
     listOrganizationRows(client, "su_personal_roles", organizationId, {
       extraWhereParts: ["personal_id = $2"],
@@ -11378,11 +11390,72 @@ async function getPersonalDetail(client, personalId, organizationId) {
   ]);
   return {
     ...person,
+    vehiculo_numero_interno: vehiculoNumeroInterno,
     roles,
     habilitaciones,
     capacitaciones,
     carnet_salud: carnetSalud
   };
+}
+
+const SU_PERSONAL_FRANJA_TURNO_VALUES = new Set(["00-06", "06-12", "12-18", "18-00"]);
+
+// Formato YYYY-MM-DD estricto, y que sea una fecha calendario real (Date.UTC
+// normaliza "2026-02-30" corriendolo a marzo -- se rechaza comparando los
+// componentes de vuelta, no confiando en que Date.UTC "arregle" el valor).
+// Todo con componentes UTC a proposito (ver Fase 2, frontend): nunca
+// new Date(string) con hora local, para no correr el dia en UTC-3.
+function isValidDateOnlyString(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const ts = Date.UTC(year, month - 1, day);
+  const check = new Date(ts);
+  return (
+    check.getUTCFullYear() === year
+    && check.getUTCMonth() === month - 1
+    && check.getUTCDate() === day
+  );
+}
+
+// Validaciones de los 3 campos del regimen fijo (vehiculo_id/franja_turno/
+// fecha_ref_descanso, ver migracion 069) que el sanitizador generico de
+// sanitizeRowPayload no cubre: ownership cruzado de vehiculo_id (el
+// sanitizador solo valida formato UUID) y formato real de franja_turno/
+// fecha_ref_descanso (sin esto, un valor invalido de fecha_ref_descanso
+// dispara un error de Postgres que operationsErrorResponse no mapea a 400).
+// Se usa tanto en POST como en PATCH -- acepta el body crudo (antes de
+// sanitizar) para leer camelCase o snake_case, igual que el resto de esta
+// ruta (ver empresaContratistaId mas abajo).
+async function validatePersonalRegimenFijoFields(client, body, organizationId) {
+  const vehiculoId = normalizeText(body?.vehiculo_id ?? body?.vehiculoId ?? "") || null;
+  if (vehiculoId) {
+    if (!isValidUuid(vehiculoId)) {
+      throw { status: 400, message: "vehiculo_id inválido" };
+    }
+    const vehiculoRes = await client.query(
+      `SELECT id FROM su_vehiculos WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+      [vehiculoId, organizationId]
+    );
+    if (!vehiculoRes.rows.length) {
+      throw { status: 400, message: "vehiculo_id no pertenece a la organización" };
+    }
+  }
+
+  const franjaTurno = normalizeText(body?.franja_turno ?? body?.franjaTurno ?? "") || null;
+  if (franjaTurno && !SU_PERSONAL_FRANJA_TURNO_VALUES.has(franjaTurno)) {
+    throw {
+      status: 400,
+      message: "franja_turno inválida -- valores permitidos: 00-06, 06-12, 12-18, 18-00"
+    };
+  }
+
+  const fechaRefDescanso = normalizeText(body?.fecha_ref_descanso ?? body?.fechaRefDescanso ?? "") || null;
+  if (fechaRefDescanso && !isValidDateOnlyString(fechaRefDescanso)) {
+    throw { status: 400, message: "fecha_ref_descanso inválida -- formato esperado YYYY-MM-DD" };
+  }
 }
 
 async function getVehiculoDetail(client, vehiculoId, organizationId) {
@@ -39206,10 +39279,22 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             ) AS roles`
           : `'[]'::json AS roles`;
 
+        // Movil del enfermero fijo (regimen_turno = 'fijo', ver migracion
+        // 069): numero_interno no vive en su_personal, hace falta el JOIN.
+        // Gateado por metadata.has igual que el resto de esta funcion, para
+        // no romper en un ambiente donde la migracion todavia no corrio.
+        const vehiculoJoin = metadata.has("vehiculo_id")
+          ? "LEFT JOIN su_vehiculos v ON v.id = p.vehiculo_id"
+          : "";
+        const vehiculoSelect = metadata.has("vehiculo_id")
+          ? "v.numero_interno AS vehiculo_numero_interno,"
+          : "";
+
         const result = await client.query(
           `
-          SELECT p.*, ${rolesSelect}
+          SELECT p.*, ${vehiculoSelect} ${rolesSelect}
           FROM su_personal p
+          ${vehiculoJoin}
           WHERE ${whereParts.join(" AND ")}
           ORDER BY COALESCE(p.apellido, ''), COALESCE(p.nombre, '')
           `,
@@ -39269,6 +39354,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno"
           };
         }
+        await validatePersonalRegimenFijoFields(client, payload, access.organizationId);
         const personal = await insertOrganizationRow(client, "su_personal", payload, access.organizationId);
         const createdRoles = [];
         for (const roleItem of roles) {
@@ -39323,6 +39409,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno"
           });
         }
+        await validatePersonalRegimenFijoFields(client, payload, access.organizationId);
         const item = await updateOrganizationRow(client, "su_personal", operacionesPersonalMatch[1], payload, access.organizationId);
         if (!item) return json(404, { ok: false, message: "Personal no encontrado" });
         return json(200, { ok: true, item });
