@@ -9980,7 +9980,7 @@ async function createManualTicket(payload, organizationId) {
   }
 }
 
-async function listManualTickets({ clienteId, organizationId, unassigned, assignedTo } = {}) {
+async function listManualTickets({ clienteId, organizationId, unassigned, assigned, assignedTo } = {}) {
   const client = createDbClient();
 
   try {
@@ -10000,6 +10000,16 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
     // tipos de ticket no pasan por asignación.
     if (unassigned) {
       conditions.push(`mt.assigned_to IS NULL`);
+      conditions.push(`mt.tipo_solicitud = 'solicitud_baja'`);
+    }
+    // Vista "en gestión" del supervisor (Retención): todos los solicitud_baja
+    // ya asignados, sea al vendedor que sea — no confundir con assignedTo
+    // (un vendedor puntual). El nombre del vendedor no se resuelve acá: el
+    // frontend ya tiene el roster completo de vendedores de la organización
+    // (mismo que usa el modal de asignar, /api/supervisor/agents) y lo
+    // resuelve ahí, sin necesidad de otro JOIN.
+    if (assigned) {
+      conditions.push(`mt.assigned_to IS NOT NULL`);
       conditions.push(`mt.tipo_solicitud = 'solicitud_baja'`);
     }
     // Vista del vendedor (Retención): solo lo que el supervisor le asignó
@@ -17392,6 +17402,7 @@ async function routeRequest(event) {
 
       const clienteId = event?.queryStringParameters?.clienteId || event?.queryStringParameters?.cliente_id;
       const unassigned = String(event?.queryStringParameters?.unassigned || "").toLowerCase() === "true";
+      const assigned = String(event?.queryStringParameters?.assigned || "").toLowerCase() === "true";
       const assignedTo = normalizeText(
         event?.queryStringParameters?.assignedTo || event?.queryStringParameters?.assigned_to
       );
@@ -17399,6 +17410,7 @@ async function routeRequest(event) {
         clienteId: normalizeText(clienteId) || null,
         organizationId,
         unassigned,
+        assigned,
         assignedTo: assignedTo || null
       });
       return json(200, { ok: true, items });
