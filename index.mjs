@@ -11366,7 +11366,7 @@ async function getPersonalDetail(client, personalId, organizationId) {
     ).catch(() => ({ rows: [] }));
     vehiculoNumeroInterno = vehiculoRes.rows[0]?.numero_interno || null;
   }
-  const [roles, habilitaciones, capacitaciones, carnetSalud] = await Promise.all([
+  const [roles, habilitaciones, capacitaciones, carnetSalud, licencias] = await Promise.all([
     listOrganizationRows(client, "su_personal_roles", organizationId, {
       extraWhereParts: ["personal_id = $2"],
       extraValues: [personalId],
@@ -11386,15 +11386,39 @@ async function getPersonalDetail(client, personalId, organizationId) {
       extraWhereParts: ["personal_id = $2"],
       extraValues: [personalId],
       orderBy: "created_at DESC"
+    }).catch(() => []),
+    listOrganizationRows(client, "su_personal_licencias", organizationId, {
+      extraWhereParts: ["personal_id = $2"],
+      extraValues: [personalId],
+      orderBy: "fecha_desde DESC"
     }).catch(() => [])
   ]);
+  // licencia_vigente: misma fecha "hoy" en America/Montevideo que el
+  // listado (GET /operaciones/personal, ver ese comentario) -- calculada en
+  // SQL, no en JS, para no depender de como el driver de pg tipa las
+  // columnas date al pasar por JSON.
+  const licenciaVigenteRes = await client.query(
+    `
+    SELECT json_build_object('id', l.id, 'tipo', l.tipo, 'fecha_desde', l.fecha_desde, 'fecha_hasta', l.fecha_hasta) AS licencia_vigente
+    FROM su_personal_licencias l
+    WHERE l.personal_id = $1
+      AND l.fecha_desde <= (now() AT TIME ZONE 'America/Montevideo')::date
+      AND (l.fecha_hasta IS NULL OR l.fecha_hasta >= (now() AT TIME ZONE 'America/Montevideo')::date)
+    ORDER BY l.fecha_desde DESC
+    LIMIT 1
+    `,
+    [personalId]
+  ).catch(() => ({ rows: [] }));
+  const licenciaVigente = licenciaVigenteRes.rows[0]?.licencia_vigente || null;
   return {
     ...person,
     vehiculo_numero_interno: vehiculoNumeroInterno,
     roles,
     habilitaciones,
     capacitaciones,
-    carnet_salud: carnetSalud
+    carnet_salud: carnetSalud,
+    licencias,
+    licencia_vigente: licenciaVigente
   };
 }
 
@@ -11455,6 +11479,54 @@ async function validatePersonalRegimenFijoFields(client, body, organizationId) {
   const fechaRefDescanso = normalizeText(body?.fecha_ref_descanso ?? body?.fechaRefDescanso ?? "") || null;
   if (fechaRefDescanso && !isValidDateOnlyString(fechaRefDescanso)) {
     throw { status: 400, message: "fecha_ref_descanso inválida -- formato esperado YYYY-MM-DD" };
+  }
+}
+
+const SU_PERSONAL_LICENCIA_TIPO_VALUES = new Set([
+  "maternal",
+  "certificacion_medica",
+  "reglamentaria",
+  "sin_goce",
+  "otra"
+]);
+
+// Validaciones de su_personal_licencias que el CHECK de la 070 ya cubre a
+// nivel de base, pero que hace falta anticipar acá para nunca devolver 500:
+// tipo/fecha_desde son NOT NULL (23502, fuera de la lista que
+// operationsErrorResponse mapea a 400) y las fechas necesitan formato real,
+// no solo el chequeo de sintaxis de Postgres. `requireRequired` en true
+// para POST (alta) y en false para PATCH (edición parcial, cada campo es
+// opcional en el body pero se valida igual si viene).
+function validateLicenciaFields(body, { requireRequired } = {}) {
+  const tipo = normalizeText(body?.tipo ?? "") || null;
+  if (requireRequired && !tipo) {
+    throw { status: 400, message: "tipo es obligatorio" };
+  }
+  if (tipo && !SU_PERSONAL_LICENCIA_TIPO_VALUES.has(tipo)) {
+    throw {
+      status: 400,
+      message: "tipo inválido -- valores permitidos: maternal, certificacion_medica, reglamentaria, sin_goce, otra"
+    };
+  }
+
+  const fechaDesde = normalizeText(body?.fecha_desde ?? body?.fechaDesde ?? "") || null;
+  if (requireRequired && !fechaDesde) {
+    throw { status: 400, message: "fecha_desde es obligatoria" };
+  }
+  if (fechaDesde && !isValidDateOnlyString(fechaDesde)) {
+    throw { status: 400, message: "fecha_desde inválida -- formato esperado YYYY-MM-DD" };
+  }
+
+  // fecha_hasta es NULL explícito = "sin fecha de regreso" -- solo se
+  // valida el formato cuando viene con un valor real (hasOwn con valor
+  // vacío/null es un PATCH que la está borrando a propósito, no un error).
+  const fechaHastaRaw = body?.fecha_hasta ?? body?.fechaHasta;
+  const fechaHasta = normalizeText(fechaHastaRaw ?? "") || null;
+  if (fechaHasta && !isValidDateOnlyString(fechaHasta)) {
+    throw { status: 400, message: "fecha_hasta inválida -- formato esperado YYYY-MM-DD" };
+  }
+  if (fechaDesde && fechaHasta && fechaHasta < fechaDesde) {
+    throw { status: 400, message: "fecha_hasta no puede ser anterior a fecha_desde" };
   }
 }
 
@@ -12795,6 +12867,7 @@ async function routeRequest(event) {
   const operacionesPersonalHabMatch = path.match(/\/operaciones\/personal\/([^/]+)\/habilitaciones\/([^/]+)$/);
   const operacionesPersonalCapMatch = path.match(/\/operaciones\/personal\/([^/]+)\/capacitaciones\/([^/]+)$/);
   const operacionesPersonalCarnetMatch = path.match(/\/operaciones\/personal\/([^/]+)\/carnet-salud\/([^/]+)$/);
+  const operacionesPersonalLicMatch = path.match(/\/operaciones\/personal\/([^/]+)\/licencias\/([^/]+)$/);
   const operacionesTurnoMatch = path.match(/\/operaciones\/turnos\/([^/]+)$/);
   const operacionesEquipoMatch = path.match(/\/operaciones\/equipos\/([^/]+)$/);
   const operacionesVehiculoMatch = path.match(/\/operaciones\/vehiculos\/([^/]+)$/);
@@ -39290,9 +39363,27 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           ? "v.numero_interno AS vehiculo_numero_interno,"
           : "";
 
+        // licencia_vigente (migracion 070): la licencia cuyo rango incluye
+        // el dia de hoy en America/Montevideo (nunca la hora del
+        // contenedor Lambda, que puede correr en otro huso). Gateado por
+        // metadata.size igual que el resto de esta funcion -- si la tabla
+        // todavia no existe en un ambiente dado, esto no rompe el listado.
+        const licenciasMetadata = await getTableColumnMetadata(client, "su_personal_licencias");
+        const licenciaVigenteSelect = licenciasMetadata.size
+          ? `(
+              SELECT json_build_object('id', l.id, 'tipo', l.tipo, 'fecha_desde', l.fecha_desde, 'fecha_hasta', l.fecha_hasta)
+              FROM su_personal_licencias l
+              WHERE l.personal_id = p.id
+                AND l.fecha_desde <= (now() AT TIME ZONE 'America/Montevideo')::date
+                AND (l.fecha_hasta IS NULL OR l.fecha_hasta >= (now() AT TIME ZONE 'America/Montevideo')::date)
+              ORDER BY l.fecha_desde DESC
+              LIMIT 1
+            ) AS licencia_vigente,`
+          : "";
+
         const result = await client.query(
           `
-          SELECT p.*, ${vehiculoSelect} ${rolesSelect}
+          SELECT p.*, ${vehiculoSelect} ${licenciaVigenteSelect} ${rolesSelect}
           FROM su_personal p
           ${vehiculoJoin}
           WHERE ${whereParts.join(" AND ")}
@@ -39607,6 +39698,95 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         return json(200, { ok: true, item });
       } catch (error) {
         return operationsErrorResponse(error, "Failed to update carnet de salud");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // GET /operaciones/personal/:id/licencias -- historial completo, no solo
+    // la vigente (esa se resuelve aparte, embebida en el listado/detalle de
+    // personal como licencia_vigente -- ver GET /operaciones/personal).
+    if (method === "GET" && path.match(/\/operaciones\/personal\/([^/]+)\/licencias$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/licencias$/);
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", match[1], access.organizationId);
+        const items = await listOrganizationRows(client, "su_personal_licencias", access.organizationId, {
+          extraWhereParts: ["personal_id = $2"],
+          extraValues: [match[1]],
+          orderBy: "fecha_desde DESC"
+        });
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list licencias");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/licencias$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/licencias$/);
+      const body = safeParseBody(event);
+      if (!match?.[1] || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", match[1], access.organizationId);
+        validateLicenciaFields(body, { requireRequired: true });
+        const item = await insertOrganizationRow(client, "su_personal_licencias", {
+          ...body,
+          personal_id: match[1]
+        }, access.organizationId);
+        return json(201, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to create licencia");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "PATCH" && operacionesPersonalLicMatch) {
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const current = await getOrganizationRowById(client, "su_personal_licencias", operacionesPersonalLicMatch[2], access.organizationId, {
+          extraWhere: "personal_id = $3",
+          extraValues: [operacionesPersonalLicMatch[1]]
+        });
+        if (!current) return json(404, { ok: false, message: "Licencia no encontrada" });
+        validateLicenciaFields(body, { requireRequired: false });
+        const item = await updateOrganizationRow(client, "su_personal_licencias", operacionesPersonalLicMatch[2], body, access.organizationId);
+        return json(200, { ok: true, item });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update licencia");
+      } finally {
+        await client.end();
+      }
+    }
+
+    if (method === "DELETE" && operacionesPersonalLicMatch) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const result = await client.query(
+          `DELETE FROM su_personal_licencias WHERE id = $1 AND personal_id = $2 AND organization_id = $3 RETURNING id`,
+          [operacionesPersonalLicMatch[2], operacionesPersonalLicMatch[1], access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Licencia no encontrada" });
+        return json(200, { ok: true });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete licencia");
       } finally {
         await client.end();
       }
