@@ -9920,7 +9920,14 @@ function mapManualTicketRowToApi(row) {
           nombreProducto: row.producto_nombre,
           estado: row.producto_estado,
           fechaAlta: row.producto_fecha_alta,
-          precio: row.producto_precio
+          precio: row.producto_precio,
+          // Vendedor origen: mismo criterio que getClientDetailData (index.mjs)
+          // para resolver el nombre — externo usa el snapshot directo (no está
+          // en users), interno prioriza el nombre en vivo de users y cae al
+          // snapshot si por algo no resuelve.
+          vendedorOrigenNombre: row.producto_vendedor_origen === "externo"
+            ? (row.producto_vendedor_snapshot || null)
+            : ([row.producto_vendedor_nombre, row.producto_vendedor_apellido].filter(Boolean).join(" ").trim() || row.producto_vendedor_snapshot || null)
         }
       : null,
     assignedTo: row.assigned_to || null,
@@ -10006,9 +10013,14 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
         cp.nombre_producto AS producto_nombre,
         cp.estado AS producto_estado,
         cp.fecha_alta AS producto_fecha_alta,
-        cp.precio AS producto_precio
+        cp.precio AS producto_precio,
+        cp.seller_origin AS producto_vendedor_origen,
+        cp.seller_name_snapshot AS producto_vendedor_snapshot,
+        su.nombre AS producto_vendedor_nombre,
+        su.apellido AS producto_vendedor_apellido
       FROM manual_tickets mt
       LEFT JOIN contact_products cp ON cp.id = mt.producto_contrato_id
+      LEFT JOIN users su ON su.id = cp.seller_user_id
       ${where}
       ORDER BY mt.created_at DESC
       `,
@@ -10094,9 +10106,14 @@ async function getManualTicketById(ticketId, organizationId) {
         cp.nombre_producto AS producto_nombre,
         cp.estado AS producto_estado,
         cp.fecha_alta AS producto_fecha_alta,
-        cp.precio AS producto_precio
+        cp.precio AS producto_precio,
+        cp.seller_origin AS producto_vendedor_origen,
+        cp.seller_name_snapshot AS producto_vendedor_snapshot,
+        su.nombre AS producto_vendedor_nombre,
+        su.apellido AS producto_vendedor_apellido
       FROM manual_tickets mt
       LEFT JOIN contact_products cp ON cp.id = mt.producto_contrato_id
+      LEFT JOIN users su ON su.id = cp.seller_user_id
       WHERE mt.id = $1
       ${orgClause}
       LIMIT 1
