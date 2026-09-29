@@ -15259,6 +15259,12 @@ async function routeRequest(event) {
           const matchByDocumentoOnly = options?.matchByDocumentoOnly === true;
           const requireDocumento = options?.requireDocumento === true;
           const fields = buildContactFields(payload || {});
+          // Solo se usa cuando matchByDocumentoOnly es true (familiares, ver
+          // el loop de familySales mas abajo): ahi una colision de email no
+          // bloquea la venta, se omite el email y se informa en la
+          // respuesta final (warnings). Para el contacto principal el
+          // email colisionado sigue siendo un 409 duro.
+          let emailWarning = null;
           if (!fields.nombre || !fields.apellido) {
             return { id: null, fields };
           }
@@ -15382,14 +15388,23 @@ async function routeRequest(event) {
           );
           if (duplicateEmailContact) {
             const nombreDuplicado = [duplicateEmailContact.nombre, duplicateEmailContact.apellido].filter(Boolean).join(" ");
-            return {
-              id: null,
-              fields,
-              error: {
-                status: 409,
-                message: `El email ya está registrado en otro cliente (${nombreDuplicado}). Dejalo vacío o usá otro.`
-              }
-            };
+            if (matchByDocumentoOnly) {
+              // Familiar: no se bloquea la venta por esto -- se omite el
+              // email (el familiar queda guardado sin el) y se avisa via
+              // warning en vez de cortar con un 409.
+              const nombreFamiliar = [fields.nombre, fields.apellido].filter(Boolean).join(" ") || "el familiar";
+              fields.email = null;
+              emailWarning = `Se omitió el email de ${nombreFamiliar} porque ya pertenece a ${nombreDuplicado}`;
+            } else {
+              return {
+                id: null,
+                fields,
+                error: {
+                  status: 409,
+                  message: `El email ya está registrado en otro cliente (${nombreDuplicado}). Dejalo vacío o usá otro.`
+                }
+              };
+            }
           }
 
           if (existingId) {
@@ -15456,7 +15471,7 @@ async function routeRequest(event) {
                 };
               }
             }
-            return { id: existingId, fields };
+            return { id: existingId, fields, warning: emailWarning };
           }
 
           const insertRes = await client.query(
@@ -15495,7 +15510,7 @@ async function routeRequest(event) {
               organizationId
             ]
           );
-          return { id: insertRes.rows[0]?.id || null, fields };
+          return { id: insertRes.rows[0]?.id || null, fields, warning: emailWarning };
         };
 
         const findExistingContactByDocumento = async (payload) => {
@@ -15724,6 +15739,10 @@ async function routeRequest(event) {
         };
 
         const managementLog = [];
+        // Warnings no bloqueantes para devolver en la respuesta (ej. email
+        // de un familiar omitido por colision con otro contacto -- ver
+        // upsertContact con matchByDocumentoOnly mas abajo).
+        const warnings = [];
 
         const main = await upsertContact(contactPayload);
         if (main?.error) {
@@ -16325,6 +16344,8 @@ async function routeRequest(event) {
             });
           }
 
+          if (famContact?.warning) warnings.push(famContact.warning);
+
           if (!famContact.id) continue;
 
           if (hasAssignedProducts) {
@@ -16386,7 +16407,8 @@ async function routeRequest(event) {
         return json(200, {
           ok: true,
           success: true,
-          data: { id: main.id, management: managementLog }
+          data: { id: main.id, management: managementLog },
+          warnings
         });
       } catch (error) {
         await client.query("ROLLBACK");
