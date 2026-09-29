@@ -37,6 +37,17 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     `'Medio de pago'`, `'Voluntaria'`, etc., capitalizado). Esa migración solo corrió
     en local — nunca escribas `motivo_baja` basándote en el valor de la 048 sin
     confirmar antes contra RDS.
+  - Los índices únicos de `contacts.documento` y `contacts.email` tenían alcance
+    **distinto** entre local y producción (confirmado por Damián, corregido en local
+    por `sql/migrations/071_align_contacts_unique_indexes_with_prod.sql`):
+    - `documento`: local tenía `contacts_documento_unique_idx` **UNIQUE global**;
+      producción usa `idx_contacts_documento`, que **no es único** (la unicidad
+      dentro de una organización la impone la aplicación, no Postgres — ver
+      `findDuplicateContactByDocumentoInOrganization`).
+    - `email`: local tenía `contacts_email_unique_idx` **UNIQUE global**;
+      producción usa `contacts_email_org_unique_idx`, **UNIQUE por organización**
+      (`organization_id, lower(email)`). Un índice único global rompía el caso real
+      de una misma persona siendo cliente de dos organizaciones distintas.
 - **Nunca** verifiques ni asumas el schema contra la base local.
 - Toda verificación de schema se hace vía `psql` contra RDS producción, y la corre
   Damián directamente — no Claude contra una copia local.
