@@ -15056,11 +15056,17 @@ async function routeRequest(event) {
       ].filter((t) => t.valor);
 
       for (const t of telefonos) {
-        const v = validarTelefonoUY(t.valor);
+        // Validar sobre el valor normalizado (mismo criterio que cleanPhone
+        // usa mas abajo en buildContactFields) -- si no, formatos que se
+        // terminan guardando bien igual ("+598 92 190 958", "92190958")
+        // se rechazan aca antes de llegar a normalizarse.
+        const v = validarTelefonoUY(normalizeUyNumber(t.valor));
         if (!v.ok) {
+          const mensaje = `El campo ${t.campo} no es válido: ${v.msg}`;
           return json(400, {
             ok: false,
-            error: `El campo ${t.campo} no es válido: ${v.msg}`,
+            message: mensaje,
+            error: mensaje,
             campo: t.campo
           });
         }
@@ -16652,11 +16658,15 @@ async function routeRequest(event) {
       ].filter((t) => t.valor);
 
       for (const t of telefonos) {
-        const v = validarTelefonoUY(t.valor);
+        // Mismo criterio que POST /contacts: validar sobre el valor
+        // normalizado, no el crudo (ver comentario gemelo mas arriba).
+        const v = validarTelefonoUY(normalizeUyNumber(t.valor));
         if (!v.ok) {
+          const mensaje = `El campo ${t.campo} no es válido: ${v.msg}`;
           return json(400, {
             ok: false,
-            error: `El campo ${t.campo} no es válido: ${v.msg}`,
+            message: mensaje,
+            error: mensaje,
             campo: t.campo
           });
         }
