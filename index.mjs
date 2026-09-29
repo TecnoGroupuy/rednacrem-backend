@@ -588,6 +588,44 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
+// Para comparar nombres tolerando mayusculas/minusculas y tildes ("José"
+// === "jose"), usado por isSamePersonForPhoneMatch.
+function normalizeNamePart(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+}
+
+// El match por telefono/celular en upsertContact (POST /contacts) puede
+// encontrar un contacto de OTRA persona que comparte el numero con quien se
+// esta cargando (ej. pareja, familiar) -- reutilizar ese contacto pisaria
+// sus datos. Solo se considera la MISMA persona si nombre y apellido
+// coinciden (normalizados) Y los documentos no estan en conflicto (si
+// ambos tienen documento y son distintos, son personas distintas aunque el
+// nombre coincida por casualidad).
+function isSamePersonForPhoneMatch(existing, incoming) {
+  const existingNombre = normalizeNamePart(existing?.nombre);
+  const existingApellido = normalizeNamePart(existing?.apellido);
+  const incomingNombre = normalizeNamePart(incoming?.nombre);
+  const incomingApellido = normalizeNamePart(incoming?.apellido);
+  if (!existingNombre || !existingApellido || !incomingNombre || !incomingApellido) {
+    return false;
+  }
+  if (existingNombre !== incomingNombre || existingApellido !== incomingApellido) {
+    return false;
+  }
+
+  const existingDocumento = normalizeText(existing?.documento) || null;
+  const incomingDocumento = normalizeText(incoming?.documento) || null;
+  if (existingDocumento && incomingDocumento && existingDocumento !== incomingDocumento) {
+    return false;
+  }
+
+  return true;
+}
+
 const MESES = [
   "Ene", "Feb", "Mar", "Abr", "May", "Jun",
   "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"
@@ -15221,7 +15259,7 @@ async function routeRequest(event) {
             if (telDigits || celDigits) {
               const existingRes = await client.query(
                 `
-                SELECT id
+                SELECT id, nombre, apellido, documento
                 FROM contacts
                 WHERE ($1::uuid IS NULL OR organization_id = $1)
                   AND (
@@ -15239,7 +15277,15 @@ async function routeRequest(event) {
                 `,
                 [organizationId || null, telDigits || "", celDigits || ""]
               );
-              existingId = existingRes.rows[0]?.id || null;
+              const phoneMatchRow = existingRes.rows[0] || null;
+              // Compartir telefono no alcanza: si no es la misma persona
+              // (nombre/apellido distintos, o documentos en conflicto), se
+              // ignora el match y mas abajo se inserta un contacto nuevo
+              // con ese mismo telefono -- eso esta permitido (ver
+              // isSamePersonForPhoneMatch).
+              existingId = (phoneMatchRow && isSamePersonForPhoneMatch(phoneMatchRow, fields))
+                ? phoneMatchRow.id
+                : null;
 
               if (existingId) {
                 const activeValues = [existingId];
