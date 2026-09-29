@@ -19874,7 +19874,7 @@ async function routeRequest(event) {
             if (telDigits || celDigits) {
               const existingRes = await client.query(
                 `
-                SELECT id
+                SELECT id, nombre, apellido, documento
                 FROM contacts
                 WHERE organization_id = $1
                   AND (
@@ -19888,11 +19888,17 @@ async function routeRequest(event) {
                     ))
                   )
                 ORDER BY updated_at DESC NULLS LAST, created_at DESC
-                LIMIT 1
+                LIMIT 10
                 `,
                 [organizationId, telDigits || "", celDigits || ""]
               );
-              existingId = existingRes.rows[0]?.id || null;
+              // Mismo criterio que /contacts (ver isSamePersonForPhoneMatch):
+              // compartir telefono no alcanza para reutilizar el contacto de
+              // otra persona -- se revisan hasta 10 candidatos y se usa el
+              // primero que sea la misma persona. Si ninguno lo es, sigue al
+              // INSERT de mas abajo con un contacto nuevo.
+              const phoneMatchRow = existingRes.rows.find((row) => isSamePersonForPhoneMatch(row, fields)) || null;
+              existingId = phoneMatchRow ? phoneMatchRow.id : null;
             }
           }
 
