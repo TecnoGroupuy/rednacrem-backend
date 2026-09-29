@@ -1006,6 +1006,41 @@ async function findDuplicateContactByDocumentoInOrganization(
   return duplicateRes.rows[0]?.id || null;
 }
 
+// A diferencia del documento (mensaje generico, ver DUPLICATE_DOCUMENT_MESSAGE),
+// el email si trae el nombre del contacto que ya lo tiene -- se devuelve la
+// fila completa (no solo el id) para poder armar ese mensaje sin una
+// segunda consulta.
+async function findDuplicateContactByEmailInOrganization(
+  client,
+  email,
+  organizationId,
+  excludeContactId = null
+) {
+  const normalizedEmail = normalizeEmail(email) || null;
+  if (!normalizedEmail || !organizationId) return null;
+
+  const values = [normalizedEmail, organizationId];
+  let excludeClause = "";
+  if (excludeContactId) {
+    values.push(excludeContactId);
+    excludeClause = `AND id != $${values.length}`;
+  }
+
+  const duplicateRes = await client.query(
+    `
+    SELECT id, nombre, apellido
+    FROM contacts
+    WHERE lower(email) = lower($1)
+      AND organization_id = $2
+      ${excludeClause}
+    LIMIT 1
+    `,
+    values
+  );
+
+  return duplicateRes.rows[0] || null;
+}
+
 async function resolveLeadOrContactId(client, rawId, organizationId, options = {}) {
   const requestedId = String(rawId || "").trim();
   if (!requestedId || !isValidUuid(requestedId)) {
@@ -15333,6 +15368,30 @@ async function routeRequest(event) {
             };
           }
 
+          // El email ya está protegido por contacts_email_org_unique_idx en
+          // produccion (UNIQUE por organizacion, ver Punto E) -- sin este
+          // chequeo previo, un email repetido rompe el INSERT/UPDATE con un
+          // 500 generico en vez de un 409 legible. El email de otra
+          // organizacion no cuenta como colision (findDuplicateContact...
+          // ya filtra por organizationId).
+          const duplicateEmailContact = await findDuplicateContactByEmailInOrganization(
+            client,
+            fields.email,
+            organizationId,
+            existingId || null
+          );
+          if (duplicateEmailContact) {
+            const nombreDuplicado = [duplicateEmailContact.nombre, duplicateEmailContact.apellido].filter(Boolean).join(" ");
+            return {
+              id: null,
+              fields,
+              error: {
+                status: 409,
+                message: `El email ya está registrado en otro cliente (${nombreDuplicado}). Dejalo vacío o usá otro.`
+              }
+            };
+          }
+
           if (existingId) {
             const updates = [];
             const values = [];
@@ -19915,6 +19974,27 @@ async function routeRequest(event) {
               error: {
                 status: 409,
                 message: DUPLICATE_DOCUMENT_MESSAGE
+              }
+            };
+          }
+
+          // Mismo criterio que /contacts: el email ya esta protegido por
+          // contacts_email_org_unique_idx en produccion, y sin este chequeo
+          // previo el INSERT/UPDATE rompe con un 500 generico.
+          const duplicateEmailContact = await findDuplicateContactByEmailInOrganization(
+            client,
+            fields.email,
+            organizationId,
+            existingId || null
+          );
+          if (duplicateEmailContact) {
+            const nombreDuplicado = [duplicateEmailContact.nombre, duplicateEmailContact.apellido].filter(Boolean).join(" ");
+            return {
+              id: null,
+              fields,
+              error: {
+                status: 409,
+                message: `El email ya está registrado en otro cliente (${nombreDuplicado}). Dejalo vacío o usá otro.`
               }
             };
           }
