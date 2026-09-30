@@ -11445,6 +11445,21 @@ async function getPersonalDetail(client, personalId, organizationId) {
     ).catch(() => ({ rows: [] }));
     vehiculoNumeroInterno = vehiculoRes.rows[0]?.numero_interno || null;
   }
+  // bases (migracion 081): join a su_bases para el nombre, principal
+  // primero y despues por nombre -- mismo criterio que basesSelect del
+  // listado (GET /operaciones/personal).
+  const basesRes = await client.query(
+    `
+    SELECT spb.base_id, b.nombre, spb.es_principal
+    FROM su_personal_bases spb
+    JOIN su_bases b ON b.id = spb.base_id
+    WHERE spb.organization_id = $1 AND spb.personal_id = $2
+    ORDER BY spb.es_principal DESC, b.nombre ASC
+    `,
+    [organizationId, personalId]
+  ).catch(() => ({ rows: [] }));
+  const bases = basesRes.rows;
+
   const [roles, habilitaciones, capacitaciones, carnetSalud, licencias] = await Promise.all([
     listOrganizationRows(client, "su_personal_roles", organizationId, {
       extraWhereParts: ["personal_id = $2"],
@@ -11492,6 +11507,7 @@ async function getPersonalDetail(client, personalId, organizationId) {
   return {
     ...person,
     vehiculo_numero_interno: vehiculoNumeroInterno,
+    bases,
     roles,
     habilitaciones,
     capacitaciones,
@@ -11603,14 +11619,18 @@ async function resolveSaleSeller(client, { sellerMode, assignedSellerId, externa
 }
 
 // Validaciones de los 3 campos del regimen fijo (vehiculo_id/franja_turno/
-// fecha_ref_descanso, ver migracion 069) que el sanitizador generico de
-// sanitizeRowPayload no cubre: ownership cruzado de vehiculo_id (el
-// sanitizador solo valida formato UUID) y formato real de franja_turno/
-// fecha_ref_descanso (sin esto, un valor invalido de fecha_ref_descanso
-// dispara un error de Postgres que operationsErrorResponse no mapea a 400).
-// Se usa tanto en POST como en PATCH -- acepta el body crudo (antes de
-// sanitizar) para leer camelCase o snake_case, igual que el resto de esta
-// ruta (ver empresaContratistaId mas abajo).
+// fecha_ref_descanso, ver migracion 069) mas base_id (migracion 081) que el
+// sanitizador generico de sanitizeRowPayload no cubre: ownership cruzado de
+// vehiculo_id/base_id (el sanitizador solo valida formato UUID) y formato
+// real de franja_turno/fecha_ref_descanso (sin esto, un valor invalido de
+// fecha_ref_descanso dispara un error de Postgres que operationsErrorResponse
+// no mapea a 400). Se usa tanto en POST como en PATCH -- acepta el body
+// crudo (antes de sanitizar) para leer camelCase o snake_case, igual que el
+// resto de esta ruta (ver empresaContratistaId mas abajo).
+//
+// base_id sin ownership era un hueco multi-tenant real: antes de este
+// chequeo, un base_id de OTRA organizacion pasaba sin validar (el
+// sanitizador generico solo revisa que sea un UUID con formato valido).
 async function validatePersonalRegimenFijoFields(client, body, organizationId) {
   const vehiculoId = normalizeText(body?.vehiculo_id ?? body?.vehiculoId ?? "") || null;
   if (vehiculoId) {
@@ -11626,6 +11646,20 @@ async function validatePersonalRegimenFijoFields(client, body, organizationId) {
     }
   }
 
+  const baseId = normalizeText(body?.base_id ?? body?.baseId ?? "") || null;
+  if (baseId) {
+    if (!isValidUuid(baseId)) {
+      throw { status: 400, message: "base_id inválido" };
+    }
+    const baseRes = await client.query(
+      `SELECT id FROM su_bases WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+      [baseId, organizationId]
+    );
+    if (!baseRes.rows.length) {
+      throw { status: 400, message: "base_id no pertenece a la organización" };
+    }
+  }
+
   const franjaTurno = normalizeText(body?.franja_turno ?? body?.franjaTurno ?? "") || null;
   if (franjaTurno && !SU_PERSONAL_FRANJA_TURNO_VALUES.has(franjaTurno)) {
     throw {
@@ -11637,6 +11671,43 @@ async function validatePersonalRegimenFijoFields(client, body, organizationId) {
   const fechaRefDescanso = normalizeText(body?.fecha_ref_descanso ?? body?.fechaRefDescanso ?? "") || null;
   if (fechaRefDescanso && !isValidDateOnlyString(fechaRefDescanso)) {
     throw { status: 400, message: "fecha_ref_descanso inválida -- formato esperado YYYY-MM-DD" };
+  }
+}
+
+// Red de seguridad (migracion 081): PersonalForm ya no manda base_id en el
+// POST/PATCH de personal (las bases se guardan solo via
+// PUT /operaciones/personal/:id/bases, ver ese endpoint) -- pero cualquier
+// OTRO camino que si mande base_id (import, un script, un cliente viejo)
+// no puede dejar su_personal.base_id y su_personal_bases divergiendo. Se
+// llama solo cuando el body efectivamente trae la clave base_id (hasOwn),
+// para no pisar nada en un PATCH parcial que no la toca.
+//
+// baseId truthy: esa base pasa a ser la principal (upsert + desmarca
+// cualquier otra principal de esta persona, la tabla nueva exige una sola
+// via indice unico parcial). baseId null explicito: se desmarca cualquier
+// principal existente, sin borrar las bases no-principales que la persona
+// ya tuviera cargadas desde el selector multiple.
+async function syncPersonalBaseIdToBasesTable(client, { personalId, organizationId, baseId }) {
+  if (baseId) {
+    await client.query(
+      `
+      INSERT INTO su_personal_bases (organization_id, personal_id, base_id, es_principal)
+      VALUES ($1, $2, $3, true)
+      ON CONFLICT (personal_id, base_id) DO UPDATE SET es_principal = true, updated_at = now()
+      `,
+      [organizationId, personalId, baseId]
+    );
+    await client.query(
+      `UPDATE su_personal_bases SET es_principal = false, updated_at = now()
+       WHERE personal_id = $1 AND base_id <> $2 AND es_principal`,
+      [personalId, baseId]
+    );
+  } else {
+    await client.query(
+      `UPDATE su_personal_bases SET es_principal = false, updated_at = now()
+       WHERE personal_id = $1 AND es_principal`,
+      [personalId]
+    );
   }
 }
 
@@ -39772,9 +39843,34 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             ) AS licencia_vigente,`
           : "";
 
+        // bases (migracion 081): mismo patron que rolesSelect de arriba --
+        // json_agg correlacionado, principal primero y despues por nombre.
+        // Gateado por metadata.size para no romper en un ambiente donde la
+        // 081 todavia no corrio.
+        const basesMetadata = await getTableColumnMetadata(client, "su_personal_bases");
+        const basesSelect = basesMetadata.size
+          ? `COALESCE(
+              (
+                SELECT json_agg(
+                  json_build_object(
+                    'base_id', spb.base_id,
+                    'nombre', b.nombre,
+                    'es_principal', spb.es_principal
+                  )
+                  ORDER BY spb.es_principal DESC, b.nombre ASC
+                )
+                FROM su_personal_bases spb
+                JOIN su_bases b ON b.id = spb.base_id
+                WHERE spb.organization_id = p.organization_id
+                  AND spb.personal_id = p.id
+              ),
+              '[]'::json
+            ) AS bases,`
+          : "'[]'::json AS bases,";
+
         const result = await client.query(
           `
-          SELECT p.*, ${vehiculoSelect} ${licenciaVigenteSelect} ${rolesSelect}
+          SELECT p.*, ${vehiculoSelect} ${licenciaVigenteSelect} ${basesSelect} ${rolesSelect}
           FROM su_personal p
           ${vehiculoJoin}
           WHERE ${whereParts.join(" AND ")}
@@ -39838,6 +39934,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         }
         await validatePersonalRegimenFijoFields(client, payload, access.organizationId);
         const personal = await insertOrganizationRow(client, "su_personal", payload, access.organizationId);
+        if (hasOwn(payload, "base_id") || hasOwn(payload, "baseId")) {
+          await syncPersonalBaseIdToBasesTable(client, {
+            personalId: personal.id,
+            organizationId: access.organizationId,
+            baseId: normalizeText(payload?.base_id ?? payload?.baseId ?? "") || null
+          });
+        }
         const createdRoles = [];
         for (const roleItem of roles) {
           const roleBody = typeof roleItem === "string" ? { rol: roleItem } : { ...(roleItem || {}) };
@@ -39892,10 +39995,23 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           });
         }
         await validatePersonalRegimenFijoFields(client, payload, access.organizationId);
+        await client.query("BEGIN");
         const item = await updateOrganizationRow(client, "su_personal", operacionesPersonalMatch[1], payload, access.organizationId);
-        if (!item) return json(404, { ok: false, message: "Personal no encontrado" });
+        if (!item) {
+          await client.query("ROLLBACK");
+          return json(404, { ok: false, message: "Personal no encontrado" });
+        }
+        if (hasOwn(payload, "base_id") || hasOwn(payload, "baseId")) {
+          await syncPersonalBaseIdToBasesTable(client, {
+            personalId: operacionesPersonalMatch[1],
+            organizationId: access.organizationId,
+            baseId: normalizeText(payload?.base_id ?? payload?.baseId ?? "") || null
+          });
+        }
+        await client.query("COMMIT");
         return json(200, { ok: true, item });
       } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
         return operationsErrorResponse(error, "Failed to update personal");
       } finally {
         await client.end();
@@ -39916,6 +40032,94 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         return json(200, { ok: true, item });
       } catch (error) {
         return operationsErrorResponse(error, "Failed to delete personal");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // PUT /operaciones/personal/:id/bases -- reemplaza el conjunto completo
+    // de bases de la persona (migracion 081). Unica via de escritura desde
+    // PersonalForm: el POST/PATCH de personal ya no manda base_id desde el
+    // formulario (ver syncPersonalBaseIdToBasesTable, que sigue existiendo
+    // como red de seguridad para otros caminos que si lo manden).
+    if (method === "PUT" && path.match(/\/operaciones\/personal\/([^/]+)\/bases$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/bases$/);
+      const personalId = match?.[1];
+      const body = safeParseBody(event);
+      if (!personalId || body === null) return json(400, { ok: false, message: "Invalid request" });
+      const basesInput = Array.isArray(body?.bases) ? body.bases : null;
+      if (!basesInput) return json(400, { ok: false, message: "bases es obligatorio (array)" });
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        // Normalizar + validar formato antes de tocar la base.
+        const normalized = basesInput.map((item) => ({
+          base_id: normalizeText(item?.base_id ?? item?.baseId ?? "") || null,
+          es_principal: Boolean(item?.es_principal ?? item?.esPrincipal)
+        }));
+        for (const item of normalized) {
+          if (!item.base_id || !isValidUuid(item.base_id)) {
+            throw { status: 400, message: "Cada base requiere un base_id válido" };
+          }
+        }
+        const ids = normalized.map((item) => item.base_id);
+        if (new Set(ids).size !== ids.length) {
+          throw { status: 400, message: "No puede haber bases duplicadas" };
+        }
+        const principales = normalized.filter((item) => item.es_principal);
+        if (normalized.length && principales.length !== 1) {
+          throw { status: 400, message: "Tiene que haber exactamente una base principal" };
+        }
+
+        // Ownership: cada base_id tiene que pertenecer a la organización del
+        // token -- mismo hueco multi-tenant que ya se cerró para POST/PATCH
+        // de personal (validatePersonalRegimenFijoFields), acá aplicado a
+        // todo el conjunto de una vez.
+        if (ids.length) {
+          const ownershipRes = await client.query(
+            `SELECT id FROM su_bases WHERE organization_id = $1 AND id = ANY($2::uuid[])`,
+            [access.organizationId, ids]
+          );
+          const ownedIds = new Set(ownershipRes.rows.map((row) => row.id));
+          const ajena = ids.find((id) => !ownedIds.has(id));
+          if (ajena) {
+            throw { status: 400, message: "Una de las bases no pertenece a la organización activa" };
+          }
+        }
+
+        await client.query("BEGIN");
+        await client.query(`DELETE FROM su_personal_bases WHERE personal_id = $1`, [personalId]);
+        for (const item of normalized) {
+          await client.query(
+            `INSERT INTO su_personal_bases (organization_id, personal_id, base_id, es_principal)
+             VALUES ($1, $2, $3, $4)`,
+            [access.organizationId, personalId, item.base_id, item.es_principal]
+          );
+        }
+        const principalId = principales[0]?.base_id ?? null;
+        await client.query(
+          `UPDATE su_personal SET base_id = $1, updated_at = now() WHERE id = $2 AND organization_id = $3`,
+          [principalId, personalId, access.organizationId]
+        );
+        await client.query("COMMIT");
+
+        const basesRes = await client.query(
+          `SELECT spb.base_id, b.nombre, spb.es_principal
+           FROM su_personal_bases spb
+           JOIN su_bases b ON b.id = spb.base_id
+           WHERE spb.organization_id = $1 AND spb.personal_id = $2
+           ORDER BY spb.es_principal DESC, b.nombre ASC`,
+          [access.organizationId, personalId]
+        );
+        return json(200, { ok: true, bases: basesRes.rows });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        return operationsErrorResponse(error, "Failed to update personal bases");
       } finally {
         await client.end();
       }
