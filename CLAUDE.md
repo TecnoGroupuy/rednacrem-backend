@@ -35,6 +35,19 @@
 8. **Divergencias de esquema**: cualquier diferencia entre local y producción
    que se descubra se documenta en el momento en la lista de este archivo,
    no se deja para después.
+9. **Antes de tocar la base de datos**: correr `node scripts/compare-schema.mjs`
+   contra el esquema de producción exportado en `docs/prod-schema/` antes de
+   escribir cualquier migración nueva. No confiar solo en divergencias ya
+   documentadas — pueden quedar desactualizadas.
+10. **Contenido largo pegado por Damián** (base64, dumps de CSV, salidas de
+    `psql`, etc.): nunca se transcribe a mano. Un pegado de varios miles de
+    caracteres en la conversación puede llegar recortado, reordenado o con el
+    prompt de la terminal mezclado adentro (ya pasó con un export de esquema
+    en base64: dos "partes" resultaron ser fragmentos de dos streams gzip
+    distintos, no continuación una de la otra). Si hace falta el contenido
+    exacto, Damián lo deja en disco (o lo pega como archivo) y se copia con
+    `cp`/`Read`, verificando tamaño en bytes y `shasum -a 256` contra el
+    original antes de confiar en la copia.
 
 ## Qué es esto
 Tri es un CRM SaaS multi-tenant (antes "Rednacrem") que sirve a cuatro organizaciones:
