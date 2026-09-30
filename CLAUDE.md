@@ -153,6 +153,42 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     agrega en 077. El seed de datos de `payment_methods` (los medios de pago
     reales de Rednacrem/Global Assist) vive aparte, en
     `sql/seeds/payment_methods_local.sql` — un seed nunca va en una migración.
+  - **Esquema de producción exportado**: `docs/prod-schema/prod_columns.csv`
+    (columnas de las 84 tablas reales de producción, exportado 2026-09-30) es
+    la fuente de verdad para comparar contra local — nunca se edita a mano
+    (ver regla 10). `scripts/compare-schema.mjs` compara local contra ese CSV
+    y reporta tablas/columnas faltantes, diferencias de tipo/nulabilidad/
+    default, y lo que sobra en local; correrlo antes de cualquier migración
+    nueva (regla 9). Con ese reporte se escribió
+    `sql/migrations/078_add_missing_columns_from_prod.sql`: agrega las 44
+    columnas de producción que faltaban en local (con dos excepciones
+    deliberadas a la nulabilidad — `client_document_events.contact_id` y
+    `.tipo` son `NOT NULL` en producción pero se agregaron nullable porque la
+    tabla local ya tenía filas) y crea `contact_relations` (la única de las 25
+    tablas de producción ausentes en local que el alta de clientes usa de
+    verdad, en el `INSERT` de familiares — columnas, constraints e índices
+    calcados de RDS, incluida la `UNIQUE (contact_id_a, contact_id_b)` que usa
+    su `ON CONFLICT`).
+  - **Pendiente para una reconstrucción completa de la base local (fase 1,
+    fuera del alcance de esta sesión)**: las 178 diferencias de tipo/
+    nulabilidad/default entre columnas que ya existen en ambos lados
+    (mayormente `timestamp without time zone` vs `timestamptz`, y varias
+    tablas — `roles`, `su_*`, `user_role_history`, `user_status_history`,
+    `vendor_registration_requests` — con `id bigint`/serial en local en vez
+    de `uuid` como en producción), y crear estas 20 tablas de producción que
+    el código también usa pero que no bloqueaban el feature de vendedor
+    externo/fecha de venta: `datos_para_trabajar_import_jobs`,
+    `lead_batch_rr_cursor`, `lead_coding_audit`, `module_states`,
+    `no_call_entries_audit`, `origen_dato_catalog`, `sellers`,
+    `sms_connections`, `sms_log`, `sms_templates`, `su_equipos_biomedicos`,
+    `su_materiales_catalogo`, `su_materiales_movimientos`,
+    `su_materiales_stock`, `su_servicios`, `su_servicios_dotacion`,
+    `su_servicios_historia_clinica`, `su_turnos`,
+    `su_vehiculos_equipamiento_checklist`, `su_vehiculos_mantenimiento`.
+    (Las otras 4 tablas ausentes — `contact_products_dedupe_backup_20260723`,
+    `contact_products_dedupe_map_20260723`, `schema_migrations`,
+    `su_empresas_contratistas` — no las usa ningún camino de `index.mjs`, no
+    hace falta crearlas en local.)
 - **Nunca** verifiques ni asumas el schema contra la base local.
 - Toda verificación de schema se hace vía `psql` contra RDS producción, y la corre
   Damián directamente — no Claude contra una copia local.

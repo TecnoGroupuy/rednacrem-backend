@@ -102,3 +102,41 @@ ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS department text,
   ADD COLUMN IF NOT EXISTS motivo_pausa text,
   ADD COLUMN IF NOT EXISTS pausado_at timestamp without time zone;
+
+-- =========================================================================
+-- Parte 2/2: crear contact_relations, la UNICA de las 25 tablas de prod
+-- ausentes en local que el flujo de alta de clientes usa de verdad (INSERT
+-- en el alta de familiares, ver index.mjs). Las otras 20 tablas usadas por
+-- el resto del codigo (sellers, sms_*, su_*, etc.) quedan pendientes para
+-- la reconstruccion completa de la base local (fase 1) -- ver CLAUDE.md.
+--
+-- Columnas de docs/prod-schema/prod_columns.csv; constraints e indices
+-- confirmados contra RDS por Damian hoy -- calcados tal cual, incluida la
+-- UNIQUE que contact_relations usa en su ON CONFLICT (contact_id_a,
+-- contact_id_b) en index.mjs.
+--
+-- Se verifico que la tabla no existe en absoluto en local antes de este
+-- CREATE TABLE IF NOT EXISTS (confirmado por compare-schema.mjs) -- no es
+-- el caso que prohibe la regla 3 de CLAUDE.md (tabla que podria ya existir
+-- con otra forma).
+CREATE TABLE IF NOT EXISTS public.contact_relations (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  contact_id_a uuid NOT NULL,
+  contact_id_b uuid NOT NULL,
+  relation character varying(50),
+  source character varying(20) NOT NULL DEFAULT 'manual'::character varying,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  organization_id uuid,
+  CONSTRAINT contact_relations_pkey PRIMARY KEY (id),
+  CONSTRAINT no_self_relation CHECK (contact_id_a <> contact_id_b),
+  CONSTRAINT unique_relation UNIQUE (contact_id_a, contact_id_b),
+  CONSTRAINT contact_relations_contact_id_a_fkey FOREIGN KEY (contact_id_a) REFERENCES public.contacts(id) ON DELETE CASCADE,
+  CONSTRAINT contact_relations_contact_id_b_fkey FOREIGN KEY (contact_id_b) REFERENCES public.contacts(id) ON DELETE CASCADE,
+  CONSTRAINT contact_relations_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id)
+);
+
+-- contact_relations_pkey y unique_relation ya crean su propio indice unico
+-- via el PRIMARY KEY / UNIQUE de arriba -- solo faltan los dos btree planos.
+CREATE INDEX IF NOT EXISTS idx_contact_relations_a ON public.contact_relations (contact_id_a);
+CREATE INDEX IF NOT EXISTS idx_contact_relations_b ON public.contact_relations (contact_id_b);
