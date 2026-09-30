@@ -7449,77 +7449,49 @@ function normalizeProductIds(value) {
   return [...new Set(value.map((id) => String(id || "").trim()).filter((id) => isValidUuid(id)))];
 }
 
+// Asume el esquema de produccion directamente (ver migracion 075) -- sin
+// deteccion dinamica de columnas. seller_user_id, fecha_venta,
+// documento_cobranza, product_id, sale_group_id, parent_sale_id,
+// gestion_id, titular_contact_id, relation, registrada_por_user_id y
+// payment_method_id son todas columnas reales de sales, no opcionales.
 async function insertSaleRecord(client, saleInput, organizationId = null) {
-  const salesCols = await getTableColumns(client, "sales");
-  const sellerUserCol = salesCols.has("seller_user_id")
-    ? "seller_user_id"
-    : (salesCols.has("seller_id") ? "seller_id" : null);
-  const fechaVentaCol = salesCols.has("fecha_venta")
-    ? "fecha_venta"
-    : (salesCols.has("fecha") ? "fecha" : null);
-  const hasDocumentoCobranza = salesCols.has("documento_cobranza");
-  const hasSaleGroupId = salesCols.has("sale_group_id");
-  const hasParentSaleId = salesCols.has("parent_sale_id");
-  const hasGestionId = await columnExists(client, "sales", "gestion_id");
-  const hasTitularContactId = await columnExists(client, "sales", "titular_contact_id");
-  const hasRelation = await columnExists(client, "sales", "relation");
-  const hasProductId = await columnExists(client, "sales", "product_id");
-
   const safeContactId = isValidUuid(saleInput?.contactId) ? saleInput.contactId : null;
   const safeProductId = isValidUuid(saleInput?.productId) ? saleInput.productId : null;
-  const safeSellerId = isValidUuid(saleInput?.sellerId) ? saleInput.sellerId : null;
+  const safeSellerUserId = isValidUuid(saleInput?.sellerUserId) ? saleInput.sellerUserId : null;
   const safeSaleGroupId = isValidUuid(saleInput?.saleGroupId) ? saleInput.saleGroupId : null;
   const safeParentSaleId = isValidUuid(saleInput?.parentSaleId) ? saleInput.parentSaleId : null;
   const safeGestionId = isValidUuid(saleInput?.gestionId) ? saleInput.gestionId : null;
   const safeTitularContactId = isValidUuid(saleInput?.titularContactId) ? saleInput.titularContactId : null;
+  const safeRegistradaPorUserId = isValidUuid(saleInput?.registradaPorUserId) ? saleInput.registradaPorUserId : null;
+  const safePaymentMethodId = isValidUuid(saleInput?.paymentMethodId) ? saleInput.paymentMethodId : null;
 
-  const cols = ["contact_id", "medio_pago", "seller_name_snapshot", "seller_origin"];
+  const cols = [
+    "contact_id", "medio_pago", "seller_name_snapshot", "seller_origin",
+    "seller_user_id", "fecha_venta", "documento_cobranza", "product_id",
+    "sale_group_id", "parent_sale_id", "gestion_id", "titular_contact_id",
+    "relation", "registrada_por_user_id", "payment_method_id"
+  ];
   const vals = [
     safeContactId,
     saleInput?.medioPago ?? null,
     saleInput?.sellerNameSnapshot ?? null,
-    saleInput?.sellerOrigin ?? null
+    saleInput?.sellerOrigin ?? null,
+    safeSellerUserId,
+    saleInput?.fechaVenta ?? null,
+    saleInput?.documentoCobranza || null,
+    safeProductId,
+    safeSaleGroupId,
+    safeParentSaleId,
+    safeGestionId,
+    safeTitularContactId,
+    saleInput?.relation ?? null,
+    safeRegistradaPorUserId,
+    safePaymentMethodId
   ];
 
   if (organizationId) {
     cols.push("organization_id");
     vals.push(organizationId);
-  }
-  if (sellerUserCol) {
-    cols.push(sellerUserCol);
-    vals.push(safeSellerId);
-  }
-  if (fechaVentaCol) {
-    cols.push(fechaVentaCol);
-    vals.push(saleInput?.fechaVenta ?? null);
-  }
-  if (hasDocumentoCobranza) {
-    cols.push("documento_cobranza");
-    vals.push(saleInput?.documentoCobranza || null);
-  }
-  if (hasProductId) {
-    cols.push("product_id");
-    vals.push(safeProductId);
-  }
-  if (hasSaleGroupId) {
-    cols.push("sale_group_id");
-    vals.push(safeSaleGroupId);
-  }
-  if (hasParentSaleId) {
-    cols.push("parent_sale_id");
-    vals.push(safeParentSaleId);
-  }
-  if (hasGestionId) {
-    cols.push("gestion_id");
-    vals.push(safeGestionId);
-  }
-  if (hasTitularContactId) {
-    cols.push("titular_contact_id");
-    vals.push(safeTitularContactId);
-  }
-  if (hasRelation) {
-    cols.push("relation");
-    vals.push(saleInput?.relation ?? null);
   }
 
   const placeholders = vals.map((_, idx) => `$${idx + 1}`);
@@ -9480,6 +9452,10 @@ async function getClientDetailData(clientId, organizationId) {
       ? "u.nombre AS seller_nombre, u.apellido AS seller_apellido"
       : "NULL::text AS seller_nombre, NULL::text AS seller_apellido";
     const userJoin = metadata.hasUsersTable ? "LEFT JOIN users u ON u.id = s.seller_user_id" : "";
+    const registradaPorSelect = metadata.hasUsersTable
+      ? "ru.nombre AS registrada_por_nombre, ru.apellido AS registrada_por_apellido"
+      : "NULL::text AS registrada_por_nombre, NULL::text AS registrada_por_apellido";
+    const registradaPorJoin = metadata.hasUsersTable ? "LEFT JOIN users ru ON ru.id = s.registrada_por_user_id" : "";
 
     const productsValues = [clientId];
     let productsOrgClause = "";
@@ -9497,7 +9473,8 @@ async function getClientDetailData(clientId, organizationId) {
         s.seller_origin,
         s.seller_name_snapshot,
         s.seller_user_id AS seller_id,
-        ${userSelect}
+        ${userSelect},
+        ${registradaPorSelect}
       FROM contact_products cp
       LEFT JOIN products p
         ON p.id = cp.product_id
@@ -9506,6 +9483,7 @@ async function getClientDetailData(clientId, organizationId) {
       LEFT JOIN payment_methods pm
         ON pm.id = s.payment_method_id
       ${userJoin}
+      ${registradaPorJoin}
       WHERE cp.contact_id = $1
       ${productsOrgClause}
       ORDER BY cp.fecha_alta DESC NULLS LAST, cp.created_at DESC
@@ -9517,6 +9495,7 @@ async function getClientDetailData(clientId, organizationId) {
       const sellerName = row.seller_origin === "externo"
         ? row.seller_name_snapshot
         : [row.seller_nombre, row.seller_apellido].filter(Boolean).join(" ").trim() || row.seller_name_snapshot;
+      const registradaPor = [row.registrada_por_nombre, row.registrada_por_apellido].filter(Boolean).join(" ").trim() || null;
 
       return {
         id: row.id,
@@ -9544,7 +9523,9 @@ async function getClientDetailData(clientId, organizationId) {
         medioPago: row.medio_pago,
         medio_pago: row.medio_pago,
         sellerOrigin: row.seller_origin,
-        seller_origin: row.seller_origin
+        seller_origin: row.seller_origin,
+        registradaPor,
+        registrada_por: registradaPor
       };
     });
 
@@ -9558,9 +9539,11 @@ async function getClientDetailData(clientId, organizationId) {
       `
       SELECT
         s.*,
-        ${userSelect}
+        ${userSelect},
+        ${registradaPorSelect}
       FROM sales s
       ${userJoin}
+      ${registradaPorJoin}
       WHERE s.contact_id = $1
       ${salesOrgClause}
       ORDER BY s.created_at DESC
@@ -9573,6 +9556,7 @@ async function getClientDetailData(clientId, organizationId) {
         ? row.seller_name_snapshot
         : [row.seller_nombre, row.seller_apellido].filter(Boolean).join(" ").trim() || row.seller_name_snapshot;
       const saleFecha = row.fecha_venta || row.created_at;
+      const registradaPor = [row.registrada_por_nombre, row.registrada_por_apellido].filter(Boolean).join(" ").trim() || null;
 
       return {
         id: row.id,
@@ -9585,7 +9569,9 @@ async function getClientDetailData(clientId, organizationId) {
         sellerName,
         seller_name: sellerName,
         sellerOrigin: row.seller_origin,
-        seller_origin: row.seller_origin
+        seller_origin: row.seller_origin,
+        registradaPor,
+        registrada_por: registradaPor
       };
     });
 
@@ -11515,6 +11501,85 @@ function isValidDateOnlyString(value) {
     && check.getUTCMonth() === month - 1
     && check.getUTCDate() === day
   );
+}
+
+// Fecha de venta: nunca en el futuro, evaluada en America/Montevideo (no
+// en la hora del contenedor Lambda). Se hace en SQL, no con Date de JS, por
+// el mismo motivo que el resto de esta base de codigo evita new Date() para
+// "hoy": evita cualquier corrimiento de zona horaria. Compartida por los 4
+// caminos que registran una venta (POST /contacts, familySales, Recupero,
+// /leads/:id/management).
+async function validateFechaVentaNotFuture(client, fechaVenta) {
+  if (!fechaVenta) return;
+  if (!isValidDateOnlyString(fechaVenta)) {
+    throw { status: 400, message: "fecha_venta inválida -- formato esperado YYYY-MM-DD" };
+  }
+  const res = await client.query(
+    `SELECT ($1::date > (now() AT TIME ZONE 'America/Montevideo')::date) AS es_futura`,
+    [fechaVenta]
+  );
+  if (res.rows[0]?.es_futura) {
+    throw { status: 400, message: "La fecha de venta no puede ser futura" };
+  }
+}
+
+// Resuelve quien es el vendedor de una venta a partir de un modo explicito
+// (seller_mode), en vez de inferirlo de un vendedor_id que puede llegar
+// vacio -- eso era lo que hacia que, en el modo "externo", la venta
+// terminara con seller_user_id = usuario logueado y seller_origin =
+// 'interno' (el usuario logueado nunca se usa como fallback en modo
+// "externo", a diferencia del comportamiento viejo). Usada por los 4
+// caminos que registran una venta -- centralizada aca para no repetir esta
+// logica en cada uno (regla de una sola funcion por operacion de negocio).
+//
+//   "logueado" (default): seller_user_id = usuario logueado, interno.
+//   "asignado": seller_user_id = el vendedor elegido -- se valida que
+//     pertenezca a la organizacion activa (400 si no).
+//   "externo": seller_user_id = NULL, origin = externo, snapshot = nombre
+//     escrito (obligatorio). Nunca cae al usuario logueado.
+//
+// registradaPorUserId siempre es el usuario logueado, en los 3 modos --
+// quien carga la venta, no quien la vendio.
+async function resolveSaleSeller(client, { sellerMode, assignedSellerId, externalName, dbUser, organizationId }) {
+  const registradaPorUserId = isValidUuid(dbUser?.id) ? dbUser.id : null;
+  const loggedName = normalizeText(
+    [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ") || dbUser?.email || ""
+  ) || null;
+  const mode = normalizeText(sellerMode) || "logueado";
+
+  if (mode === "externo") {
+    const nombre = normalizeText(externalName);
+    if (!nombre) {
+      throw { status: 400, message: "El nombre del vendedor externo es obligatorio" };
+    }
+    return { sellerUserId: null, sellerOrigin: "externo", sellerNameSnapshot: nombre, registradaPorUserId };
+  }
+
+  if (mode === "asignado") {
+    const candidateId = normalizeText(assignedSellerId);
+    if (!isValidUuid(candidateId)) {
+      throw { status: 400, message: "El vendedor asignado es inválido" };
+    }
+    const check = await client.query(
+      `
+      SELECT u.id, u.nombre, u.apellido
+      FROM users u
+      JOIN organization_users ou ON ou.user_id = u.id
+      WHERE u.id = $1 AND ou.organization_id = $2 AND ou.activo = true
+      LIMIT 1
+      `,
+      [candidateId, organizationId]
+    );
+    const row = check.rows[0];
+    if (!row) {
+      throw { status: 400, message: "El vendedor elegido no pertenece a la organización activa" };
+    }
+    const nombre = normalizeText([row.nombre, row.apellido].filter(Boolean).join(" ")) || null;
+    return { sellerUserId: row.id, sellerOrigin: "interno", sellerNameSnapshot: nombre, registradaPorUserId };
+  }
+
+  // "logueado" (default, comportamiento previo)
+  return { sellerUserId: registradaPorUserId, sellerOrigin: "interno", sellerNameSnapshot: loggedName, registradaPorUserId };
 }
 
 // Validaciones de los 3 campos del regimen fijo (vehiculo_id/franja_turno/
@@ -15548,7 +15613,7 @@ async function routeRequest(event) {
         const insertSale = async ({
           contactId,
           productId,
-          sellerId,
+          sellerUserId,
           medioPago,
           sellerNameSnapshot,
           sellerOrigin,
@@ -15558,11 +15623,13 @@ async function routeRequest(event) {
           parentSaleId,
           gestionId,
           titularContactId,
-          relation
+          relation,
+          registradaPorUserId,
+          paymentMethodId
         }) => insertSaleRecord(client, {
           contactId,
           productId,
-          sellerId,
+          sellerUserId,
           medioPago,
           sellerNameSnapshot,
           sellerOrigin,
@@ -15572,20 +15639,20 @@ async function routeRequest(event) {
           parentSaleId,
           gestionId,
           titularContactId,
-          relation
+          relation,
+          registradaPorUserId,
+          paymentMethodId
         }, organizationId);
 
         const products = Array.isArray(body?.products) ? body.products : [];
-        const rawSellerId = normalizeText(body?.vendedor_id || "");
-        const sellerId = isValidUuid(rawSellerId) ? rawSellerId : (dbUser?.id || null);
-        const sellerNameSnapshot = normalizeText(
-          products[0]?.sellerName ||
-          products[0]?.seller_name ||
-          [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() ||
-          dbUser?.email ||
-          ""
-        ) || null;
-        const sellerOrigin = sellerId ? "interno" : "externo";
+        const { sellerUserId, sellerOrigin, sellerNameSnapshot, registradaPorUserId } = await resolveSaleSeller(client, {
+          sellerMode: body?.seller_mode,
+          assignedSellerId: body?.vendedor_id,
+          externalName: body?.vendedor_nombre || products[0]?.sellerName || products[0]?.seller_name,
+          dbUser,
+          organizationId
+        });
+        await validateFechaVentaNotFuture(client, body?.fecha_venta);
 
         const saleGroupId = hasSaleGroupId ? crypto.randomUUID() : null;
         let mainSaleId = null;
@@ -15607,7 +15674,7 @@ async function routeRequest(event) {
         let principalBatchCache = null;
 
         const getFallbackBatch = async () => {
-          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          const safeSellerId = isValidUuid(sellerUserId) ? sellerUserId : null;
           if (!safeSellerId) return null;
 
           const existingRes = await client.query(
@@ -15647,7 +15714,7 @@ async function routeRequest(event) {
         };
 
         const resolvePrincipalBatch = async () => {
-          if (!sellerId) return null;
+          if (!sellerUserId) return null;
           if (principalBatchCache) return principalBatchCache;
 
           let principalLeadId = null;
@@ -15714,7 +15781,7 @@ async function routeRequest(event) {
 
           let batchId = null;
           let batchRes = null;
-          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          const safeSellerId = isValidUuid(sellerUserId) ? sellerUserId : null;
           if (safeSellerId) {
             batchRes = await client.query(
               `
@@ -16219,7 +16286,7 @@ async function routeRequest(event) {
           const saleId = await insertSale({
             contactId,
             productId,
-            sellerId,
+            sellerUserId,
             medioPago,
             sellerNameSnapshot,
             sellerOrigin,
@@ -16229,7 +16296,8 @@ async function routeRequest(event) {
             parentSaleId,
             gestionId,
             titularContactId,
-            relation
+            relation,
+            registradaPorUserId
           });
 
           if (saleId && productId) {
@@ -16248,7 +16316,7 @@ async function routeRequest(event) {
           }
 
           const safeContactId = isValidUuid(contactId) ? contactId : null;
-          const safeSellerId = isValidUuid(sellerId) ? sellerId : null;
+          const safeSellerId = isValidUuid(sellerUserId) ? sellerUserId : null;
           const safeSaleId = isValidUuid(saleId) ? saleId : null;
           let resolvedProductId = null;
           if (hasContactProductProductId && productName) {
@@ -16466,7 +16534,7 @@ async function routeRequest(event) {
             const familyMgmt = await linkLeadSaleFromPrincipal({
               contactId: famContact.id,
               fields: famContact.fields,
-              sellerId
+              sellerId: sellerUserId
             });
             if (familyMgmt) managementLog.push({ scope: "family", ...familyMgmt });
           }
@@ -16475,14 +16543,14 @@ async function routeRequest(event) {
         const linkedToPrincipal = await linkLeadSaleFromPrincipal({
           contactId: main.id,
           fields: main.fields,
-          sellerId
+          sellerId: sellerUserId
         });
         if (linkedToPrincipal) managementLog.push({ scope: "main", ...linkedToPrincipal });
         if (!linkedToPrincipal?.ok) {
           const fallbackMgmt = await linkLeadSaleIfPossible({
             contactId: main.id,
             documento: main.fields?.documento || null,
-            sellerId
+            sellerId: sellerUserId
           });
           if (fallbackMgmt) managementLog.push({ scope: "main_fallback", ...fallbackMgmt });
         }
@@ -16502,6 +16570,9 @@ async function routeRequest(event) {
         await client.end();
       }
     } catch (error) {
+      if (error?.status) {
+        return json(error.status, { ok: false, message: error.message });
+      }
       return json(500, {
         ok: false,
         message: "Failed to create contact",
@@ -19976,11 +20047,15 @@ async function routeRequest(event) {
           return json(409, { ok: false, message: "El candidato no está en gestión" });
         }
 
-        const sellerIdForSale = isValidUuid(dbUser?.id) ? dbUser.id : (isValidUuid(candidato.seller_id) ? candidato.seller_id : null);
-        const sellerNameSnapshot = normalizeText(
-          [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || ""
-        ) || null;
-        const sellerOrigin = sellerIdForSale ? "interno" : "externo";
+        // Recupero no tiene UI de vendedor externo todavia -- siempre modo
+        // "logueado". La decision de vendedor esta centralizada en
+        // resolveSaleSeller (ver POST /contacts); no reescribir el resto de
+        // este flujo, solo su eleccion de vendedor.
+        const { sellerUserId: sellerIdForSale, sellerOrigin, sellerNameSnapshot, registradaPorUserId } = await resolveSaleSeller(client, {
+          sellerMode: "logueado",
+          dbUser,
+          organizationId
+        });
         const cobranzaDocumento = normalizeText(body?.cobranza_documento || body?.documento_cobranza) || null;
 
         const buildContactFields = (payload) => {
@@ -20220,12 +20295,13 @@ async function routeRequest(event) {
           const fechaAlta = parseDate(
             product?.fecha_alta || product?.fechaAlta || product?.fecha_venta || product?.fechaVenta
           ) || new Date().toISOString().slice(0, 10);
+          await validateFechaVentaNotFuture(client, fechaAlta);
           const medioPago = normalizeText(product?.medio_pago || product?.medioPago || medioPagoOverride) || null;
 
           const saleId = await insertSaleRecord(client, {
             contactId,
             productId,
-            sellerId: sellerIdForSale,
+            sellerUserId: sellerIdForSale,
             medioPago,
             sellerNameSnapshot,
             sellerOrigin,
@@ -20235,7 +20311,8 @@ async function routeRequest(event) {
             parentSaleId,
             gestionId,
             titularContactId,
-            relation
+            relation,
+            registradaPorUserId
           }, organizationId);
 
           await client.query(
@@ -20390,11 +20467,17 @@ async function routeRequest(event) {
         return json(201, { ok: true, contact_id: main.id, sale_id: saleId });
       } catch (err) {
         await client.query("ROLLBACK");
+        if (err?.status) {
+          return json(err.status, { ok: false, message: err.message });
+        }
         return json(500, { ok: false, message: err.message });
       } finally {
         await client.end();
       }
     } catch (error) {
+      if (error?.status) {
+        return json(error.status, { ok: false, message: error.message });
+      }
       return json(500, { ok: false, message: "Failed to register recupero sale", error: error.message });
     }
   }
@@ -24059,6 +24142,24 @@ async function routeRequest(event) {
           console.log('[venta-backend] products from body:', JSON.stringify(productData));
           console.log('[venta-backend] familySales:', body.familySales?.length || 0);
 
+          // Decision de vendedor centralizada (ver resolveSaleSeller). Este
+          // endpoint no reescribe su flujo -- solo reemplaza la eleccion de
+          // vendedor que antes era assignedTo||dbUser.id hardcodeada a
+          // "interno". Sin seller_mode explicito en el body, se preserva el
+          // comportamiento previo: preferir al vendedor ya asignado al lead.
+          const {
+            sellerUserId: ventaSellerUserId,
+            sellerOrigin: ventaSellerOrigin,
+            sellerNameSnapshot: ventaSellerNameSnapshot,
+            registradaPorUserId: ventaRegistradaPorUserId
+          } = await resolveSaleSeller(client, {
+            sellerMode: body?.seller_mode || (assignedTo ? "asignado" : "logueado"),
+            assignedSellerId: body?.vendedor_id || assignedTo,
+            externalName: body?.vendedor_nombre,
+            dbUser,
+            organizationId: ventaOrganizationId
+          });
+
           // Resolve (or create) a products row id by explicit id or by name.
           const resolveProductId = async (productName, precioVal, orgId, explicitId) => {
             if (!cpCols.has("product_id")) return null;
@@ -24122,6 +24223,7 @@ async function routeRequest(event) {
             );
             const fechaAlta = (/^\d{4}-\d{2}-\d{2}$/.test(fechaAltaRaw) ? fechaAltaRaw : parseDate(fechaAltaRaw)) ||
               formatDateYmd(new Date());
+            await validateFechaVentaNotFuture(client, fechaAlta);
 
             const existingProductValues = [contactId];
             const existingProductOrgClause = cpCols.has("organization_id") && orgId
@@ -24185,15 +24287,15 @@ async function routeRequest(event) {
             }
             if (cpCols.has("seller_user_id")) {
               contactProductCols.push("seller_user_id");
-              contactProductVals.push(assignedTo || dbUser?.id || null);
+              contactProductVals.push(ventaSellerUserId);
             }
             if (cpCols.has("seller_name_snapshot")) {
               contactProductCols.push("seller_name_snapshot");
-              contactProductVals.push([dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || null);
+              contactProductVals.push(ventaSellerNameSnapshot);
             }
             if (cpCols.has("seller_origin")) {
               contactProductCols.push("seller_origin");
-              contactProductVals.push("interno");
+              contactProductVals.push(ventaSellerOrigin);
             }
             if (cpCols.has("organization_id")) {
               contactProductCols.push("organization_id");
@@ -24217,17 +24319,18 @@ async function routeRequest(event) {
             const saleId = await insertSaleRecord(client, {
               contactId,
               productId: resolvedProductId,
-              sellerId: assignedTo || dbUser?.id || null,
+              sellerUserId: ventaSellerUserId,
               medioPago: medioPagoVal,
-              sellerNameSnapshot: [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || null,
-              sellerOrigin: "interno",
+              sellerNameSnapshot: ventaSellerNameSnapshot,
+              sellerOrigin: ventaSellerOrigin,
               fechaVenta: fechaAlta,
               documentoCobranza: cobranzaDocumento,
               saleGroupId: saleOptions?.saleGroupId ?? null,
               parentSaleId: saleOptions?.parentSaleId ?? null,
               gestionId: gestionId ?? null,
               titularContactId: saleOptions?.titularContactId ?? contactId,
-              relation: saleOptions?.relation ?? null
+              relation: saleOptions?.relation ?? null,
+              registradaPorUserId: ventaRegistradaPorUserId
             }, orgId);
 
             if (contactId === ventaContactId && !ventaSmsProductId) {
@@ -24628,6 +24731,9 @@ async function routeRequest(event) {
         await client.end();
       }
     } catch (error) {
+      if (error?.status) {
+        return json(error.status, { ok: false, message: error.message });
+      }
       return json(500, {
         ok: false,
         message: "Failed to register lead management",
