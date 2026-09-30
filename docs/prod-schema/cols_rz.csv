@@ -1,0 +1,402 @@
+table_name,column_name,ordinal_position,data_type,udt_name,character_maximum_length,numeric_precision,numeric_scale,is_nullable,column_default
+recupero_import_jobs,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+recupero_import_jobs,file_name,2,text,text,,,,NO,
+recupero_import_jobs,file_hash,3,text,text,,,,NO,
+recupero_import_jobs,delimiter,4,text,text,,,,YES,
+recupero_import_jobs,status,5,text,text,,,,NO,'queued'::text
+recupero_import_jobs,total_rows,6,integer,int4,,32,0,NO,0
+recupero_import_jobs,processed_rows,7,integer,int4,,32,0,NO,0
+recupero_import_jobs,updated_rows,8,integer,int4,,32,0,NO,0
+recupero_import_jobs,error_rows,9,integer,int4,,32,0,NO,0
+recupero_import_jobs,duplicate_rows,10,integer,int4,,32,0,NO,0
+recupero_import_jobs,invalid_rows,11,integer,int4,,32,0,NO,0
+recupero_import_jobs,not_found_rows,12,integer,int4,,32,0,NO,0
+recupero_import_jobs,error_message,13,text,text,,,,YES,
+recupero_import_jobs,csv_text,14,text,text,,,,NO,
+recupero_import_jobs,error_rows_detail,15,jsonb,jsonb,,,,YES,
+recupero_import_jobs,error_report_csv,16,text,text,,,,YES,
+recupero_import_jobs,created_by,17,uuid,uuid,,,,YES,
+recupero_import_jobs,started_at,18,timestamp with time zone,timestamptz,,,,YES,
+recupero_import_jobs,finished_at,19,timestamp with time zone,timestamptz,,,,YES,
+recupero_import_jobs,created_at,20,timestamp with time zone,timestamptz,,,,NO,now()
+recupero_import_jobs,updated_at,21,timestamp with time zone,timestamptz,,,,NO,now()
+recupero_import_jobs,organization_id,22,uuid,uuid,,,,YES,
+recupero_import_jobs,clientes_activos_rows,23,integer,int4,,32,0,NO,0
+recupero_import_jobs,requiere_revision_rows,24,integer,int4,,32,0,NO,0
+recupero_import_jobs,dataset_name,25,text,text,,,,YES,
+recupero_import_jobs,dataset_source,26,text,text,,,,NO,'clientes.bajas'::text
+recupero_import_jobs,churn_window_from,27,date,date,,,,YES,
+recupero_import_jobs,churn_window_to,28,date,date,,,,YES,
+recupero_import_jobs,max_attempts,29,jsonb,jsonb,,,,NO,"'{""calls"": 3, ""whatsapp"": 1}'::jsonb"
+recupero_import_jobs,offer,30,text,text,,,,YES,
+recupero_import_jobs,expires_on,31,date,date,,,,YES,
+recupero_import_jobs,dataset_status,32,text,text,,,,NO,'activo'::text
+recupero_import_jobs,goal,33,integer,int4,,32,0,NO,0
+recupero_import_jobs,clientes_sync_at,34,timestamp with time zone,timestamptz,,,,YES,
+recupero_import_jobs,is_system_dataset,35,boolean,bool,,,,NO,false
+roles,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+roles,key,2,text,text,,,,NO,
+roles,label,3,text,text,,,,NO,
+roles,priority,4,integer,int4,,32,0,NO,
+roles,is_active,5,boolean,bool,,,,YES,true
+roles,created_at,6,timestamp without time zone,timestamp,,,,YES,now()
+roles,updated_at,7,timestamp without time zone,timestamp,,,,YES,now()
+sale_items,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+sale_items,sale_id,2,uuid,uuid,,,,NO,
+sale_items,product_id,3,uuid,uuid,,,,YES,
+sale_items,product_name_snapshot,4,text,text,,,,YES,
+sale_items,price,5,numeric,numeric,,10,2,NO,0
+sale_items,created_at,6,timestamp without time zone,timestamp,,,,NO,now()
+sale_items,organization_id,7,uuid,uuid,,,,YES,
+sale_items,updated_at,8,timestamp without time zone,timestamp,,,,YES,now()
+sales,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+sales,contact_id,2,uuid,uuid,,,,NO,
+sales,seller_user_id,3,uuid,uuid,,,,YES,
+sales,seller_name_snapshot,4,text,text,,,,YES,
+sales,seller_origin,5,text,text,,,,YES,
+sales,notes,6,text,text,,,,YES,
+sales,created_at,7,timestamp without time zone,timestamp,,,,NO,now()
+sales,updated_at,8,timestamp without time zone,timestamp,,,,NO,now()
+sales,medio_pago,9,text,text,,,,YES,
+sales,fecha_venta,10,date,date,,,,YES,
+sales,documento_cobranza,11,text,text,,,,YES,
+sales,sale_group_id,12,uuid,uuid,,,,YES,
+sales,parent_sale_id,13,uuid,uuid,,,,YES,
+sales,gestion_id,14,uuid,uuid,,,,YES,
+sales,titular_contact_id,15,uuid,uuid,,,,YES,
+sales,relation,16,character varying,varchar,50,,,YES,
+sales,product_id,17,uuid,uuid,,,,YES,
+sales,organization_id,18,uuid,uuid,,,,YES,
+sales,payment_method_id,19,uuid,uuid,,,,YES,
+schema_migrations,filename,1,character varying,varchar,255,,,NO,
+schema_migrations,applied_at,2,timestamp without time zone,timestamp,,,,YES,now()
+sellers,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+sellers,nombre,2,text,text,,,,NO,
+sellers,apellido,3,text,text,,,,YES,
+sellers,email,4,text,text,,,,YES,
+sellers,user_id,5,uuid,uuid,,,,YES,
+sellers,activo,6,boolean,bool,,,,YES,true
+sellers,created_at,7,timestamp without time zone,timestamp,,,,YES,now()
+sellers,updated_at,8,timestamp without time zone,timestamp,,,,YES,now()
+sellers,organization_id,9,uuid,uuid,,,,YES,
+sms_connections,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+sms_connections,organization_id,2,uuid,uuid,,,,NO,
+sms_connections,host,3,text,text,,,,NO,
+sms_connections,port,4,integer,int4,,32,0,NO,443
+sms_connections,sim_ports,5,ARRAY,_int4,,,,NO,'{}'::integer[]
+sms_connections,username,6,text,text,,,,NO,
+sms_connections,password,7,text,text,,,,NO,
+sms_connections,enabled,8,boolean,bool,,,,NO,false
+sms_connections,last_test_at,9,timestamp with time zone,timestamptz,,,,YES,
+sms_connections,last_test_status,10,text,text,,,,YES,
+sms_connections,last_test_detail,11,text,text,,,,YES,
+sms_connections,created_at,12,timestamp with time zone,timestamptz,,,,NO,now()
+sms_connections,updated_at,13,timestamp with time zone,timestamptz,,,,NO,now()
+sms_log,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+sms_log,organization_id,2,uuid,uuid,,,,NO,
+sms_log,contact_id,3,uuid,uuid,,,,YES,
+sms_log,sale_id,4,uuid,uuid,,,,YES,
+sms_log,product_id,5,uuid,uuid,,,,YES,
+sms_log,phone,6,text,text,,,,NO,
+sms_log,message,7,text,text,,,,NO,
+sms_log,encoding,8,text,text,,,,NO,
+sms_log,dinstar_task_id,9,integer,int4,,32,0,YES,
+sms_log,status,10,text,text,,,,NO,'pending'::text
+sms_log,error_detail,11,text,text,,,,YES,
+sms_log,created_at,12,timestamp with time zone,timestamptz,,,,NO,now()
+sms_log,updated_at,13,timestamp with time zone,timestamptz,,,,NO,now()
+sms_templates,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+sms_templates,organization_id,2,uuid,uuid,,,,NO,
+sms_templates,product_id,3,uuid,uuid,,,,YES,
+sms_templates,template,4,text,text,,,,NO,
+sms_templates,encoding,5,text,text,,,,NO,'gsm-7bit'::text
+sms_templates,activo,6,boolean,bool,,,,NO,true
+sms_templates,created_at,7,timestamp with time zone,timestamptz,,,,NO,now()
+sms_templates,updated_at,8,timestamp with time zone,timestamptz,,,,NO,now()
+su_bases,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_bases,organization_id,2,uuid,uuid,,,,NO,
+su_bases,nombre,3,text,text,,,,NO,
+su_bases,direccion,4,text,text,,,,YES,
+su_bases,departamento,5,text,text,,,,YES,
+su_bases,telefono,6,text,text,,,,YES,
+su_bases,moviles_minimos_habilitados,7,integer,int4,,32,0,YES,1
+su_bases,activa,8,boolean,bool,,,,YES,true
+su_bases,created_at,9,timestamp with time zone,timestamptz,,,,YES,now()
+su_bases,updated_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_empresas_contratistas,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_empresas_contratistas,organization_id,2,uuid,uuid,,,,NO,
+su_empresas_contratistas,razon_social,3,text,text,,,,NO,
+su_empresas_contratistas,rut,4,text,text,,,,YES,
+su_empresas_contratistas,contacto_nombre,5,text,text,,,,YES,
+su_empresas_contratistas,contacto_telefono,6,text,text,,,,YES,
+su_empresas_contratistas,contacto_email,7,text,text,,,,YES,
+su_empresas_contratistas,activa,8,boolean,bool,,,,YES,true
+su_empresas_contratistas,created_at,9,timestamp with time zone,timestamptz,,,,YES,now()
+su_empresas_contratistas,updated_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_equipos_biomedicos,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_equipos_biomedicos,organization_id,2,uuid,uuid,,,,NO,
+su_equipos_biomedicos,equipo,3,text,text,,,,NO,
+su_equipos_biomedicos,marca,4,text,text,,,,YES,
+su_equipos_biomedicos,modelo,5,text,text,,,,YES,
+su_equipos_biomedicos,numero_serie,6,text,text,,,,YES,
+su_equipos_biomedicos,ubicacion_tipo,7,text,text,,,,NO,
+su_equipos_biomedicos,base_id,8,uuid,uuid,,,,YES,
+su_equipos_biomedicos,vehiculo_id,9,uuid,uuid,,,,YES,
+su_equipos_biomedicos,fecha_ultima_revision,10,date,date,,,,YES,
+su_equipos_biomedicos,fecha_proximo_service,11,date,date,,,,YES,
+su_equipos_biomedicos,estado,12,text,text,,,,NO,'activo'::text
+su_equipos_biomedicos,observacion,13,text,text,,,,YES,
+su_equipos_biomedicos,created_at,14,timestamp with time zone,timestamptz,,,,YES,now()
+su_equipos_biomedicos,updated_at,15,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_catalogo,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_materiales_catalogo,organization_id,2,uuid,uuid,,,,NO,
+su_materiales_catalogo,nombre,3,text,text,,,,NO,
+su_materiales_catalogo,categoria,4,text,text,,,,YES,
+su_materiales_catalogo,unidad_medida,5,text,text,,,,YES,
+su_materiales_catalogo,requiere_control_vencimiento,6,boolean,bool,,,,YES,false
+su_materiales_catalogo,created_at,7,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_catalogo,updated_at,8,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_movimientos,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_materiales_movimientos,organization_id,2,uuid,uuid,,,,NO,
+su_materiales_movimientos,material_id,3,uuid,uuid,,,,NO,
+su_materiales_movimientos,tipo_movimiento,4,text,text,,,,NO,
+su_materiales_movimientos,cantidad,5,numeric,numeric,,,,NO,
+su_materiales_movimientos,origen_tipo,6,text,text,,,,YES,
+su_materiales_movimientos,origen_id,7,uuid,uuid,,,,YES,
+su_materiales_movimientos,destino_tipo,8,text,text,,,,YES,
+su_materiales_movimientos,destino_id,9,uuid,uuid,,,,YES,
+su_materiales_movimientos,servicio_id,10,uuid,uuid,,,,YES,
+su_materiales_movimientos,motivo,11,text,text,,,,YES,
+su_materiales_movimientos,responsable_id,12,uuid,uuid,,,,YES,
+su_materiales_movimientos,fecha,13,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_movimientos,created_at,14,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_stock,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_materiales_stock,organization_id,2,uuid,uuid,,,,NO,
+su_materiales_stock,material_id,3,uuid,uuid,,,,NO,
+su_materiales_stock,ubicacion_tipo,4,text,text,,,,NO,
+su_materiales_stock,base_id,5,uuid,uuid,,,,YES,
+su_materiales_stock,vehiculo_id,6,uuid,uuid,,,,YES,
+su_materiales_stock,cantidad,7,numeric,numeric,,,,NO,0
+su_materiales_stock,lote,8,text,text,,,,YES,
+su_materiales_stock,fecha_vencimiento,9,date,date,,,,YES,
+su_materiales_stock,created_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_stock,updated_at,11,timestamp with time zone,timestamptz,,,,YES,now()
+su_materiales_stock,bolso,12,text,text,,,,YES,
+su_personal,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_personal,organization_id,2,uuid,uuid,,,,NO,
+su_personal,nombre,3,text,text,,,,NO,
+su_personal,apellido,4,text,text,,,,NO,
+su_personal,documento,5,text,text,,,,YES,
+su_personal,fecha_nacimiento,6,date,date,,,,YES,
+su_personal,telefono,7,text,text,,,,YES,
+su_personal,email,8,text,text,,,,YES,
+su_personal,domicilio,9,text,text,,,,YES,
+su_personal,foto_url,10,text,text,,,,YES,
+su_personal,base_id,11,uuid,uuid,,,,YES,
+su_personal,estado,12,text,text,,,,YES,'activo'::text
+su_personal,fecha_ingreso,13,date,date,,,,YES,
+su_personal,fecha_egreso,14,date,date,,,,YES,
+su_personal,user_id,15,uuid,uuid,,,,YES,
+su_personal,created_at,16,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal,updated_at,17,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal,tipo_personal,18,text,text,,,,NO,'interno'::text
+su_personal,empresa_contratista_id,19,uuid,uuid,,,,YES,
+su_personal,regimen_turno,20,text,text,,,,YES,
+su_personal,vehiculo_id,21,uuid,uuid,,,,YES,
+su_personal,franja_turno,22,text,text,,,,YES,
+su_personal,fecha_ref_descanso,23,date,date,,,,YES,
+su_personal_capacitaciones,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_personal_capacitaciones,organization_id,2,uuid,uuid,,,,NO,
+su_personal_capacitaciones,personal_id,3,uuid,uuid,,,,NO,
+su_personal_capacitaciones,tipo_capacitacion,4,text,text,,,,NO,
+su_personal_capacitaciones,institucion,5,text,text,,,,YES,
+su_personal_capacitaciones,fecha_emision,6,date,date,,,,YES,
+su_personal_capacitaciones,fecha_vencimiento,7,date,date,,,,YES,
+su_personal_capacitaciones,documento_url,8,text,text,,,,YES,
+su_personal_capacitaciones,created_at,9,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal_capacitaciones,updated_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal_carnet_salud,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_personal_carnet_salud,organization_id,2,uuid,uuid,,,,NO,
+su_personal_carnet_salud,personal_id,3,uuid,uuid,,,,NO,
+su_personal_carnet_salud,fecha_emision,4,date,date,,,,YES,
+su_personal_carnet_salud,fecha_vencimiento,5,date,date,,,,YES,
+su_personal_carnet_salud,documento_url,6,text,text,,,,YES,
+su_personal_carnet_salud,created_at,7,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal_carnet_salud,updated_at,8,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal_habilitaciones,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_personal_habilitaciones,organization_id,2,uuid,uuid,,,,NO,
+su_personal_habilitaciones,personal_id,3,uuid,uuid,,,,NO,
+su_personal_habilitaciones,tipo,4,text,text,,,,NO,
+su_personal_habilitaciones,numero,5,text,text,,,,YES,
+su_personal_habilitaciones,organismo_emisor,6,text,text,,,,YES,
+su_personal_habilitaciones,fecha_emision,7,date,date,,,,YES,
+su_personal_habilitaciones,fecha_vencimiento,8,date,date,,,,YES,
+su_personal_habilitaciones,documento_url,9,text,text,,,,YES,
+su_personal_habilitaciones,estado,10,text,text,,,,YES,'vigente'::text
+su_personal_habilitaciones,created_at,11,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal_habilitaciones,updated_at,12,timestamp with time zone,timestamptz,,,,YES,now()
+su_personal_licencias,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_personal_licencias,organization_id,2,uuid,uuid,,,,NO,
+su_personal_licencias,personal_id,3,uuid,uuid,,,,NO,
+su_personal_licencias,tipo,4,text,text,,,,NO,
+su_personal_licencias,fecha_desde,5,date,date,,,,NO,
+su_personal_licencias,fecha_hasta,6,date,date,,,,YES,
+su_personal_licencias,observaciones,7,text,text,,,,YES,
+su_personal_licencias,created_at,8,timestamp with time zone,timestamptz,,,,NO,now()
+su_personal_licencias,updated_at,9,timestamp with time zone,timestamptz,,,,NO,now()
+su_personal_roles,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_personal_roles,organization_id,2,uuid,uuid,,,,NO,
+su_personal_roles,personal_id,3,uuid,uuid,,,,NO,
+su_personal_roles,rol,4,text,text,,,,NO,
+su_personal_roles,rol_principal,5,boolean,bool,,,,YES,false
+su_personal_roles,created_at,6,timestamp with time zone,timestamptz,,,,YES,now()
+su_servicios,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_servicios,organization_id,2,uuid,uuid,,,,NO,
+su_servicios,tipo,3,text,text,,,,YES,
+su_servicios,prestador_contratante,4,text,text,,,,YES,
+su_servicios,prioridad,5,text,text,,,,YES,
+su_servicios,origen_direccion,6,text,text,,,,YES,
+su_servicios,origen_lat,7,numeric,numeric,,,,YES,
+su_servicios,origen_lng,8,numeric,numeric,,,,YES,
+su_servicios,destino_direccion,9,text,text,,,,YES,
+su_servicios,destino_lat,10,numeric,numeric,,,,YES,
+su_servicios,destino_lng,11,numeric,numeric,,,,YES,
+su_servicios,vehiculo_id,12,uuid,uuid,,,,YES,
+su_servicios,paciente_nombre,13,text,text,,,,YES,
+su_servicios,paciente_documento,14,text,text,,,,YES,
+su_servicios,paciente_edad,15,integer,int4,,32,0,YES,
+su_servicios,motivo_consulta,16,text,text,,,,YES,
+su_servicios,diagnostico_presuntivo,17,text,text,,,,YES,
+su_servicios,estado,18,text,text,,,,YES,'solicitado'::text
+su_servicios,hora_solicitud,19,timestamp with time zone,timestamptz,,,,YES,
+su_servicios,hora_despacho,20,timestamp with time zone,timestamptz,,,,YES,
+su_servicios,hora_llegada_escena,21,timestamp with time zone,timestamptz,,,,YES,
+su_servicios,hora_inicio_traslado,22,timestamp with time zone,timestamptz,,,,YES,
+su_servicios,hora_finalizacion,23,timestamp with time zone,timestamptz,,,,YES,
+su_servicios,created_at,24,timestamp with time zone,timestamptz,,,,YES,now()
+su_servicios,updated_at,25,timestamp with time zone,timestamptz,,,,YES,now()
+su_servicios_dotacion,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_servicios_dotacion,organization_id,2,uuid,uuid,,,,NO,
+su_servicios_dotacion,servicio_id,3,uuid,uuid,,,,NO,
+su_servicios_dotacion,personal_id,4,uuid,uuid,,,,NO,
+su_servicios_dotacion,rol_en_servicio,5,text,text,,,,YES,
+su_servicios_dotacion,created_at,6,timestamp with time zone,timestamptz,,,,YES,now()
+su_servicios_historia_clinica,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_servicios_historia_clinica,organization_id,2,uuid,uuid,,,,NO,
+su_servicios_historia_clinica,servicio_id,3,uuid,uuid,,,,NO,
+su_servicios_historia_clinica,contenido,4,text,text,,,,YES,
+su_servicios_historia_clinica,registrado_por,5,uuid,uuid,,,,YES,
+su_servicios_historia_clinica,created_at,6,timestamp with time zone,timestamptz,,,,YES,now()
+su_servicios_historia_clinica,updated_at,7,timestamp with time zone,timestamptz,,,,YES,now()
+su_turnos,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_turnos,organization_id,2,uuid,uuid,,,,NO,
+su_turnos,personal_id,3,uuid,uuid,,,,NO,
+su_turnos,base_id,4,uuid,uuid,,,,YES,
+su_turnos,fecha,5,date,date,,,,NO,
+su_turnos,hora_inicio,6,time without time zone,time,,,,NO,
+su_turnos,hora_fin,7,time without time zone,time,,,,YES,
+su_turnos,tipo_turno,8,text,text,,,,YES,
+su_turnos,created_at,9,timestamp with time zone,timestamptz,,,,YES,now()
+su_turnos,updated_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_turnos,vehiculo_id,11,uuid,uuid,,,,YES,
+su_turnos,es_hora_extra,12,boolean,bool,,,,NO,false
+su_turnos,horas_extra,13,numeric,numeric,,,,YES,
+su_turnos,observaciones,14,text,text,,,,YES,
+su_vehiculos,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_vehiculos,organization_id,2,uuid,uuid,,,,NO,
+su_vehiculos,numero_interno,3,text,text,,,,NO,
+su_vehiculos,matricula,4,text,text,,,,YES,
+su_vehiculos,marca,5,text,text,,,,YES,
+su_vehiculos,modelo,6,text,text,,,,YES,
+su_vehiculos,anio,7,integer,int4,,32,0,YES,
+su_vehiculos,categoria,8,text,text,,,,YES,
+su_vehiculos,modalidad,9,text,text,,,,YES,
+su_vehiculos,es_backup,10,boolean,bool,,,,YES,false
+su_vehiculos,base_id,11,uuid,uuid,,,,YES,
+su_vehiculos,altura_cm,12,numeric,numeric,,,,YES,
+su_vehiculos,capacidad_camilla_articulada,13,boolean,bool,,,,YES,
+su_vehiculos,estado_operativo,14,text,text,,,,YES,'disponible'::text
+su_vehiculos,kilometraje,15,integer,int4,,32,0,YES,
+su_vehiculos,proximo_service_km,16,integer,int4,,32,0,YES,
+su_vehiculos,created_at,17,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos,updated_at,18,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos_documentos,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_vehiculos_documentos,organization_id,2,uuid,uuid,,,,NO,
+su_vehiculos_documentos,vehiculo_id,3,uuid,uuid,,,,NO,
+su_vehiculos_documentos,tipo,4,text,text,,,,NO,
+su_vehiculos_documentos,numero,5,text,text,,,,YES,
+su_vehiculos_documentos,fecha_emision,6,date,date,,,,YES,
+su_vehiculos_documentos,fecha_vencimiento,7,date,date,,,,YES,
+su_vehiculos_documentos,documento_url,8,text,text,,,,YES,
+su_vehiculos_documentos,created_at,9,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos_documentos,updated_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos_equipamiento_checklist,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_vehiculos_equipamiento_checklist,organization_id,2,uuid,uuid,,,,NO,
+su_vehiculos_equipamiento_checklist,vehiculo_id,3,uuid,uuid,,,,NO,
+su_vehiculos_equipamiento_checklist,item,4,text,text,,,,YES,
+su_vehiculos_equipamiento_checklist,material_id,5,uuid,uuid,,,,YES,
+su_vehiculos_equipamiento_checklist,obligatorio,6,boolean,bool,,,,YES,true
+su_vehiculos_equipamiento_checklist,presente,7,boolean,bool,,,,YES,
+su_vehiculos_equipamiento_checklist,fecha_verificacion,8,date,date,,,,YES,
+su_vehiculos_equipamiento_checklist,verificado_por,9,uuid,uuid,,,,YES,
+su_vehiculos_equipamiento_checklist,created_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos_equipamiento_checklist,updated_at,11,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos_mantenimiento,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+su_vehiculos_mantenimiento,organization_id,2,uuid,uuid,,,,NO,
+su_vehiculos_mantenimiento,vehiculo_id,3,uuid,uuid,,,,NO,
+su_vehiculos_mantenimiento,tipo,4,text,text,,,,YES,
+su_vehiculos_mantenimiento,descripcion,5,text,text,,,,YES,
+su_vehiculos_mantenimiento,fecha,6,date,date,,,,YES,
+su_vehiculos_mantenimiento,kilometraje_al_momento,7,integer,int4,,32,0,YES,
+su_vehiculos_mantenimiento,costo,8,numeric,numeric,,,,YES,
+su_vehiculos_mantenimiento,proveedor,9,text,text,,,,YES,
+su_vehiculos_mantenimiento,created_at,10,timestamp with time zone,timestamptz,,,,YES,now()
+su_vehiculos_mantenimiento,updated_at,11,timestamp with time zone,timestamptz,,,,YES,now()
+user_role_history,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+user_role_history,user_id,2,uuid,uuid,,,,YES,
+user_role_history,old_role,3,text,text,,,,YES,
+user_role_history,new_role,4,text,text,,,,YES,
+user_role_history,changed_by,5,uuid,uuid,,,,YES,
+user_role_history,changed_at,6,timestamp without time zone,timestamp,,,,YES,now()
+user_role_history,reason,7,text,text,,,,YES,
+user_status_history,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+user_status_history,user_id,2,uuid,uuid,,,,YES,
+user_status_history,old_status,3,text,text,,,,YES,
+user_status_history,new_status,4,text,text,,,,YES,
+user_status_history,changed_by,5,uuid,uuid,,,,YES,
+user_status_history,changed_at,6,timestamp without time zone,timestamp,,,,YES,now()
+user_status_history,reason,7,text,text,,,,YES,
+users,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+users,cognito_sub,2,text,text,,,,YES,
+users,email,3,text,text,,,,NO,
+users,nombre,4,text,text,,,,NO,
+users,apellido,5,text,text,,,,YES,
+users,telefono,6,text,text,,,,YES,
+users,role_key,7,text,text,,,,YES,
+users,status,8,text,text,,,,YES,
+users,created_by,9,uuid,uuid,,,,YES,
+users,approved_by,10,uuid,uuid,,,,YES,
+users,approved_at,11,timestamp without time zone,timestamp,,,,YES,
+users,rejected_by,12,uuid,uuid,,,,YES,
+users,rejected_at,13,timestamp without time zone,timestamp,,,,YES,
+users,rejection_reason,14,text,text,,,,YES,
+users,last_login_at,15,timestamp without time zone,timestamp,,,,YES,
+users,created_at,16,timestamp without time zone,timestamp,,,,YES,now()
+users,updated_at,17,timestamp without time zone,timestamp,,,,YES,now()
+users,extension,18,text,text,,,,YES,
+users,department,19,text,text,,,,YES,
+users,is_test,20,boolean,bool,,,,YES,false
+users,motivo_pausa,21,text,text,,,,YES,
+users,pausado_at,22,timestamp without time zone,timestamp,,,,YES,
+vendor_registration_requests,id,1,uuid,uuid,,,,NO,gen_random_uuid()
+vendor_registration_requests,nombre,2,text,text,,,,NO,
+vendor_registration_requests,apellido,3,text,text,,,,NO,
+vendor_registration_requests,email,4,text,text,,,,NO,
+vendor_registration_requests,telefono,5,text,text,,,,YES,
+vendor_registration_requests,status,6,text,text,,,,YES,'pending'::text
+vendor_registration_requests,reviewed_by,7,uuid,uuid,,,,YES,
+vendor_registration_requests,reviewed_at,8,timestamp without time zone,timestamp,,,,YES,
+vendor_registration_requests,review_notes,9,text,text,,,,YES,
+vendor_registration_requests,user_id,10,uuid,uuid,,,,YES,
+vendor_registration_requests,created_at,11,timestamp without time zone,timestamp,,,,YES,now()
+vendor_registration_requests,updated_at,12,timestamp without time zone,timestamp,,,,YES,now()
