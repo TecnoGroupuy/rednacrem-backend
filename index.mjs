@@ -16257,6 +16257,7 @@ async function routeRequest(event) {
           const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
           const medioPago = normalizeText(product?.medio_pago || product?.medioPago || medioPagoOverride) || null;
           const fechaVenta = fechaAlta;
+          await validateFechaVentaNotFuture(client, fechaVenta);
 
           let productId = null;
           if (productName) {
