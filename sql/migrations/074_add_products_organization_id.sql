@@ -10,9 +10,11 @@
 -- siempre en produccion, lo cual contradice que el alta de "Nuevo cliente"
 -- ya funciona ahi (el caso real de Patricia, primer contacto exitoso).
 --
--- No confirmado todavia contra RDS -- a diferencia de las migraciones
--- 071/072, esta todavia no tiene el visto bueno de Damian. NO aplicar en
--- ningun entorno (ni local) hasta que lo confirme.
+-- Aprobada por Damian para aplicar en LOCAL (para poder probar de punta a
+-- punta el feature de vendedor/fecha de venta, que sin esto no arranca:
+-- createProductAndSale ya filtraba products por organization_id de forma
+-- incondicional). Sigue sin correr contra produccion -- eso lo hace Damian
+-- si RDS todavia no tiene esta columna.
 --
 -- Solo agrega la columna (ADD COLUMN IF NOT EXISTS), sin FK ni NOT NULL,
 -- pensada para ser no-op en produccion.

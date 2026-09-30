@@ -94,6 +94,46 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
       producción usa `contacts_email_org_unique_idx`, **UNIQUE por organización**
       (`organization_id, lower(email)`). Un índice único global rompía el caso real
       de una misma persona siendo cliente de dos organizaciones distintas.
+  - `sales` en local tenía columnas renombradas y varias faltantes respecto a
+    producción (confirmado contra RDS por Damián: columnas, constraints e índices
+    exactos de la tabla). Corregido en local por
+    `sql/migrations/075_align_sales_with_prod.sql` (`seller_id`→`seller_user_id`,
+    `fecha`→`fecha_venta`, y agrega `notes`, `documento_cobranza`,
+    `sale_group_id`, `parent_sale_id`, `gestion_id`, `titular_contact_id`,
+    `relation`, `product_id`, `payment_method_id` con sus FKs e índices). Con esto,
+    `insertSaleRecord` en `index.mjs` ya no detecta columnas en runtime — asume
+    directamente el esquema de producción (regla 2).
+  - `sales.registrada_por_user_id` (uuid, FK a `users`) es una columna **nueva**,
+    agregada en local por `sql/migrations/076_add_sales_registrada_por.sql`.
+    Guarda siempre al usuario logueado que cargó la venta (ver `resolveSaleSeller`
+    en `index.mjs`), independientemente de quién sea el vendedor. Ninguna de las
+    dos migraciones (075, 076) fue corrida en producción por el agente — las
+    corre Damián.
+  - `products.organization_id` **no existía en local** (`createProductAndSale`
+    ya filtraba `products` por esa columna de forma incondicional, sin gateo de
+    metadata — solo podía funcionar así si producción la tiene). Aprobada por
+    Damián para aplicar en local por
+    `sql/migrations/074_add_products_organization_id.sql` (solo `ADD COLUMN IF
+    NOT EXISTS`, sin FK ni `NOT NULL`) para poder probar de punta a punta el
+    alta manual de clientes. Sigue sin correr contra producción.
+  - `sale_items` en local tiene `cantidad`/`precio_unitario`, pero el código
+    preexistente (`INSERT INTO sale_items (sale_id, product_id,
+    product_name_snapshot, price)`, sin gateo de columnas) asume
+    `product_name_snapshot`/`price` — la misma señal que con `products`: si
+    producción no tuviera esas columnas, esa consulta nunca podría haber
+    funcionado ahí. Bloquea el alta manual de punta a punta en local
+    (`relation "sale_items" ... column "product_name_snapshot" does not
+    exist`). Pendiente: falta que Damián confirme columnas/constraints/índices
+    exactos de `sale_items` en RDS para escribir la migración 077 que alinee
+    local (no se asumió el tipo/definición sin esa confirmación).
+  - `public.payment_methods` **no existe en absoluto en local** (ni vacía) —
+    descubierto al escribir la migración 075. El endpoint `GET /payment-methods`
+    y el `LEFT JOIN payment_methods` de `getClientDetailData` ya asumían su
+    existencia (código correcto para producción), así que el selector de "Medio
+    de pago" del wizard viene fallando en local independientemente de cualquier
+    cambio de esta sesión. `sales.payment_method_id` se agregó sin su FK en 075
+    porque no hay a qué tabla apuntar en local. Crear `payment_methods` en local
+    es un cambio aparte, todavía no hecho.
 - **Nunca** verifiques ni asumas el schema contra la base local.
 - Toda verificación de schema se hace vía `psql` contra RDS producción, y la corre
   Damián directamente — no Claude contra una copia local.
