@@ -49,6 +49,40 @@ loadEnvFile(path.join(ROOT, ".env.local"));
 
 // --- Parseo de CSV tolerante a corrupcion -----------------------------
 
+// Respeta comillas dobles y el escape "" (RFC4180) -- un column_default de
+// tipo jsonb/array puede traer una coma dentro de un valor entre comillas
+// (ej. '{"calls": 3, "whatsapp": 1}'::jsonb), y un split ingenuo por "," lo
+// cuenta como un campo de mas.
+function parseCsvLine(line) {
+  const fields = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
 function parseCsvFile(filePath, expectedHeader) {
   const warnings = [];
   if (!fs.existsSync(filePath)) {
@@ -70,7 +104,7 @@ function parseCsvFile(filePath, expectedHeader) {
   }
 
   const headerLine = lines[0];
-  const header = headerLine.split(",");
+  const header = parseCsvLine(headerLine);
   if (header.join(",") !== expectedHeader.join(",")) {
     warnings.push(
       `El header no coincide con el esperado. Esperado: [${expectedHeader.join(", ")}]. Encontrado: [${header.join(", ")}].`
@@ -91,7 +125,7 @@ function parseCsvFile(filePath, expectedHeader) {
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i];
     if (line === headerLine) continue; // segmento nuevo, no es un dato
-    const fields = line.split(",");
+    const fields = parseCsvLine(line);
     if (fields.length !== expectedHeader.length) {
       parseErrors.push({ lineNumber: i + 1, raw: line, fieldCount: fields.length });
       continue;
