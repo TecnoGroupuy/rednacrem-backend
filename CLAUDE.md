@@ -116,24 +116,30 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     `sql/migrations/074_add_products_organization_id.sql` (solo `ADD COLUMN IF
     NOT EXISTS`, sin FK ni `NOT NULL`) para poder probar de punta a punta el
     alta manual de clientes. Sigue sin correr contra producción.
-  - `sale_items` en local tiene `cantidad`/`precio_unitario`, pero el código
-    preexistente (`INSERT INTO sale_items (sale_id, product_id,
-    product_name_snapshot, price)`, sin gateo de columnas) asume
-    `product_name_snapshot`/`price` — la misma señal que con `products`: si
-    producción no tuviera esas columnas, esa consulta nunca podría haber
-    funcionado ahí. Bloquea el alta manual de punta a punta en local
-    (`relation "sale_items" ... column "product_name_snapshot" does not
-    exist`). Pendiente: falta que Damián confirme columnas/constraints/índices
-    exactos de `sale_items` en RDS para escribir la migración 077 que alinee
-    local (no se asumió el tipo/definición sin esa confirmación).
-  - `public.payment_methods` **no existe en absoluto en local** (ni vacía) —
+  - `sale_items` en local tenía `cantidad`/`precio_unitario` (con sus CHECK) en
+    vez de `product_name_snapshot`/`price`/`organization_id`, y `product_id`
+    era `NOT NULL` (en producción es nullable). Confirmado contra RDS por
+    Damián y corregido en local por
+    `sql/migrations/077_align_sale_items_and_create_payment_methods.sql`:
+    agrega las columnas de producción, relaja `product_id`, agrega la FK de
+    `organization_id`, y dropea `cantidad`/`precio_unitario` (confirmado por
+    grep que ningún camino de `index.mjs` las usa — todos ya asumían
+    `product_name_snapshot`/`price`, la misma señal que con `sales`/`products`:
+    si producción no tuviera esas columnas, ese código preexistente nunca
+    podría haber funcionado ahí). Los índices y las FKs de `sale_id`/
+    `product_id` ya coincidían con producción.
+  - `public.payment_methods` **no existía en absoluto en local** (ni vacía) —
     descubierto al escribir la migración 075. El endpoint `GET /payment-methods`
     y el `LEFT JOIN payment_methods` de `getClientDetailData` ya asumían su
     existencia (código correcto para producción), así que el selector de "Medio
-    de pago" del wizard viene fallando en local independientemente de cualquier
-    cambio de esta sesión. `sales.payment_method_id` se agregó sin su FK en 075
-    porque no hay a qué tabla apuntar en local. Crear `payment_methods` en local
-    es un cambio aparte, todavía no hecho.
+    de pago" del wizard venía fallando en local independientemente de cualquier
+    cambio de esta sesión. Creada en local, igual a producción (columnas,
+    constraints e índice único `(lower(nombre), organization_id)`), por la
+    misma migración 077. Con esto, `sales_payment_method_id_fkey` (que 075
+    había dejado sin agregar porque no había a qué tabla apuntar) también se
+    agrega en 077. El seed de datos de `payment_methods` (los medios de pago
+    reales de Rednacrem/Global Assist) vive aparte, en
+    `sql/seeds/payment_methods_local.sql` — un seed nunca va en una migración.
 - **Nunca** verifiques ni asumas el schema contra la base local.
 - Toda verificación de schema se hace vía `psql` contra RDS producción, y la corre
   Damián directamente — no Claude contra una copia local.
