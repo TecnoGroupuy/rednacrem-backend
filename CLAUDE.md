@@ -95,7 +95,13 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     `sql/migrations/048_update_motivo_baja_constraint.sql` en este repo (`'Auditoría'`,
     `'Medio de pago'`, `'Voluntaria'`, etc., capitalizado). Esa migración solo corrió
     en local — nunca escribas `motivo_baja` basándote en el valor de la 048 sin
-    confirmar antes contra RDS.
+    confirmar antes contra RDS. **Corregido en local por
+    `sql/migrations/080_fix_motivo_baja_check_to_match_prod.sql`** (remapea las
+    filas locales existentes y reemplaza el `CHECK` por la lista real de
+    arriba) — sin esto, cualquier baja real con el código actual (que siempre
+    escribe un slug en minúscula) fallaba en local contra el `CHECK` viejo de
+    la 048. **SOLO LOCAL, no-op en producción** (prod ya tiene el `CHECK`
+    correcto) — no se corre ahí.
   - Los índices únicos de `contacts.documento` y `contacts.email` tenían alcance
     **distinto** entre local y producción (confirmado por Damián, corregido en local
     por `sql/migrations/071_align_contacts_unique_indexes_with_prod.sql`):
