@@ -1,3 +1,9 @@
+-- SOLO LOCAL -- NO-OP EN PRODUCCION -- NO EJECUTAR EN PRODUCCION.
+-- Confirmado contra docs/prod-schema/prod_columns.csv: las 8 columnas de
+-- sale_items y las 5 de payment_methods ya existen en produccion identicas
+-- a lo que agrega esta migracion. Damian confirmo que en el deploy de este
+-- feature NO se corrio en prod -- es pura alineacion de la base local.
+--
 -- Alinea local.sale_items con la definicion EXACTA de produccion (columnas,
 -- constraints e indices, confirmados contra RDS por Damian) y crea
 -- public.payment_methods, que no existia en absoluto en local.

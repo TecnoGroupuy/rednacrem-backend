@@ -115,20 +115,25 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     `sale_group_id`, `parent_sale_id`, `gestion_id`, `titular_contact_id`,
     `relation`, `product_id`, `payment_method_id` con sus FKs e índices). Con esto,
     `insertSaleRecord` en `index.mjs` ya no detecta columnas en runtime — asume
-    directamente el esquema de producción (regla 2).
+    directamente el esquema de producción (regla 2). **SOLO LOCAL, no-op en
+    producción** (confirmado columna por columna contra
+    `docs/prod-schema/prod_columns.csv`) — Damián confirmó que no se corrió en
+    el deploy de este feature.
   - `sales.registrada_por_user_id` (uuid, FK a `users`) es una columna **nueva**,
     agregada en local por `sql/migrations/076_add_sales_registrada_por.sql`.
     Guarda siempre al usuario logueado que cargó la venta (ver `resolveSaleSeller`
-    en `index.mjs`), independientemente de quién sea el vendedor. Ninguna de las
-    dos migraciones (075, 076) fue corrida en producción por el agente — las
-    corre Damián.
+    en `index.mjs`), independientemente de quién sea el vendedor. **Esta SÍ se
+    corrió en producción** (Damián, COMMIT confirmado) — a diferencia de
+    074/075/077/078, no era no-op: sin ella las ventas fallan en cuanto se
+    despliega el backend nuevo.
   - `products.organization_id` **no existía en local** (`createProductAndSale`
     ya filtraba `products` por esa columna de forma incondicional, sin gateo de
     metadata — solo podía funcionar así si producción la tiene). Aprobada por
     Damián para aplicar en local por
     `sql/migrations/074_add_products_organization_id.sql` (solo `ADD COLUMN IF
     NOT EXISTS`, sin FK ni `NOT NULL`) para poder probar de punta a punta el
-    alta manual de clientes. Sigue sin correr contra producción.
+    alta manual de clientes. **SOLO LOCAL, no-op en producción** (la columna ya
+    existe ahí idéntica) — no se corrió en el deploy de este feature.
   - `sale_items` en local tenía `cantidad`/`precio_unitario` (con sus CHECK) en
     vez de `product_name_snapshot`/`price`/`organization_id`, y `product_id`
     era `NOT NULL` (en producción es nullable). Confirmado contra RDS por
@@ -140,7 +145,9 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     `product_name_snapshot`/`price`, la misma señal que con `sales`/`products`:
     si producción no tuviera esas columnas, ese código preexistente nunca
     podría haber funcionado ahí). Los índices y las FKs de `sale_id`/
-    `product_id` ya coincidían con producción.
+    `product_id` ya coincidían con producción. **SOLO LOCAL, no-op en
+    producción** (las 8 columnas de `sale_items` y las 5 de `payment_methods`
+    ya existen ahí idénticas) — no se corrió en el deploy de este feature.
   - `public.payment_methods` **no existía en absoluto en local** (ni vacía) —
     descubierto al escribir la migración 075. El endpoint `GET /payment-methods`
     y el `LEFT JOIN payment_methods` de `getClientDetailData` ya asumían su
@@ -168,7 +175,10 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     tablas de producción ausentes en local que el alta de clientes usa de
     verdad, en el `INSERT` de familiares — columnas, constraints e índices
     calcados de RDS, incluida la `UNIQUE (contact_id_a, contact_id_b)` que usa
-    su `ON CONFLICT`).
+    su `ON CONFLICT`). **SOLO LOCAL, no-op en producción** en sus dos partes
+    (las 44 columnas ya existen ahí, `contact_relations` ya existe ahí con
+    esos mismos constraints/índices) — no se corrió en el deploy de este
+    feature.
   - **Pendiente para una reconstrucción completa de la base local (fase 1,
     fuera del alcance de esta sesión)**: las 178 diferencias de tipo/
     nulabilidad/default entre columnas que ya existen en ambos lados

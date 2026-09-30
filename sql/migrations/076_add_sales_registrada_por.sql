@@ -6,7 +6,10 @@
 -- Solo en sales. contact_products ya apunta a la venta via sale_id, no hace
 -- falta duplicar la columna ahi.
 --
--- No aplicar en produccion -- lo corre Damian.
+-- APLICADA EN PRODUCCION por Damian (COMMIT confirmado) -- a diferencia de
+-- 074/075/077/078 (alineacion local, no-op en prod), esta SI era un cambio
+-- real: registrada_por_user_id no existia en produccion, y sin ella las
+-- ventas fallan en cuanto se despliega el backend nuevo.
 
 ALTER TABLE public.sales
   ADD COLUMN IF NOT EXISTS registrada_por_user_id uuid;

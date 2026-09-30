@@ -1,3 +1,9 @@
+-- SOLO LOCAL -- NO-OP EN PRODUCCION -- NO EJECUTAR EN PRODUCCION.
+-- Confirmado contra docs/prod-schema/prod_columns.csv: products.organization_id
+-- ya existe en produccion (uuid, nullable), identica a lo que agrega esta
+-- migracion. Damian confirmo que en el deploy de este feature NO se corrio
+-- en prod -- es pura alineacion de la base local.
+--
 -- Divergencia NUEVA, encontrada al probar el codigo del Punto A/B (segunda
 -- ronda de fixes de POST /contacts) con la migracion 072 aplicada en local:
 -- local.products NO tiene organization_id, a diferencia de produccion.

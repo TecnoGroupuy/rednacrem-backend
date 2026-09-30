@@ -1,3 +1,9 @@
+-- SOLO LOCAL -- NO-OP EN PRODUCCION -- NO EJECUTAR EN PRODUCCION.
+-- Confirmado columna por columna contra docs/prod-schema/prod_columns.csv:
+-- las 19 columnas de sales ya existen en produccion con estos nombres y
+-- tipos exactos. Damian confirmo que en el deploy de este feature NO se
+-- corrio en prod -- es pura alineacion de la base local.
+--
 -- Alinea local.sales con la definicion EXACTA de produccion (columnas,
 -- constraints e indices, confirmados contra RDS -- ver mensaje de Damian).
 -- No solo renombra: agrega todas las columnas que faltaban. Pensada para

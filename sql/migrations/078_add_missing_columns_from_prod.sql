@@ -1,3 +1,9 @@
+-- SOLO LOCAL -- NO-OP EN PRODUCCION -- NO EJECUTAR EN PRODUCCION.
+-- Las 44 columnas se sacaron directamente de prod_columns.csv (ya existen
+-- en produccion) y contact_relations se armo con los constraints/indices
+-- reales de RDS que paso Damian -- ambas partes son no-op en prod. Damian
+-- confirmo que en el deploy de este feature NO se corrio en prod.
+--
 -- Agrega a local las 44 columnas que existen en produccion y faltaban en
 -- local, confirmadas contra docs/prod-schema/prod_columns.csv (ver
 -- scripts/compare-schema.mjs). Alcance ACOTADO a lo que bloquea el feature
