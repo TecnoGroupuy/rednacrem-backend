@@ -6627,7 +6627,11 @@ async function processClientImportBatch(
           const isBaja = !isAlta;
           const fechaAlta = fechaVenta || new Date().toISOString().slice(0, 10);
           const fechaBaja = isBaja ? (row.fecha_baja || fechaAlta) : null;
-          const motivoBaja = isBaja ? "otro" : null;
+          // 'otro' no es un slug valido de motivo_baja en produccion (ver
+          // CONTACT_PRODUCT_BAJA_SLUGS / CLAUDE.md) -- ese INSERT fallaria
+          // ahi. Mismo mapeo canonico que usa la baja masiva
+          // (resolverMotivoBajaSlug), con 'voluntaria' como fallback.
+          const motivoBaja = isBaja ? (resolverMotivoBajaSlug(estadoRaw) || "voluntaria") : null;
           const motivoBajaDetalle = isBaja ? (estadoRaw || "importado") : null;
 
           let shouldInsertContactProduct = true;
@@ -6738,6 +6742,13 @@ async function processClientImportBatch(
               }));
               throw contactProductError;
             }
+            // Deliberadamente NO se llama a registrarCandidatoRecupero aca --
+            // un producto isBaja en este import es un dato historico/
+            // retroactivo (carga masiva de contactos), no una baja que
+            // ocurre ahora sobre un producto activo. Mandarlo a Recupero
+            // inundaria la cola con candidatos historicos no accionables.
+            // Para eso existe el importador propio de Recupero. Decision
+            // explicita de Damian, ver CLAUDE.md.
           }
         }
 
@@ -10390,26 +10401,35 @@ async function closeManualTicket({ ticketId, outcome, note, actorName, actorId, 
           await client.query("ROLLBACK");
           return { error: "La solicitud de baja requiere producto_contrato_id." };
         }
-        // 'voluntaria' (minúscula, sin tilde) — el CHECK real de RDS
-        // (confirmado por Damián contra producción) no coincide con el de
-        // la migración 048 de este repo, que solo existe/corrió en local.
-        // Ver nota en sql/migrations/048_update_motivo_baja_constraint.sql.
-        await client.query(
-          `
-          UPDATE contact_products
-          SET
-            estado = 'baja',
-            motivo_baja = 'voluntaria',
-            motivo_baja_detalle = $2,
-            fecha_baja = now()::date,
-            updated_at = now()
-          WHERE id = $1
-          ${organizationId ? "AND organization_id = $3" : ""}
-          `,
+        // Delega en aplicarBajaContactProduct -- la misma funcion compartida
+        // que usan la baja individual y la baja masiva (regla 4 de
+        // CLAUDE.md) -- en vez de un UPDATE propio. Asi hereda el UPDATE de
+        // contact_products, la auditoria (contact_product_baja_audit),
+        // recupero_alerts y el alta en recupero_candidatos con dedup, todo
+        // dentro de esta misma transaccion.
+        //
+        // motivo_baja: manual_tickets no tiene una columna de motivo propia
+        // para solicitud_baja (ver buildServiceRequestPayload en el
+        // frontend -- service_request queda null salvo para
+        // solicitud_servicio). El unico texto libre disponible es
+        // ticket.resumen ("detalle de la solicitud" que carga atencion al
+        // cliente al crear el ticket) -- se mapea con el mismo
+        // resolverMotivoBajaSlug que usan la baja masiva y los imports, y
+        // si no matchea ningun slug valido cae a 'voluntaria'.
+        const motivoBaja = resolverMotivoBajaSlug(ticket.resumen) || "voluntaria";
+        const resultadoBaja = await aplicarBajaContactProduct(client, {
+          contactId: ticket.cliente_id,
+          productId: ticket.producto_contrato_id,
+          motivoBaja,
+          observacion: note || "Baja confirmada",
+          fechaBaja: null,
+          userId: actorId,
           organizationId
-            ? [ticket.producto_contrato_id, note || "Baja confirmada", organizationId]
-            : [ticket.producto_contrato_id, note || "Baja confirmada"]
-        );
+        });
+        if (!resultadoBaja.ok) {
+          await client.query("ROLLBACK");
+          return { error: resultadoBaja.message };
+        }
       }
     }
 
@@ -16253,7 +16273,12 @@ async function routeRequest(event) {
           const estadoNorm = estadoRaw.toLowerCase();
           const isAlta = estadoNorm === "alta" || estadoNorm === "activo";
           const fechaBaja = isAlta ? null : (parseDate(product?.fecha_baja || product?.fechaBaja) || fechaAlta);
-          const motivoBaja = isAlta ? null : "otro";
+          // 'otro' no es un slug valido de motivo_baja en produccion (ver
+          // CONTACT_PRODUCT_BAJA_SLUGS / CLAUDE.md) -- ese INSERT fallaria
+          // ahi. Se usa el mismo mapeo canonico que la baja masiva
+          // (resolverMotivoBajaSlug), con 'voluntaria' como fallback cuando
+          // el estado del producto no mapea a ningun slug reconocido.
+          const motivoBaja = isAlta ? null : (resolverMotivoBajaSlug(estadoRaw) || "voluntaria");
           const motivoBajaDetalle = isAlta ? null : (estadoRaw || "baja");
           const medioPago = normalizeText(product?.medio_pago || product?.medioPago || medioPagoOverride) || null;
           const fechaVenta = fechaAlta;
@@ -16383,6 +16408,14 @@ async function routeRequest(event) {
             `,
             contactProductVals
           );
+
+          // Deliberadamente NO se llama a registrarCandidatoRecupero aca --
+          // cuando isAlta es false, el producto nace YA dado de baja (dato
+          // retroactivo/historico cargado con el alta manual), no es una
+          // baja que ocurre ahora sobre un producto activo. Mandar esto a
+          // Recupero inundaria la cola con candidatos historicos no
+          // accionables. Para bajas historicas existe el importador propio
+          // de Recupero. Decision explicita de Damian, ver CLAUDE.md.
 
           return saleId;
         };

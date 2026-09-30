@@ -231,3 +231,27 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
 - Antes de tocar `processRecuperoImportJob` o el flujo de import CSV de Recupero,
   revisar el estado de la auditoría de agosto 2026 (dedupe, `ON CONFLICT`, columna
   PRECIO) para no reintroducir bugs ya identificados.
+- **Toda baja de `contact_products` que ocurre AHORA sobre un producto activo
+  pasa por `aplicarBajaContactProduct`** (única función que hace el `UPDATE`,
+  la auditoría en `contact_product_baja_audit`, `recupero_alerts` y el alta en
+  `recupero_candidatos` con dedup vía `idx_recupero_dedup`) — la usan la baja
+  individual (`POST /contacts/:contactId/products/:productId/baja`), la baja
+  masiva, y `closeManualTicket` cuando un ticket `solicitud_baja` se cierra con
+  `outcome='baja_confirmada'` (antes hacía su propio `UPDATE` sin pasar por
+  Recupero — bug reportado y corregido). El motivo de baja en ese caso sale de
+  `ticket.resumen` (único texto libre que carga `solicitud_baja`, no tiene
+  columna de motivo propia) mapeado con `resolverMotivoBajaSlug`, con
+  `'voluntaria'` como fallback.
+  - **`'otro'` NO es un slug válido** de `contact_products_motivo_baja_check`
+    en producción (ver lista de slugs arriba) — dos caminos lo escribían
+    hardcodeado (`processClientImportBatch`, import CSV de contactos, y
+    `createProductAndSale` de `POST /contacts` cuando un producto del payload
+    ya trae `estado` distinto de alta/activo) y hubieran fallado en prod.
+    Corregido: ambos usan `resolverMotivoBajaSlug` sobre el estado
+    crudo, con `'voluntaria'` como fallback.
+  - **Los productos que nacen YA en baja al importarse** (CSV de contactos,
+    o el alta manual con un producto retroactivo en estado no-alta) quedan
+    **deliberadamente afuera** del alta automática en `recupero_candidatos`
+    — son datos históricos, no un cliente que churnea ahora; mandarlos a
+    Recupero inundaría la cola con candidatos viejos no accionables. Para
+    bajas históricas existe el importador propio de Recupero.
