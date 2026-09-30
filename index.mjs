@@ -15190,6 +15190,16 @@ async function routeRequest(event) {
           }
           throw error;
         }
+        // resolveOrganizationId puede devolver null sin tirar excepcion (ej.
+        // superadministrador sin ?organization_id= en la URL) -- sin este
+        // corte, ese caso seguiria con organizationId=null y las queries de
+        // mas abajo podrian mezclar datos entre organizaciones si alguna
+        // todavia tuviera un fallback condicional tipo "$1::uuid IS NULL OR ...".
+        // Los datos de las organizaciones no se mezclan nunca: si no se pudo
+        // resolver, se corta aca en vez de seguir con un filtro ausente.
+        if (!organizationId) {
+          return json(403, { ok: false, message: "No se pudo determinar la organización activa. Especificá organization_id." });
+        }
 
         const isVendedor = dbUser?.role_key === "vendedor";
         if (isVendedor) {
@@ -15285,11 +15295,11 @@ async function routeRequest(event) {
               `
               SELECT id FROM contacts
               WHERE documento = $1
-              ${organizationId ? "AND organization_id = $2" : ""}
+                AND organization_id = $2
               ORDER BY updated_at DESC NULLS LAST, created_at DESC
               LIMIT 1
               `,
-              organizationId ? [fields.documento, organizationId] : [fields.documento]
+              [fields.documento, organizationId]
             );
             existingId = existingRes.rows[0]?.id || null;
           }
@@ -15302,7 +15312,7 @@ async function routeRequest(event) {
                 `
                 SELECT id, nombre, apellido, documento
                 FROM contacts
-                WHERE ($1::uuid IS NULL OR organization_id = $1)
+                WHERE organization_id = $1
                   AND (
                     ($2::text <> '' AND (
                       regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2
@@ -15316,7 +15326,7 @@ async function routeRequest(event) {
                 ORDER BY updated_at DESC NULLS LAST, created_at DESC
                 LIMIT 10
                 `,
-                [organizationId || null, telDigits || "", celDigits || ""]
+                [organizationId, telDigits || "", celDigits || ""]
               );
               // Compartir telefono no alcanza: si no es la misma persona
               // (nombre/apellido distintos, o documentos en conflicto), se
@@ -15523,11 +15533,11 @@ async function routeRequest(event) {
             SELECT id
             FROM contacts
             WHERE documento = $1
-              ${organizationId ? "AND organization_id = $2" : ""}
+              AND organization_id = $2
             ORDER BY updated_at DESC NULLS LAST, created_at DESC
             LIMIT 1
             `,
-            organizationId ? [fields.documento, organizationId] : [fields.documento]
+            [fields.documento, organizationId]
           );
           return {
             id: existingRes.rows[0]?.id || null,
@@ -15606,10 +15616,11 @@ async function routeRequest(event) {
             FROM lead_batches
             WHERE estado IN ('activo', 'asignado')
               AND (seller_id = $1 OR asignado_a = $1)
+              AND organization_id = $2
             ORDER BY created_at DESC
             LIMIT 1
             `,
-            [safeSellerId]
+            [safeSellerId, organizationId]
           );
           if (existingRes.rows.length) {
             const row = existingRes.rows[0];
@@ -15619,13 +15630,15 @@ async function routeRequest(event) {
           const fecha = new Date().toLocaleDateString("en-CA", { timeZone: "America/Montevideo" });
           const nombre = `Ventas manuales ${fecha}`;
           const createdBy = isValidUuid(dbUser?.id) ? dbUser.id : safeSellerId;
+          // organization_id explicito -- este INSERT era el origen de los
+          // lead_batches con organization_id NULL (ver backfill 073).
           const insertRes = await client.query(
             `
-            INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a)
-            VALUES ($1, 'asignado', $2, 'captacion', $3, $3)
+            INSERT INTO lead_batches (nombre, estado, created_by, tipo, seller_id, asignado_a, organization_id)
+            VALUES ($1, 'asignado', $2, 'captacion', $3, $3, $4)
             RETURNING id, tipo
             `,
-            [nombre, createdBy, safeSellerId]
+            [nombre, createdBy, safeSellerId, organizationId]
           );
           return {
             batchId: insertRes.rows[0]?.id || null,
@@ -15641,8 +15654,8 @@ async function routeRequest(event) {
           if (!leadIdColumn) return null;
           if (principalContactId && hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
-              [principalContactId]
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE contact_id = $1 AND organization_id = $2 LIMIT 1`,
+              [principalContactId, organizationId]
             );
             principalLeadId = leadRes.rows[0]?.lead_id || null;
           }
@@ -15650,14 +15663,14 @@ async function routeRequest(event) {
           let principalDocumento = null;
           if (!principalLeadId && principalContactId) {
             const principalContactRes = await client.query(
-              `SELECT documento FROM contacts WHERE id = $1 LIMIT 1`,
-              [principalContactId]
+              `SELECT documento FROM contacts WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+              [principalContactId, organizationId]
             );
             principalDocumento = principalContactRes.rows[0]?.documento || null;
             if (principalDocumento) {
               const leadRes = await client.query(
-                `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
-                [principalDocumento]
+                `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE documento = $1 AND organization_id = $2 LIMIT 1`,
+                [principalDocumento, organizationId]
               );
               principalLeadId = leadRes.rows[0]?.lead_id || null;
             }
@@ -15665,23 +15678,29 @@ async function routeRequest(event) {
 
           if (!principalLeadId && principalDocumentoFallback) {
             const leadRes = await client.query(
-              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE documento = $1 LIMIT 1`,
-              [principalDocumentoFallback]
+              `SELECT ${leadIdColumn} AS lead_id FROM datos_para_trabajar WHERE documento = $1 AND organization_id = $2 LIMIT 1`,
+              [principalDocumentoFallback, organizationId]
             );
             principalLeadId = leadRes.rows[0]?.lead_id || null;
             principalDocumento = principalDocumentoFallback;
           }
 
           if (!principalLeadId && principalPhoneFallback) {
+            // NOTA: match solo por telefono, sin chequeo de identidad (a
+            // diferencia de insertLeadFromFields) -- ver auditoria del
+            // Punto B, no estaba en el alcance pedido para este cambio.
             const leadRes = await client.query(
               `
               SELECT ${leadIdColumn} AS lead_id
               FROM datos_para_trabajar
-              WHERE regexp_replace(telefono, '\\D', '', 'g') = $1
-                 OR regexp_replace(celular, '\\D', '', 'g') = $1
+              WHERE organization_id = $2
+                AND (
+                  regexp_replace(telefono, '\\D', '', 'g') = $1
+                  OR regexp_replace(celular, '\\D', '', 'g') = $1
+                )
               LIMIT 1
               `,
-              [principalPhoneFallback]
+              [principalPhoneFallback, organizationId]
             );
             principalLeadId = leadRes.rows[0]?.lead_id || null;
           }
@@ -15701,11 +15720,11 @@ async function routeRequest(event) {
               `
               SELECT batch_id
               FROM lead_contact_status
-              WHERE contact_id = $1 AND assigned_to = $2
+              WHERE contact_id = $1 AND assigned_to = $2 AND organization_id = $3
               ORDER BY updated_at DESC
               LIMIT 1
               `,
-              [principalLeadId, safeSellerId]
+              [principalLeadId, safeSellerId, organizationId]
             );
             batchId = batchRes.rows[0]?.batch_id || null;
           }
@@ -15714,11 +15733,11 @@ async function routeRequest(event) {
               `
               SELECT batch_id
               FROM lead_contact_status
-              WHERE contact_id = $1
+              WHERE contact_id = $1 AND organization_id = $2
               ORDER BY updated_at DESC
               LIMIT 1
               `,
-              [principalLeadId]
+              [principalLeadId, organizationId]
             );
             batchId = batchRes.rows[0]?.batch_id || null;
           }
@@ -15730,8 +15749,8 @@ async function routeRequest(event) {
           }
 
           const batchInfoRes = await client.query(
-            `SELECT tipo FROM lead_batches WHERE id = $1 LIMIT 1`,
-            [batchId]
+            `SELECT tipo FROM lead_batches WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+            [batchId, organizationId]
           );
           const batchTipo = batchInfoRes.rows[0]?.tipo || null;
           principalBatchCache = { principalLeadId, batchId, batchTipo };
@@ -15779,22 +15798,47 @@ async function routeRequest(event) {
           const telValue = normalizePhoneDigits(fields?.telefono || "");
           const celValue = normalizePhoneDigits(fields?.celular || "");
 
-          // Try to reuse an existing lead row by documento/telefono/celular to avoid duplicates.
-          if (docValue || telValue || celValue) {
-            const existingLeadRes = await client.query(
+          // Match por documento (dentro de la organizacion) -> reutilizar
+          // directo, sin ambiguedad posible (un documento es una persona).
+          if (docValue) {
+            const existingByDocRes = await client.query(
               `
               SELECT ${leadIdColumn} AS lead_id
               FROM datos_para_trabajar
-              WHERE ($1::text IS NOT NULL AND documento = $1)
-                 OR ($2::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $2)
-                 OR ($3::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $3)
+              WHERE documento = $1
+                AND organization_id = $2
               ORDER BY updated_at DESC NULLS LAST, created_at DESC
               LIMIT 1
               `,
-              [docValue, telValue, celValue]
+              [docValue, organizationId]
             );
-            const existingLeadId = existingLeadRes.rows[0]?.lead_id || null;
+            const existingLeadId = existingByDocRes.rows[0]?.lead_id || null;
             if (existingLeadId) return existingLeadId;
+          }
+
+          // Match por telefono/celular (dentro de la organizacion): compartir
+          // telefono no alcanza para reutilizar el lead de otra persona
+          // (mismo caso Patricia/Casiano, ver isSamePersonForPhoneMatch) --
+          // se revisan hasta 10 candidatos y se usa el primero que sea la
+          // misma persona. Si ninguno lo es, sigue al INSERT de abajo con un
+          // lead nuevo.
+          if (telValue || celValue) {
+            const existingByPhoneRes = await client.query(
+              `
+              SELECT ${leadIdColumn} AS lead_id, nombre, apellido, documento
+              FROM datos_para_trabajar
+              WHERE organization_id = $1
+                AND (
+                  ($2::text <> '' AND regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2)
+                  OR ($3::text <> '' AND regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3)
+                )
+              ORDER BY updated_at DESC NULLS LAST, created_at DESC
+              LIMIT 10
+              `,
+              [organizationId, telValue || "", celValue || ""]
+            );
+            const phoneMatchRow = existingByPhoneRes.rows.find((row) => isSamePersonForPhoneMatch(row, fields)) || null;
+            if (phoneMatchRow) return phoneMatchRow.lead_id;
           }
 
           pushCol("nombre", fields?.nombre || null);
@@ -15810,6 +15854,9 @@ async function routeRequest(event) {
           if (dCols.has("origen_dato")) pushCol("origen_dato", normalizarOrigenDato(fields?.origenDato || batchTipo || null));
           if (dCols.has("estado")) pushCol("estado", "nuevo");
           if (hasContactIdCol) pushCol("contact_id", contactId);
+          // organization_id explicito -- este INSERT era el origen de los
+          // datos_para_trabajar con organization_id NULL (ver backfill 073).
+          pushCol("organization_id", organizationId);
 
           if (!columns.length) return null;
 
@@ -15841,8 +15888,8 @@ async function routeRequest(event) {
           }
           if (hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
-              [safeContactId]
+              `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 AND organization_id = $2 LIMIT 1`,
+              [safeContactId, organizationId]
             );
             leadId = leadRes.rows[0]?.lead_id || null;
           }
@@ -15853,10 +15900,11 @@ async function routeRequest(event) {
               SELECT ${leadIdColumn} AS lead_id, contact_id
               FROM datos_para_trabajar
               WHERE documento = $1
+                AND organization_id = $2
               ORDER BY updated_at DESC NULLS LAST, created_at DESC
               LIMIT 1
               `,
-              [fields.documento]
+              [fields.documento, organizationId]
             );
             leadId = leadRes.rows[0]?.lead_id || null;
           }
@@ -15880,11 +15928,16 @@ async function routeRequest(event) {
             const nameValue = normalizeText(fields?.nombre || "") || null;
             const lastValue = normalizeText(fields?.apellido || "") || null;
             if (leadIdColumn === "id") {
+            // NOTA: matchea por nombre O apellido O documento (no por
+            // telefono) -- fuera del alcance pedido para el Punto B
+            // (identidad solo para el match por telefono), se deja la
+            // logica de matching tal cual, solo se acota por organizacion.
             await client.query(
               `
               UPDATE datos_para_trabajar
               SET contact_id = $2, updated_at = now()
               WHERE id = $1
+                AND organization_id = $6
                 AND contact_id IS NULL
                 AND (
                   TRIM(LOWER(nombre)) = TRIM(LOWER($3))
@@ -15892,22 +15945,50 @@ async function routeRequest(event) {
                   OR documento = $5
                 )
               `,
-              [leadId, safeContactId, nameValue, lastValue, docValue]
+              [leadId, safeContactId, nameValue, lastValue, docValue, organizationId]
             );
-            } else if (docValue || telValue || celValue) {
+            } else if (docValue) {
+              // Documento: match directo, sin ambiguedad posible.
               await client.query(
                 `
                 UPDATE datos_para_trabajar
                 SET contact_id = $2, updated_at = now()
                 WHERE contact_id IS NULL
-                  AND (
-                    ($3::text IS NOT NULL AND documento = $3)
-                    OR ($4::text <> '' AND regexp_replace(telefono, '\\D', '', 'g') = $4)
-                    OR ($5::text <> '' AND regexp_replace(celular, '\\D', '', 'g') = $5)
-                  )
+                  AND organization_id = $3
+                  AND documento = $1
                 `,
-                [leadId, safeContactId, docValue, telValue, celValue]
+                [docValue, safeContactId, organizationId]
               );
+            } else if (telValue || celValue) {
+              // Telefono/celular: mismo criterio que insertLeadFromFields --
+              // hasta 10 candidatos dentro de la organizacion, solo se
+              // actualiza el primero que sea la misma persona.
+              const phoneCandidatesRes = await client.query(
+                `
+                SELECT ${leadIdColumn} AS lead_id, nombre, apellido, documento
+                FROM datos_para_trabajar
+                WHERE contact_id IS NULL
+                  AND organization_id = $1
+                  AND (
+                    ($2::text <> '' AND regexp_replace(coalesce(telefono,''), '\\D', '', 'g') = $2)
+                    OR ($3::text <> '' AND regexp_replace(coalesce(celular,''), '\\D', '', 'g') = $3)
+                  )
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 10
+                `,
+                [organizationId, telValue || "", celValue || ""]
+              );
+              const phoneMatchRow = phoneCandidatesRes.rows.find((row) => isSamePersonForPhoneMatch(row, fields)) || null;
+              if (phoneMatchRow) {
+                await client.query(
+                  `
+                  UPDATE datos_para_trabajar
+                  SET contact_id = $2, updated_at = now()
+                  WHERE ${leadIdColumn} = $1 AND contact_id IS NULL AND organization_id = $3
+                  `,
+                  [phoneMatchRow.lead_id, safeContactId, organizationId]
+                );
+              }
             }
           }
 
@@ -15923,9 +16004,10 @@ async function routeRequest(event) {
                 batch_id,
                 assigned_to,
                 ola_actual,
-                ultimo_intento_at
+                ultimo_intento_at,
+                organization_id
               )
-              VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now())
+              VALUES ($1, 'venta', 1, NULL, $2, $3, 1, now(), $4)
               ON CONFLICT (contact_id) DO UPDATE
               SET
                 estado_venta = 'venta',
@@ -15934,9 +16016,10 @@ async function routeRequest(event) {
                 assigned_to = EXCLUDED.assigned_to,
                 ola_actual = 1,
                 ultimo_intento_at = now(),
+                organization_id = EXCLUDED.organization_id,
                 updated_at = now()
               `,
-              [leadId, principal.batchId, safeSellerId]
+              [leadId, principal.batchId, safeSellerId, organizationId]
             );
           }
 
@@ -15956,9 +16039,9 @@ async function routeRequest(event) {
               `
               UPDATE datos_para_trabajar
               SET estado = 'trabajado', updated_at = now()
-              WHERE ${leadIdColumn} = $1 AND estado <> 'bloqueado'
+              WHERE ${leadIdColumn} = $1 AND organization_id = $2 AND estado <> 'bloqueado'
               `,
-              [leadId]
+              [leadId, organizationId]
             );
           }
 
@@ -15978,8 +16061,8 @@ async function routeRequest(event) {
           }
           if (hasContactIdCol) {
             const leadRes = await client.query(
-              `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 LIMIT 1`,
-              [safeContactId]
+              `SELECT ${leadIdColumn} AS lead_id, contact_id FROM datos_para_trabajar WHERE contact_id = $1 AND organization_id = $2 LIMIT 1`,
+              [safeContactId, organizationId]
             );
             leadId = leadRes.rows[0]?.lead_id || null;
           }
@@ -15990,10 +16073,11 @@ async function routeRequest(event) {
               SELECT ${leadIdColumn} AS lead_id, contact_id
               FROM datos_para_trabajar
               WHERE documento = $1
+                AND organization_id = $2
               ORDER BY updated_at DESC NULLS LAST, created_at DESC
               LIMIT 1
               `,
-              [documento]
+              [documento, organizationId]
             );
             leadId = leadRes.rows[0]?.lead_id || null;
           }
@@ -16011,9 +16095,9 @@ async function routeRequest(event) {
               `
               UPDATE datos_para_trabajar
               SET contact_id = $2, updated_at = now()
-              WHERE id = $1 AND contact_id IS NULL
+              WHERE id = $1 AND organization_id = $3 AND contact_id IS NULL
               `,
-              [leadId, safeContactId]
+              [leadId, safeContactId, organizationId]
             );
             } else if (docValue) {
               await client.query(
@@ -16021,11 +16105,12 @@ async function routeRequest(event) {
                 UPDATE datos_para_trabajar
                 SET contact_id = $2, updated_at = now()
                 WHERE contact_id IS NULL
+                  AND organization_id = $4
                   AND (
                     ($3::text IS NOT NULL AND documento = $3)
                   )
                 `,
-                [leadId, safeContactId, docValue, telValue, celValue]
+                [leadId, safeContactId, docValue, organizationId]
               );
             }
           }
@@ -16034,11 +16119,11 @@ async function routeRequest(event) {
             `
             SELECT batch_id, intentos
             FROM lead_contact_status
-            WHERE contact_id = $1 AND assigned_to = $2
+            WHERE contact_id = $1 AND assigned_to = $2 AND organization_id = $3
             ORDER BY updated_at DESC
             LIMIT 1
             `,
-            [leadId, safeSellerId]
+            [leadId, safeSellerId, organizationId]
           );
           const batchId = statusRes.rows[0]?.batch_id || null;
           if (!batchId || !isValidUuid(batchId)) {
@@ -16075,9 +16160,9 @@ async function routeRequest(event) {
               `
               UPDATE datos_para_trabajar
               SET estado = 'trabajado', updated_at = now()
-              WHERE ${leadIdColumn} = $1 AND estado <> 'bloqueado'
+              WHERE ${leadIdColumn} = $1 AND organization_id = $2 AND estado <> 'bloqueado'
               `,
-              [leadId]
+              [leadId, organizationId]
             );
           }
         };
@@ -16112,10 +16197,10 @@ async function routeRequest(event) {
               `
               SELECT id FROM products
               WHERE lower(nombre) = lower($1)
-              ${organizationId ? "AND organization_id = $2" : ""}
+                AND organization_id = $2
               LIMIT 1
               `,
-              organizationId ? [productName, organizationId] : [productName]
+              [productName, organizationId]
             );
             productId = productRes.rows[0]?.id || null;
             if (!productId) {
@@ -16171,10 +16256,10 @@ async function routeRequest(event) {
               `
               SELECT id FROM products
               WHERE TRIM(LOWER(nombre)) = TRIM(LOWER($1))
-              ${organizationId ? "AND organization_id = $2" : ""}
+                AND organization_id = $2
               LIMIT 1
               `,
-              organizationId ? [productName, organizationId] : [productName]
+              [productName, organizationId]
             );
             resolvedProductId = prodRes.rows[0]?.id ?? null;
           }
