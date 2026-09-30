@@ -1,5 +1,41 @@
 # Tri — Contexto para Claude Code
 
+## Reglas de arquitectura (obligatorias)
+1. **Multi-tenant sin excepciones**: toda consulta, `UPDATE` o `DELETE` sobre datos
+   de negocio filtra por `organization_id` de forma incondicional. Prohibido
+   `${organizationId ? ... : ''}` y `$1::uuid IS NULL OR ...` — son exactamente el
+   patrón que permite que datos de una organización se mezclen con los de otra.
+   Si `organization_id` no se logra resolver, el endpoint corta ahí mismo con
+   403, nunca sigue de largo con un filtro ausente. Todo `INSERT` setea
+   `organization_id` explícito, sin dejarlo para un backfill posterior.
+2. **El esquema de producción es la fuente de verdad**: no agregar nuevas
+   detecciones de columnas en runtime (`columnExists`, `getTableColumns`,
+   `has*Col` y variantes). Si una columna existe en producción pero falta en
+   local, se agrega a local con una migración — el código se escribe asumiendo
+   el esquema de producción, no al revés.
+3. **Migraciones**: idempotentes siempre. Nunca `CREATE TABLE IF NOT EXISTS`
+   sobre una tabla que podría ya existir con otra forma en producción sin
+   verificar antes contra RDS. Tienen que ser no-op en los entornos donde ya
+   se aplicaron, y el agente nunca las corre contra producción — eso lo hace
+   Damián.
+4. **Una operación de negocio, una función**: antes de escribir lógica nueva
+   para alta de contacto, registro de venta, baja de producto, alta de lead o
+   de candidato de Recupero, buscar si ya existe una función que resuelva eso
+   y reutilizarla. Si aparece lógica duplicada entre endpoints, avisar en vez
+   de sumar una copia más.
+5. **Identidad de personas**: compartir un teléfono no implica que sea la
+   misma persona (`isSamePersonForPhoneMatch`). El documento sí identifica a
+   una persona de forma confiable, siempre evaluado dentro de la misma
+   organización.
+6. **Errores legibles**: toda respuesta 4xx devuelve un `message` legible en
+   español, nunca solo un código o un campo `error` suelto sin `message`.
+7. **Los scripts de prueba no se borran**: los que cubren flujos críticos se
+   guardan en `tests/` (aunque todavía no haya un runner configurado), con
+   instrucciones de cómo correrlos.
+8. **Divergencias de esquema**: cualquier diferencia entre local y producción
+   que se descubra se documenta en el momento en la lista de este archivo,
+   no se deja para después.
+
 ## Qué es esto
 Tri es un CRM SaaS multi-tenant (antes "Rednacrem") que sirve a cuatro organizaciones:
 Rednacrem, Global Assist, SU Emergencia y Club del Adulto Mayor. Cada organización
