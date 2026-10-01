@@ -43,12 +43,32 @@ async function readBody(req) {
     chunks.push(chunk);
   }
 
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 }
 
-function buildEvent(req, body) {
+// API Gateway (integracion Lambda proxy, lo que corre en produccion) manda
+// los bodies binarios en base64 con isBase64Encoded:true -- este server
+// local antes SIEMPRE decodificaba a utf8 (`.toString("utf8")`), lo que
+// corrompe cualquier upload binario (fotos, logos) en cuanto el buffer trae
+// bytes que no son UTF-8 valido. Se decide por Content-Type, igual criterio
+// que usa API Gateway con sus "binary media types": JSON/texto/formularios
+// viajan como string tal cual, cualquier otra cosa (image/*, etc.) viaja en
+// base64 -- asi index.mjs (que ya chequea event.isBase64Encoded en los
+// endpoints de foto/logo) se comporta igual en local que en producción.
+function isTextContentType(contentType) {
+  const ct = String(contentType || "").toLowerCase();
+  if (!ct) return true;
+  return (
+    ct.startsWith("application/json") ||
+    ct.startsWith("text/") ||
+    ct.startsWith("application/x-www-form-urlencoded")
+  );
+}
+
+function buildEvent(req, bodyBuffer) {
   const host = req.headers.host || `localhost:${process.env.PORT || 3001}`;
   const requestUrl = new URL(req.url || "/", `http://${host}`);
+  const isText = isTextContentType(req.headers["content-type"]);
 
   return {
     version: "2.0",
@@ -65,8 +85,8 @@ function buildEvent(req, body) {
         userAgent: req.headers["user-agent"] || "local-server"
       }
     },
-    body,
-    isBase64Encoded: false
+    body: isText ? bodyBuffer.toString("utf8") : bodyBuffer.toString("base64"),
+    isBase64Encoded: !isText
   };
 }
 

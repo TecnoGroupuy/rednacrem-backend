@@ -10794,26 +10794,47 @@ function requireRole(event, dbUser, allowedRoles) {
 }
 
 // ---------------------------------------------------------------------
-// Ficha publica de autocompletado (sin Cognito) -- token HMAC+timestamp,
-// stateless, sin tabla nueva para el token en si. Ver TAREA 1 del prompt
-// de implementacion para el detalle de diseño.
+// Ficha publica de autocompletado (sin Cognito) -- dos tokens HMAC+timestamp
+// stateless, sin tabla nueva para el token en si:
+//   - "link" (24hs): lo genera un admin de RRHH, scoped a organization_id.
+//     Permite UNICAMENTE buscar/verificar una identidad (POST
+//     /publico/ficha-personal/verificar). No alcanza para leer ni escribir
+//     el resto de los datos de nadie.
+//   - "session" (30min, nunca mas tarde que el link que la originó): la
+//     devuelve /verificar una vez que documento+fecha_nacimiento matchean
+//     contra una fila real. Lleva personal_id ademas de organization_id, y
+//     es lo unico que aceptan PATCH /publico/ficha-personal y POST
+//     /publico/ficha-personal/foto -- ninguno de los dos vuelve a pedir
+//     documento/fecha_nacimiento ni recibe un :id por URL. El campo `typ` en
+//     el payload evita que un token de un tipo se cuele donde se espera el
+//     otro (ej. usar un link token, que no tiene personal_id, como si fuera
+//     una session).
 // ---------------------------------------------------------------------
 
 const FICHA_PUBLICA_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24hs
-// Umbral de intentos fallidos de busqueda por IP: 5 en 15 minutos. Numero
-// chico a proposito -- es una busqueda por documento+fecha_nacimiento (poca
-// entropia si alguien probara documentos al voleo), y el uso legitimo real
-// es "una persona busca su propia ficha una vez, quiza reintenta si se
-// equivoca de fecha" -- 5 intentos deja margen generoso para errores de
-// tipeo genuinos sin abrir la puerta a un barrido de documentos.
-const FICHA_PUBLICA_MAX_INTENTOS = 5;
-const FICHA_PUBLICA_INTENTOS_WINDOW = "15 minutes";
+const FICHA_PUBLICA_SESSION_TTL_MS = 30 * 60 * 1000; // 30min
+// Umbral de intentos fallidos de verificacion por IP: 5 en 15 minutos: poca
+// entropia si alguien probara documentos al voleo, y el uso legitimo real es
+// "una persona verifica su propia identidad una vez, quiza reintenta si se
+// equivoca de fecha". Umbral separado por documento (5 en 60 minutos): sin
+// esto, alguien podria rotar de IP (o estar detras de un NAT compartido) y
+// seguir probando fechas de nacimiento contra UN documento fijo sin
+// restriccion.
+const FICHA_PUBLICA_MAX_INTENTOS_IP = 5;
+const FICHA_PUBLICA_INTENTOS_IP_WINDOW = "15 minutes";
+const FICHA_PUBLICA_MAX_INTENTOS_DOCUMENTO = 5;
+const FICHA_PUBLICA_INTENTOS_DOCUMENTO_WINDOW = "60 minutes";
 // 4MB de imagen decodificada. API Gateway con integracion Lambda proxy
 // tiene un techo de ~10MB de payload total; en base64 (el formato en que
 // llega el body, ~33% mas grande que los bytes reales) 4MB de imagen ocupan
-// ~5.4MB de body, dejando margen holgado antes de ese techo.
-const FICHA_PUBLICA_PHOTO_MAX_BYTES = 4 * 1024 * 1024;
-const FICHA_PUBLICA_PHOTO_ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+// ~5.4MB de body, dejando margen holgado antes de ese techo. Mismo limite
+// para el endpoint interno (uploadPersonalFoto, mas abajo) -- un solo
+// helper, un solo limite.
+const PERSONAL_FOTO_MAX_BYTES = 4 * 1024 * 1024;
+// Unico tipo aceptado: el frontend (publico e interno) siempre exporta
+// JPEG via canvas (ver componente compartido de foto), asi que no hace
+// falta aceptar PNG/WebP -- menos superficie de validacion.
+const PERSONAL_FOTO_CONTENT_TYPE = "image/jpeg";
 const FICHA_PUBLICA_FECHA_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 // El secreto NUNCA se hardcodea ni tiene default -- si falta la env var, los
@@ -10825,38 +10846,34 @@ function getFichaPublicaSecret() {
   return secret && secret.length >= 16 ? secret : null;
 }
 
-// Genera un token de acceso temporal para la ficha publica. El payload
-// incluye organizationId ademas de exp (el prompt sugeria solo {exp} como
-// "algo tipo") -- se agrega para que el link que genera un admin de una
-// organizacion no sirva para buscar/editar personal de OTRA organizacion.
-// Sin esto, como el token no tiene ningun otro mecanismo de scoping, dos
-// organizaciones distintas con un documento coincidente (poco probable con
-// cedulas/DNI reales, pero no imposible con datos mal cargados) quedarian
-// cruzadas -- exactamente el tipo de bug de aislamiento multi-tenant que ya
-// paso antes en este proyecto (GET /clients, upsertContact()).
-function generateFichaPublicaToken(organizationId) {
+// Firma generica de un payload de ficha publica (usada tanto para el token
+// de link como el de session -- misma mecanica de firma, distinto contenido
+// de payload). Tira el mismo error 500 claro que ya devolvia
+// generateFichaPublicaToken si falta la env var: POST
+// /operaciones/personal/link-autocompletado (el unico lugar donde se genera
+// un token de link) ya propaga ese throw tal cual via operationsErrorResponse.
+function signFichaPublicaPayload(payload) {
   const secret = getFichaPublicaSecret();
   if (!secret) {
     throw { status: 500, message: "FICHA_PUBLICA_SECRET no esta configurado en el entorno." };
   }
-  const exp = Date.now() + FICHA_PUBLICA_TOKEN_TTL_MS;
-  const payloadB64 = Buffer.from(JSON.stringify({ exp, organizationId })).toString("base64url");
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const signature = crypto.createHmac("sha256", secret).update(payloadB64).digest("hex");
-  return { token: `${payloadB64}.${signature}`, expiresAt: exp };
+  return `${payloadB64}.${signature}`;
 }
 
-// Verifica un token de ficha publica. Comparacion timing-safe del HMAC
-// (crypto.timingSafeEqual, no === directo) y chequeo de vencimiento. Ante
-// cualquier fallo (secreto no configurado, formato invalido, firma que no
-// matchea, o vencido) devuelve { valid: false } sin distinguir la causa --
-// el mensaje que ve el cliente es siempre el mismo generico, para no darle
-// pistas a quien intente forjar un token.
-function verifyFichaPublicaToken(token) {
+// Verifica la firma y el vencimiento de CUALQUIER token de ficha publica
+// (link o session) y devuelve el payload crudo, o null ante cualquier fallo
+// (secreto no configurado, formato invalido, firma que no matchea, o
+// vencido) -- quien llama decide que exigir del payload (typ, organizationId,
+// personalId). Comparacion timing-safe del HMAC (crypto.timingSafeEqual, no
+// === directo).
+function verifyFichaPublicaSignedPayload(token) {
   const secret = getFichaPublicaSecret();
-  if (!secret || !token || typeof token !== "string") return { valid: false };
+  if (!secret || !token || typeof token !== "string") return null;
 
   const separatorIndex = token.lastIndexOf(".");
-  if (separatorIndex <= 0 || separatorIndex === token.length - 1) return { valid: false };
+  if (separatorIndex <= 0 || separatorIndex === token.length - 1) return null;
   const payloadB64 = token.slice(0, separatorIndex);
   const providedSignature = token.slice(separatorIndex + 1);
 
@@ -10866,29 +10883,70 @@ function verifyFichaPublicaToken(token) {
     providedBuf = Buffer.from(providedSignature, "hex");
     expectedBuf = Buffer.from(expectedSignature, "hex");
   } catch {
-    return { valid: false };
+    return null;
   }
   // timingSafeEqual tira TypeError si los buffers tienen longitud distinta
   // en vez de comparar -- se chequea el largo antes. Esto no es en si un
   // timing attack (el largo esperado de un HMAC-SHA256 en hex es siempre
   // 64, fijo y publico), solo evita el throw.
   if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
-    return { valid: false };
+    return null;
   }
 
-  let payload;
   try {
-    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+    if (!payload || typeof payload.exp !== "number" || Date.now() >= payload.exp) return null;
+    return payload;
   } catch {
-    return { valid: false };
+    return null;
   }
-  if (!payload || typeof payload.exp !== "number" || Date.now() >= payload.exp) {
-    return { valid: false };
-  }
-  if (!payload.organizationId || !isValidUuid(payload.organizationId)) {
-    return { valid: false };
-  }
-  return { valid: true, organizationId: payload.organizationId };
+}
+
+// Token de link (24hs): lo genera un admin de RRHH, scoped a
+// organization_id para que el link de una organizacion no sirva para
+// buscar/verificar personal de OTRA -- exactamente el tipo de bug de
+// aislamiento multi-tenant que ya paso antes en este proyecto (GET
+// /clients, upsertContact()).
+function generateFichaPublicaToken(organizationId) {
+  const exp = Date.now() + FICHA_PUBLICA_TOKEN_TTL_MS;
+  const token = signFichaPublicaPayload({ typ: "link", exp, organizationId });
+  return { token, expiresAt: exp };
+}
+
+// Mensaje generico de token invalido/vencido: no distingue "secreto no
+// configurado" de "firma adulterada" de "vencido" de "es un session token,
+// no un link token" -- para no darle pistas a quien intente forjar uno.
+function verifyFichaPublicaToken(token) {
+  const payload = verifyFichaPublicaSignedPayload(token);
+  if (!payload || payload.typ !== "link") return { valid: false };
+  if (!payload.organizationId || !isValidUuid(payload.organizationId)) return { valid: false };
+  return { valid: true, organizationId: payload.organizationId, exp: payload.exp };
+}
+
+// Token de session (30min): lo devuelve POST /publico/ficha-personal/verificar
+// una vez confirmada la identidad. linkExp acota el vencimiento de la
+// session al del link que la originó -- una session nunca puede durar mas
+// que el link (ej. si al link le quedan 10min, la session vence en 10min,
+// no en 30).
+function generateFichaPublicaSessionToken(organizationId, personalId, linkExp) {
+  const exp = Math.min(Date.now() + FICHA_PUBLICA_SESSION_TTL_MS, linkExp);
+  const token = signFichaPublicaPayload({ typ: "session", exp, organizationId, personalId });
+  return { token, expiresAt: exp };
+}
+
+function verifyFichaPublicaSessionToken(token) {
+  const payload = verifyFichaPublicaSignedPayload(token);
+  if (!payload || payload.typ !== "session") return { valid: false };
+  if (!payload.organizationId || !isValidUuid(payload.organizationId)) return { valid: false };
+  if (!payload.personalId || !isValidUuid(payload.personalId)) return { valid: false };
+  return { valid: true, organizationId: payload.organizationId, personalId: payload.personalId };
+}
+
+// Header dedicado para el session token (no Authorization: ese header ya lo
+// usa el Cognito JWT de las sesiones autenticadas, y este flujo es
+// deliberadamente anonimo/sin Cognito).
+function getFichaSessionToken(event) {
+  return event?.headers?.["x-ficha-session"] || event?.headers?.["X-Ficha-Session"] || null;
 }
 
 // event.requestContext.http.sourceIp es el campo que puebla API Gateway
@@ -10911,68 +10969,200 @@ function getFichaPublicaClientIp(event) {
 async function isFichaPublicaIpBlocked(client, ip) {
   const result = await client.query(
     `SELECT COUNT(*)::int AS intentos FROM ficha_publica_intentos
-     WHERE ip = $1 AND created_at > now() - interval '${FICHA_PUBLICA_INTENTOS_WINDOW}'`,
+     WHERE ip = $1 AND created_at > now() - interval '${FICHA_PUBLICA_INTENTOS_IP_WINDOW}'`,
     [ip]
   );
-  return (result.rows[0]?.intentos || 0) >= FICHA_PUBLICA_MAX_INTENTOS;
+  return (result.rows[0]?.intentos || 0) >= FICHA_PUBLICA_MAX_INTENTOS_IP;
 }
 
-async function registerFichaPublicaIntentoFallido(client, ip) {
-  await client.query(`INSERT INTO ficha_publica_intentos (ip) VALUES ($1)`, [ip]);
-}
-
-// Re-verifica documento+fecha_nacimiento contra el :id de la URL ANTES de
-// dejar leer o escribir nada -- asi alguien no puede simplemente cambiar el
-// id en la URL (aunque tenga un token valido) para buscar/editar la ficha
-// de otra persona. Las cuatro condiciones (id, organization_id del token,
-// documento, fecha_nacimiento) tienen que matchear juntas en la misma fila.
-async function verifyFichaPublicaPersona(client, organizationId, personalId, documento, fechaNacimiento) {
-  if (!isValidUuid(personalId)) return null;
+// Gateado por metadata de columna (mismo criterio que su_personal_bases en
+// el resto de este archivo): si la migracion 082 todavia no corrio contra
+// este entorno, el limite por documento simplemente queda inactivo -- el
+// limite por IP sigue funcionando igual, nunca se rompe el endpoint entero
+// por una columna que todavia no existe.
+async function isFichaPublicaDocumentoBlocked(client, documento) {
+  const cols = await getTableColumns(client, "ficha_publica_intentos");
+  if (!cols.has("documento")) return false;
   const result = await client.query(
-    `SELECT id FROM su_personal
-     WHERE id = $1 AND organization_id = $2 AND documento = $3 AND fecha_nacimiento = $4::date
-     LIMIT 1`,
-    [personalId, organizationId, documento, fechaNacimiento]
+    `SELECT COUNT(*)::int AS intentos FROM ficha_publica_intentos
+     WHERE documento = $1 AND created_at > now() - interval '${FICHA_PUBLICA_INTENTOS_DOCUMENTO_WINDOW}'`,
+    [documento]
   );
-  return result.rows[0] || null;
+  return (result.rows[0]?.intentos || 0) >= FICHA_PUBLICA_MAX_INTENTOS_DOCUMENTO;
+}
+
+async function registerFichaPublicaIntentoFallido(client, ip, documento) {
+  const cols = await getTableColumns(client, "ficha_publica_intentos");
+  if (cols.has("documento")) {
+    await client.query(`INSERT INTO ficha_publica_intentos (ip, documento) VALUES ($1, $2)`, [ip, documento]);
+  } else {
+    await client.query(`INSERT INTO ficha_publica_intentos (ip) VALUES ($1)`, [ip]);
+  }
 }
 
 // Unicos campos que la ficha publica puede tocar. Cualquier otra key que
 // venga en el body se ignora en silencio -- el resto de su_personal
-// (organization_id, rol, regimen_turno, estados, etc.) solo se edita desde
-// el modulo autenticado de RRHH.
-const FICHA_PUBLICA_CAMPOS_EDITABLES = ["telefono", "email", "domicilio"];
+// (organization_id, rol, regimen_turno, estados, documento, etc.) solo se
+// edita desde el modulo autenticado de RRHH.
+const FICHA_PUBLICA_CAMPOS_EDITABLES = ["telefono", "email", "domicilio", "fecha_nacimiento"];
 const FICHA_PUBLICA_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// NOTA DE SCHEMA: estos SELECT/UPDATE asumen que su_personal tiene las
-// columnas documento, fecha_nacimiento, nombre, apellido, telefono, email,
-// domicilio, foto_url, organization_id y updated_at. El schema local diverge
-// del de produccion en este repo -- Damian confirma los nombres reales
-// contra RDS antes de deployar y se ajusta lo que haga falta.
+// Columna `date` de Postgres -> JS Date (node-postgres parsea DATE como
+// Date.UTC(y,m,d), medianoche UTC exacta del dia almacenado) -> acá se
+// trunca a 'YYYY-MM-DD' con .toISOString().slice(0,10). Esto es seguro
+// (no hay corrimiento de dia) porque el Date ya se construyo en UTC para
+// ese dia calendario -- el corrimiento de UTC-3 solo aparece si el
+// CONSUMIDOR vuelve a parsear ese string con `new Date(str)` en hora local,
+// cosa que el frontend evita con sus propios toDateOnly/displayFecha (ver
+// RrhhScreen.jsx). Si en cambio ya llega como string (otro driver/config),
+// se corta el string directamente, sin pasar por ningun Date.
+function dateColumnToDateOnly(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const str = String(value);
+  return str.length > 10 && str.includes("T") ? str.slice(0, 10) : str;
+}
+
+// Fecha real (rechaza "2024-02-30") y no futura -- compara strings
+// 'YYYY-MM-DD' directamente (con ceros a la izquierda, el orden lexico
+// coincide con el cronologico), sin pasar la fecha de HOY por ningun
+// new Date() en hora local.
+function isValidPastDateString(value) {
+  if (!FICHA_PUBLICA_FECHA_REGEX.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return false;
+  const now = new Date();
+  const todayStr = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
+  return value <= todayStr;
+}
+
+// NOTA DE SCHEMA: este SELECT asume que su_personal tiene las columnas
+// documento, fecha_nacimiento, nombre, apellido, telefono, email,
+// domicilio, foto_url, estado, organization_id y updated_at. El schema
+// local diverge del de produccion en este repo -- Damian confirma los
+// nombres reales contra RDS antes de deployar y se ajusta lo que haga
+// falta.
 function projectFichaPublicaPersona(row) {
   if (!row) return null;
   const persona = {
     id: row.id,
     nombre: row.nombre ?? null,
     apellido: row.apellido ?? null,
+    documento: row.documento ?? null,
+    fecha_nacimiento: dateColumnToDateOnly(row.fecha_nacimiento),
     telefono: row.telefono ?? null,
     email: row.email ?? null,
     domicilio: row.domicilio ?? null,
     foto_url: row.foto_url ?? null
   };
-  persona.campos_vacios = [...FICHA_PUBLICA_CAMPOS_EDITABLES, "foto_url"].filter(
+  persona.campos_vacios = ["telefono", "email", "domicilio", "foto_url"].filter(
     (campo) => persona[campo] === null || String(persona[campo]).trim() === ""
   );
   return persona;
 }
 
-// Extension de archivo para la key de S3, derivada del Content-Type ya
-// validado contra FICHA_PUBLICA_PHOTO_ALLOWED_TYPES (jpeg/png/webp).
-function fichaPublicaFotoExt(contentType) {
-  if (contentType === "image/jpeg") return "jpg";
-  if (contentType === "image/png") return "png";
-  if (contentType === "image/webp") return "webp";
-  return "jpg";
+// Re-busca la persona por id+organization_id (del session token, nunca del
+// cliente) EXCLUYENDO estado='baja' -- defensa en profundidad: si alguien
+// pasa a baja a mitad de una session de 30min ya emitida, PATCH y foto dejan
+// de poder tocar esa ficha en el acto, sin esperar a que la session venza
+// por tiempo.
+async function getFichaPublicaPersonaActiva(client, organizationId, personalId) {
+  const result = await client.query(
+    `SELECT id, nombre, apellido, documento, fecha_nacimiento, telefono, email, domicilio, foto_url, estado
+     FROM su_personal
+     WHERE id = $1 AND organization_id = $2 AND estado <> 'baja'
+     LIMIT 1`,
+    [personalId, organizationId]
+  );
+  return result.rows[0] || null;
+}
+
+function isJpegMagicBytes(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+}
+
+// Validacion compartida por el endpoint publico y el interno de foto: Content-Type
+// de header (whitelist estricta a jpeg), tamaño, y magic bytes del archivo
+// en si (FF D8 FF) -- un cliente podria mentir en el header Content-Type,
+// los magic bytes son la verificacion real de que el archivo es un JPEG.
+function validatePersonalFotoBuffer(buffer, contentTypeHeader) {
+  const contentType = String(contentTypeHeader || "").split(";")[0].trim().toLowerCase();
+  if (contentType !== PERSONAL_FOTO_CONTENT_TYPE) {
+    throw { status: 422, message: "Formato de imagen no permitido. Subí un archivo JPG." };
+  }
+  if (!buffer || !buffer.length) {
+    throw { status: 400, message: "No llegó ninguna imagen." };
+  }
+  if (buffer.length > PERSONAL_FOTO_MAX_BYTES) {
+    throw { status: 422, message: "La imagen supera el tamaño máximo de 4 MB." };
+  }
+  if (!isJpegMagicBytes(buffer)) {
+    throw { status: 422, message: "El archivo no es una imagen JPG válida." };
+  }
+}
+
+// Helper unico de subida de foto de personal, usado por el endpoint publico
+// (ficha publica) y el interno (ficha autenticada de RRHH) -- misma key,
+// mismo bucket, mismo criterio de borrado de la foto anterior. Key con uuid
+// aleatorio (no derivable de personal_id): a diferencia del esquema viejo
+// (`personal/<id>.<ext>`), nadie puede construir la URL de la foto de otra
+// persona solo con su id.
+async function uploadPersonalFoto({ organizationId, personalId, buffer, previousFotoUrl }) {
+  const key = `su/${organizationId}/personal/${personalId}/${crypto.randomUUID()}.jpg`;
+  await s3Client.send(new PutObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: key,
+    Body: buffer,
+    ContentType: PERSONAL_FOTO_CONTENT_TYPE,
+    CacheControl: "public, max-age=31536000"
+  }));
+  const fotoUrl = `${S3_BASE_URL}/${key}`;
+
+  if (previousFotoUrl) {
+    const prefix = `${S3_BASE_URL}/`;
+    const previousBase = String(previousFotoUrl).split("?")[0];
+    if (previousBase.startsWith(prefix)) {
+      const oldKey = previousBase.slice(prefix.length);
+      if (oldKey && oldKey !== key) {
+        try {
+          await s3Client.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: oldKey }));
+        } catch {}
+      }
+    }
+  }
+  return fotoUrl;
+}
+
+// Borra de S3 la foto de una persona (si existe y es nuestra) y limpia
+// foto_url en la fila ya traida -- usado por el DELETE interno. No falla si
+// el objeto ya no estaba en S3 (catch silencioso, mismo criterio que el
+// borrado de la foto anterior en uploadPersonalFoto).
+async function deletePersonalFotoFromS3(fotoUrl) {
+  if (!fotoUrl) return;
+  const prefix = `${S3_BASE_URL}/`;
+  const base = String(fotoUrl).split("?")[0];
+  if (!base.startsWith(prefix)) return;
+  const key = base.slice(prefix.length);
+  if (!key) return;
+  try {
+    await s3Client.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+  } catch {}
+}
+
+// Registra en su_personal_cambios_publicos un cambio hecho via el link
+// publico (edicion de campo o foto) -- gateado por metadata de columna
+// (migracion 082): si la tabla todavia no existe en este entorno, el
+// cambio simplemente no se audita, nunca se rompe el PATCH/foto por esto.
+async function registrarCambioPublico(client, { organizationId, personalId, campo, valorAnterior, valorNuevo, ip }) {
+  const cols = await getTableColumns(client, "su_personal_cambios_publicos");
+  if (!cols.size) return;
+  await client.query(
+    `INSERT INTO su_personal_cambios_publicos
+       (organization_id, personal_id, campo, valor_anterior, valor_nuevo, ip)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [organizationId, personalId, campo, valorAnterior, valorNuevo, ip]
+  );
 }
 
 const OPERACIONES_HISTORIA_CLINICA_ENABLED = false;
@@ -14877,28 +15067,41 @@ async function routeRequest(event) {
   // ───────────────────────────────────────────────────────────────────────
   // FICHA PUBLICA DE PERSONAL (sin Cognito)
   // Endpoints intencionalmente publicos: NO llevan requireAuthenticated /
-  // requireRole. El control de acceso es el token HMAC (verifyFichaPublicaToken,
-  // 24hs, scoped por organization_id) + la re-verificacion de
-  // documento+fecha_nacimiento en cada request de escritura
-  // (verifyFichaPublicaPersona). Van aca, en la zona de /webhooks/*, para que
-  // quede claro que se resuelven antes de cualquier gate de auth.
+  // requireRole. Van aca, en la zona de /webhooks/*, para que quede claro
+  // que se resuelven antes de cualquier gate de auth.
+  //
+  // Flujo en 3 pasos:
+  //   1. POST /publico/ficha-personal/verificar -- token de LINK (24hs,
+  //      header-less, viaja en el body) + documento + fecha_nacimiento en
+  //      el body JSON (nunca en query string). Si matchea una fila con
+  //      estado <> 'baja', devuelve los datos completos + un session_token
+  //      (30min, nunca mas tarde que el link).
+  //   2. PATCH /publico/ficha-personal -- requiere X-Ficha-Session. El
+  //      personal_id sale del session token, no hay :id en el path. Nunca
+  //      vuelve a pedir documento/fecha_nacimiento.
+  //   3. POST /publico/ficha-personal/foto -- idem, con X-Ficha-Session.
+  //
   // El link se genera en POST /operaciones/personal/link-autocompletado.
-  // Mensajes deliberadamente genericos: no distinguir "documento no existe" de
-  // "fecha equivocada" de "token invalido", para no dar pistas a quien pruebe.
+  // Mensajes deliberadamente genericos: no distinguir "documento no existe"
+  // de "fecha equivocada" de "esta de baja" de "token invalido", para no
+  // dar pistas a quien pruebe.
   // ───────────────────────────────────────────────────────────────────────
   const FICHA_PUBLICA_MSG_NO_MATCH = "No encontramos una ficha con esos datos. Revisá el documento y la fecha de nacimiento.";
   const FICHA_PUBLICA_MSG_TOKEN = "El enlace no es válido o venció. Pedí uno nuevo a tu contacto de RRHH.";
-  const fichaPublicaFotoMatch = path.match(/\/publico\/ficha-personal\/([^/]+)\/foto$/);
-  const fichaPublicaIdMatch = path.match(/\/publico\/ficha-personal\/([^/]+)$/);
+  const FICHA_PUBLICA_MSG_SESION = "Tu sesión venció, volvé a ingresar tu documento.";
+  const FICHA_PUBLICA_MSG_RATE_LIMIT = "Demasiados intentos, probá más tarde.";
 
-  // GET /publico/ficha-personal/buscar?token=&documento=&fecha_nacimiento=
-  if (method === "GET" && path.endsWith("/publico/ficha-personal/buscar")) {
-    const tokenCheck = verifyFichaPublicaToken(getQueryParam(event, "token"));
+  // POST /publico/ficha-personal/verificar — body: { token, documento, fecha_nacimiento }
+  if (method === "POST" && path.endsWith("/publico/ficha-personal/verificar")) {
+    const body = safeParseBody(event);
+    if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+    const tokenCheck = verifyFichaPublicaToken(body.token);
     if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
 
-    const documento = normalizeText(getQueryParam(event, "documento") || "");
-    const fechaNacimiento = normalizeText(getQueryParam(event, "fecha_nacimiento") || "");
-    if (!documento || !FICHA_PUBLICA_FECHA_REGEX.test(fechaNacimiento)) {
+    const documento = normalizeText(body.documento || "");
+    const fechaNacimiento = normalizeText(body.fecha_nacimiento || "");
+    if (!documento || !isValidPastDateString(fechaNacimiento)) {
       return json(400, { ok: false, message: "Ingresá tu documento y tu fecha de nacimiento (AAAA-MM-DD)." });
     }
 
@@ -14906,47 +15109,52 @@ async function routeRequest(event) {
     await client.connect();
     try {
       const ip = getFichaPublicaClientIp(event);
-      if (await isFichaPublicaIpBlocked(client, ip)) {
-        return json(429, { ok: false, message: "Demasiados intentos fallidos. Esperá unos minutos e intentá de nuevo." });
+      if ((await isFichaPublicaIpBlocked(client, ip)) || (await isFichaPublicaDocumentoBlocked(client, documento))) {
+        return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
       }
 
+      // estado <> 'baja': una persona dada de baja no puede verificarse ni
+      // editar su ficha via el link publico -- mismo mensaje generico que
+      // documento inexistente o fecha equivocada, no se revela el motivo.
       const result = await client.query(
-        `SELECT id, nombre, apellido, telefono, email, domicilio, foto_url
+        `SELECT id, nombre, apellido, documento, fecha_nacimiento, telefono, email, domicilio, foto_url
          FROM su_personal
-         WHERE organization_id = $1 AND documento = $2 AND fecha_nacimiento = $3::date
+         WHERE organization_id = $1 AND documento = $2 AND fecha_nacimiento = $3::date AND estado <> 'baja'
          LIMIT 1`,
         [tokenCheck.organizationId, documento, fechaNacimiento]
       );
 
       if (!result.rows.length) {
-        await registerFichaPublicaIntentoFallido(client, ip);
+        await registerFichaPublicaIntentoFallido(client, ip, documento);
         return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
       }
 
-      return json(200, { ok: true, persona: projectFichaPublicaPersona(result.rows[0]) });
+      const persona = result.rows[0];
+      const session = generateFichaPublicaSessionToken(tokenCheck.organizationId, persona.id, tokenCheck.exp);
+      return json(200, {
+        ok: true,
+        persona: projectFichaPublicaPersona(persona),
+        session_token: session.token,
+        expires_at: session.expiresAt
+      });
     } catch (error) {
-      return json(500, { ok: false, message: "No se pudo buscar la ficha.", error: error.message });
+      return json(500, { ok: false, message: "No se pudo verificar la ficha.", error: error.message });
     } finally {
       try { await client.end(); } catch {}
     }
   }
 
-  // PATCH /publico/ficha-personal/:id  — body: { token?, documento, fecha_nacimiento, telefono?, email?, domicilio? }
-  if (method === "PATCH" && fichaPublicaIdMatch && !fichaPublicaFotoMatch) {
-    const personalId = fichaPublicaIdMatch[1];
+  // PATCH /publico/ficha-personal — header X-Ficha-Session, body: { telefono?, email?, domicilio?, fecha_nacimiento? }
+  if (method === "PATCH" && path.endsWith("/publico/ficha-personal")) {
+    const sessionCheck = verifyFichaPublicaSessionToken(getFichaSessionToken(event));
+    if (!sessionCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_SESION });
+
     const body = safeParseBody(event);
     if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
 
-    const tokenCheck = verifyFichaPublicaToken(body.token || getQueryParam(event, "token"));
-    if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
-
-    const documento = normalizeText(body.documento || "");
-    const fechaNacimiento = normalizeText(body.fecha_nacimiento || "");
-    if (!documento || !FICHA_PUBLICA_FECHA_REGEX.test(fechaNacimiento)) {
-      return json(400, { ok: false, message: "Faltan tu documento y tu fecha de nacimiento para confirmar la identidad." });
-    }
-
-    // Whitelist estricta: se ignora cualquier otra key del body.
+    // Whitelist estricta: se ignora cualquier otra key del body (nunca
+    // nombre, documento, estado, rol, base -- esos solo se editan desde el
+    // modulo autenticado de RRHH).
     const updates = {};
     for (const campo of FICHA_PUBLICA_CAMPOS_EDITABLES) {
       if (Object.prototype.hasOwnProperty.call(body, campo)) {
@@ -14961,29 +15169,56 @@ async function routeRequest(event) {
     if (updates.email && !FICHA_PUBLICA_EMAIL_REGEX.test(updates.email)) {
       return json(422, { ok: false, message: "El email no tiene un formato válido." });
     }
+    if (Object.prototype.hasOwnProperty.call(updates, "fecha_nacimiento")) {
+      if (!updates.fecha_nacimiento || !isValidPastDateString(updates.fecha_nacimiento)) {
+        return json(422, { ok: false, message: "La fecha de nacimiento no es válida." });
+      }
+    }
 
     const client = createDbClient();
     await client.connect();
     try {
-      // Re-verifica que id + organization_id (del token) + documento +
-      // fecha_nacimiento sean la misma fila ANTES de escribir: cambiar el :id
-      // de la URL con un token valido no alcanza para tocar otra ficha.
-      const persona = await verifyFichaPublicaPersona(
-        client, tokenCheck.organizationId, personalId, documento, fechaNacimiento
-      );
+      const ip = getFichaPublicaClientIp(event);
+      if (await isFichaPublicaIpBlocked(client, ip)) {
+        return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
+      }
+
+      // Re-busca la fila ANTES de escribir (organization_id y personal_id
+      // salen del session token, nunca del cliente) -- tambien da los
+      // valores "anteriores" para el log de auditoria, y re-confirma
+      // estado <> 'baja' por si cambio a mitad de la session.
+      const persona = await getFichaPublicaPersonaActiva(client, sessionCheck.organizationId, sessionCheck.personalId);
       if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
 
       const setCols = Object.keys(updates);
       const setClause = setCols.map((col, i) => `${col} = $${i + 1}`).join(", ");
       const values = setCols.map((col) => updates[col]);
-      values.push(personalId, tokenCheck.organizationId);
+      values.push(sessionCheck.personalId, sessionCheck.organizationId);
 
       const result = await client.query(
         `UPDATE su_personal SET ${setClause}, updated_at = now()
          WHERE id = $${setCols.length + 1} AND organization_id = $${setCols.length + 2}
-         RETURNING id, nombre, apellido, telefono, email, domicilio, foto_url`,
+         RETURNING id, nombre, apellido, documento, fecha_nacimiento, telefono, email, domicilio, foto_url`,
         values
       );
+
+      // Auditoria: una fila por campo que efectivamente cambio (comparando
+      // contra el valor que ya tenia `persona`, no solo "vino en el body").
+      for (const campo of setCols) {
+        const antes = campo === "fecha_nacimiento" ? dateColumnToDateOnly(persona[campo]) : (persona[campo] ?? null);
+        const despues = updates[campo];
+        if (String(antes ?? "") !== String(despues ?? "")) {
+          await registrarCambioPublico(client, {
+            organizationId: sessionCheck.organizationId,
+            personalId: sessionCheck.personalId,
+            campo,
+            valorAnterior: antes,
+            valorNuevo: despues,
+            ip
+          });
+        }
+      }
+
       return json(200, { ok: true, persona: projectFichaPublicaPersona(result.rows[0]) });
     } catch (error) {
       return json(500, { ok: false, message: "No se pudieron guardar los cambios.", error: error.message });
@@ -14992,64 +15227,55 @@ async function routeRequest(event) {
     }
   }
 
-  // POST /publico/ficha-personal/:id/foto?token=&documento=&fecha_nacimiento=
-  // Bytes crudos en el body (mismo patron que POST /organizations/:id/logo),
-  // pero con las validaciones de tipo y tamaño que ese endpoint no tiene.
-  if (method === "POST" && fichaPublicaFotoMatch) {
-    const personalId = fichaPublicaFotoMatch[1];
+  // POST /publico/ficha-personal/foto — header X-Ficha-Session, body: bytes crudos JPEG
+  if (method === "POST" && path.endsWith("/publico/ficha-personal/foto")) {
+    const sessionCheck = verifyFichaPublicaSessionToken(getFichaSessionToken(event));
+    if (!sessionCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_SESION });
 
-    const tokenCheck = verifyFichaPublicaToken(getQueryParam(event, "token"));
-    if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
-
-    const documento = normalizeText(getQueryParam(event, "documento") || "");
-    const fechaNacimiento = normalizeText(getQueryParam(event, "fecha_nacimiento") || "");
-    if (!documento || !FICHA_PUBLICA_FECHA_REGEX.test(fechaNacimiento)) {
-      return json(400, { ok: false, message: "Faltan tu documento y tu fecha de nacimiento para confirmar la identidad." });
-    }
-
-    const rawContentType =
-      event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
-    const contentType = String(rawContentType).split(";")[0].trim().toLowerCase();
-    if (!FICHA_PUBLICA_PHOTO_ALLOWED_TYPES.has(contentType)) {
-      return json(422, { ok: false, message: "Formato de imagen no permitido. Subí un archivo JPG, PNG o WebP." });
-    }
-
-    if (!event.body) return json(400, { ok: false, message: "No llegó ninguna imagen." });
+    const rawContentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
     const imageBuffer = event.isBase64Encoded
-      ? Buffer.from(event.body, "base64")
-      : Buffer.from(event.body, "binary");
-    if (!imageBuffer.length) return json(400, { ok: false, message: "No llegó ninguna imagen." });
-    if (imageBuffer.length > FICHA_PUBLICA_PHOTO_MAX_BYTES) {
-      return json(422, { ok: false, message: "La imagen supera el tamaño máximo de 4 MB." });
-    }
+      ? Buffer.from(event.body || "", "base64")
+      : Buffer.from(event.body || "", "binary");
 
     const client = createDbClient();
     await client.connect();
     try {
-      const persona = await verifyFichaPublicaPersona(
-        client, tokenCheck.organizationId, personalId, documento, fechaNacimiento
-      );
+      validatePersonalFotoBuffer(imageBuffer, rawContentType);
+
+      const ip = getFichaPublicaClientIp(event);
+      if (await isFichaPublicaIpBlocked(client, ip)) {
+        return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
+      }
+
+      const persona = await getFichaPublicaPersonaActiva(client, sessionCheck.organizationId, sessionCheck.personalId);
       if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
 
-      const key = `personal/${personalId}.${fichaPublicaFotoExt(contentType)}`;
-      await s3Client.send(new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: key,
-        Body: imageBuffer,
-        ContentType: contentType,
-        CacheControl: "public, max-age=31536000"
-      }));
-      const fotoUrl = `${S3_BASE_URL}/${key}?v=${Date.now()}`;
+      const fotoUrl = await uploadPersonalFoto({
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId,
+        buffer: imageBuffer,
+        previousFotoUrl: persona.foto_url
+      });
 
       const result = await client.query(
         `UPDATE su_personal SET foto_url = $1, updated_at = now()
          WHERE id = $2 AND organization_id = $3
-         RETURNING id, nombre, apellido, telefono, email, domicilio, foto_url`,
-        [fotoUrl, personalId, tokenCheck.organizationId]
+         RETURNING id, nombre, apellido, documento, fecha_nacimiento, telefono, email, domicilio, foto_url`,
+        [fotoUrl, sessionCheck.personalId, sessionCheck.organizationId]
       );
+
+      await registrarCambioPublico(client, {
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId,
+        campo: "foto_url",
+        valorAnterior: persona.foto_url,
+        valorNuevo: fotoUrl,
+        ip
+      });
+
       return json(200, { ok: true, foto_url: fotoUrl, persona: projectFichaPublicaPersona(result.rows[0]) });
     } catch (error) {
-      return json(500, { ok: false, message: "No se pudo subir la foto.", error: error.message });
+      return operationsErrorResponse(error, "No se pudo subir la foto.");
     } finally {
       try { await client.end(); } catch {}
     }
@@ -40120,6 +40346,110 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       } catch (error) {
         await client.query("ROLLBACK").catch(() => {});
         return operationsErrorResponse(error, "Failed to update personal bases");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // POST /operaciones/personal/:id/foto — body: bytes crudos JPEG. Mismo
+    // helper (uploadPersonalFoto) y mismas validaciones (validatePersonalFotoBuffer)
+    // que el endpoint publico -- la unica diferencia es la autenticacion
+    // (sesion Cognito + organization_id del token, en vez de X-Ficha-Session).
+    // No escribe en su_personal_cambios_publicos: esa tabla audita
+    // especificamente cambios hechos por el propio funcionario via el link
+    // publico, no ediciones de un admin de RRHH ya autenticado.
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/foto$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/foto$/);
+      const personalId = match?.[1];
+      const rawContentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
+      const imageBuffer = event.isBase64Encoded
+        ? Buffer.from(event.body || "", "base64")
+        : Buffer.from(event.body || "", "binary");
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const persona = await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        validatePersonalFotoBuffer(imageBuffer, rawContentType);
+
+        const fotoUrl = await uploadPersonalFoto({
+          organizationId: access.organizationId,
+          personalId,
+          buffer: imageBuffer,
+          previousFotoUrl: persona.foto_url
+        });
+
+        const result = await client.query(
+          `UPDATE su_personal SET foto_url = $1, updated_at = now()
+           WHERE id = $2 AND organization_id = $3
+           RETURNING id, foto_url`,
+          [fotoUrl, personalId, access.organizationId]
+        );
+        return json(200, { ok: true, foto_url: result.rows[0]?.foto_url || fotoUrl });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to upload personal foto");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // DELETE /operaciones/personal/:id/foto — borra el objeto de S3 (si
+    // pertenece a nuestro bucket) y limpia foto_url.
+    if (method === "DELETE" && path.match(/\/operaciones\/personal\/([^/]+)\/foto$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/foto$/);
+      const personalId = match?.[1];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const persona = await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        await deletePersonalFotoFromS3(persona.foto_url);
+        await client.query(
+          `UPDATE su_personal SET foto_url = NULL, updated_at = now() WHERE id = $1 AND organization_id = $2`,
+          [personalId, access.organizationId]
+        );
+        return json(200, { ok: true });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to delete personal foto");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // GET /operaciones/personal/:id/cambios-publicos — historial de cambios
+    // hechos por el propio funcionario via el link publico (migracion 082).
+    // Gateado por metadata de columna: si la tabla todavia no existe en este
+    // entorno, devuelve items: [] en vez de un 500.
+    if (method === "GET" && path.match(/\/operaciones\/personal\/([^/]+)\/cambios-publicos$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/cambios-publicos$/);
+      const personalId = match?.[1];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        const cols = await getTableColumns(client, "su_personal_cambios_publicos");
+        if (!cols.size) return json(200, { ok: true, items: [] });
+
+        const result = await client.query(
+          `SELECT id, campo, valor_anterior, valor_nuevo, created_at
+           FROM su_personal_cambios_publicos
+           WHERE organization_id = $1 AND personal_id = $2
+           ORDER BY created_at DESC`,
+          [access.organizationId, personalId]
+        );
+        return json(200, { ok: true, items: result.rows });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list cambios publicos");
       } finally {
         await client.end();
       }
