@@ -9,7 +9,7 @@ import {
   ListUsersCommand
 } from "@aws-sdk/client-cognito-identity-provider";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS, withCorsOrigin, getCurrentCorsOrigin } from "./src/lib/http.js";
 import { normalizePhone as normalizePhoneValidation } from "./src/lib/validation.js";
@@ -23,6 +23,14 @@ const sqs = new SQSClient({ region: process.env.AWS_REGION || "us-east-2" });
 const s3Client = new S3Client({ region: "us-east-1" });
 const S3_BUCKET = "rednacrem-assets";
 const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
+// Bucket privado separado (documentacion de personal: cedula, titulos,
+// carne de salud, etc.) -- Block Public Access activado, sin CORS (la
+// subida y la descarga estan mediadas por el backend, el navegador nunca
+// habla directo con este bucket). Cliente S3 aparte porque vive en una
+// region distinta (us-east-2, misma que la Lambda) de rednacrem-assets
+// (us-east-1).
+const s3ClientDocumentos = new S3Client({ region: "us-east-2" });
+const S3_BUCKET_DOCUMENTOS = "rednacrem-documentos-personal";
 const BATCH_TIPOS = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"];
 
 function getRequestId(event) {
@@ -11027,11 +11035,19 @@ function dateColumnToDateOnly(value) {
 // 'YYYY-MM-DD' directamente (con ceros a la izquierda, el orden lexico
 // coincide con el cronologico), sin pasar la fecha de HOY por ningun
 // new Date() en hora local.
-function isValidPastDateString(value) {
+// Fecha real (rechaza "2024-02-30"), sin pasar por ningun new Date() en
+// hora local -- se usa tal cual para vencimientos (pueden ser futuros, ej.
+// carne de salud/libreta de conducir) y como base de isValidPastDateString
+// (fechas de nacimiento, que ademas no pueden ser futuras).
+function isValidDateString(value) {
   if (!FICHA_PUBLICA_FECHA_REGEX.test(value)) return false;
   const [y, m, d] = value.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
-  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return false;
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+}
+
+function isValidPastDateString(value) {
+  if (!isValidDateString(value)) return false;
   const now = new Date();
   const todayStr = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
   return value <= todayStr;
@@ -11163,6 +11179,357 @@ async function registrarCambioPublico(client, { organizationId, personalId, camp
      VALUES ($1, $2, $3, $4, $5, $6)`,
     [organizationId, personalId, campo, valorAnterior, valorNuevo, ip]
   );
+}
+
+// ---------------------------------------------------------------------
+// Documentacion de personal (migracion 083) -- cedula, carne de salud,
+// titulo/registro MSP, libreta de conducir, cursos. El backend es la UNICA
+// fuente de que documentos aplican a cada rol: el frontend (publico e
+// interno) dibuja la checklist que devuelve GET .../documentos tal cual,
+// sin ninguna configuracion propia.
+// ---------------------------------------------------------------------
+
+// Documentos que se piden a TODOS los roles, mas los que suma cada rol
+// especifico (union si la persona tiene varios roles). 'curso' nunca entra
+// aca -- es opcional para todos, se muestra aparte, repetible.
+const DOCUMENTO_CATEGORIAS_BASE = ["ci_frente", "ci_dorso", "carne_salud"];
+const DOCUMENTOS_POR_ROL = {
+  Medico: ["titulo", "registro_msp"],
+  Jefe_medico: ["titulo", "registro_msp"],
+  Direccion_tecnica: ["titulo", "registro_msp"],
+  Enfermero: ["titulo", "registro_msp"],
+  Jefe_de_enfermeria: ["titulo", "registro_msp"],
+  Chofer: ["libreta_conducir"],
+  Jefe_de_choferes: ["libreta_conducir"]
+};
+
+const DOCUMENTO_CATEGORIA_LABELS = {
+  ci_frente: "Cédula (frente)",
+  ci_dorso: "Cédula (dorso)",
+  carne_salud: "Carné de salud",
+  titulo: "Título",
+  registro_msp: "Registro MSP",
+  libreta_conducir: "Libreta de conducir profesional",
+  curso: "Curso"
+};
+
+// entidadTipo null => el documento no tiene fila asociada en ninguna tabla
+// de negocio (ci_frente/ci_dorso: solo el archivo en si). Para
+// habilitacion, el valor de `categoria` ES el valor fijo de
+// su_personal_habilitaciones.tipo ('titulo' | 'registro_msp' |
+// 'libreta_conducir') -- no hace falta una tabla de mapeo aparte.
+const DOCUMENTO_CATEGORIA_CONFIG = {
+  ci_frente: { entidadTipo: null },
+  ci_dorso: { entidadTipo: null },
+  carne_salud: { entidadTipo: "carnet_salud" },
+  titulo: { entidadTipo: "habilitacion" },
+  registro_msp: { entidadTipo: "habilitacion" },
+  libreta_conducir: { entidadTipo: "habilitacion" },
+  curso: { entidadTipo: "capacitacion" }
+};
+const DOCUMENTO_CATEGORIAS_VALIDAS = new Set(Object.keys(DOCUMENTO_CATEGORIA_CONFIG));
+const DOCUMENTO_MAX_BYTES = 4 * 1024 * 1024;
+
+function getCategoriasRequeridas(roles) {
+  const set = new Set(DOCUMENTO_CATEGORIAS_BASE);
+  for (const rol of roles) {
+    (DOCUMENTOS_POR_ROL[rol] || []).forEach((categoria) => set.add(categoria));
+  }
+  return [...set];
+}
+
+function isPdfMagicBytes(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= 4 &&
+    buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46; // "%PDF"
+}
+
+// Mismo criterio que validatePersonalFotoBuffer: Content-Type de header
+// (whitelist) + tamaño + magic bytes reales del archivo -- un cliente
+// podria mentir en el Content-Type, los magic bytes son la verificacion
+// real de que el archivo es lo que dice ser.
+function validateDocumentoBuffer(buffer, contentTypeHeader) {
+  const contentType = String(contentTypeHeader || "").split(";")[0].trim().toLowerCase();
+  if (contentType !== "image/jpeg" && contentType !== "application/pdf") {
+    throw { status: 422, message: "Formato no permitido. Subí un archivo JPG o PDF." };
+  }
+  if (!buffer || !buffer.length) {
+    throw { status: 400, message: "No llegó ningún archivo." };
+  }
+  if (buffer.length > DOCUMENTO_MAX_BYTES) {
+    throw { status: 422, message: "El archivo supera el tamaño máximo de 4 MB." };
+  }
+  if (contentType === "image/jpeg" && !isJpegMagicBytes(buffer)) {
+    throw { status: 422, message: "El archivo no es una imagen JPG válida." };
+  }
+  if (contentType === "application/pdf" && !isPdfMagicBytes(buffer)) {
+    throw { status: 422, message: "El archivo no es un PDF válido." };
+  }
+  return contentType;
+}
+
+// Header-lookup case-insensitive generico -- API Gateway (HTTP API v2) y
+// Node (local-server.mjs) ya normalizan a minuscula, pero se chequea sin
+// asumirlo, mismo criterio defensivo que el resto del archivo usa para
+// content-type.
+function getRequestHeader(event, name) {
+  const headers = event?.headers || {};
+  const lower = name.toLowerCase();
+  if (headers[lower] !== undefined) return headers[lower];
+  const found = Object.keys(headers).find((key) => key.toLowerCase() === lower);
+  return found ? headers[found] : null;
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+// Nombre de archivo para Content-Disposition: ASCII-safe en el parametro
+// filename= (fallback legible) + filename*=UTF-8'' con el nombre real
+// percent-encoded, mismo patron que ya interpreta el frontend
+// (apiClient.js, requestBlob) para PDFs de clientes.
+function buildContentDisposition(nombreArchivo) {
+  const safe = String(nombreArchivo || "documento").replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "'");
+  return `inline; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(nombreArchivo || "documento")}`;
+}
+
+// Sube el archivo a S3, crea/actualiza la fila de negocio asociada
+// (habilitacion/carnet_salud/capacitacion) y crea/reemplaza la fila de
+// su_personal_archivos -- un solo lugar para el endpoint publico y el
+// interno, que solo difieren en `origen` y si hay `revisadoPor`.
+async function confirmarDocumento(client, {
+  organizationId,
+  personalId,
+  categoria,
+  buffer,
+  contentType,
+  nombreArchivo,
+  metadata = {},
+  origen,
+  revisadoPor,
+  ip
+}) {
+  const config = DOCUMENTO_CATEGORIA_CONFIG[categoria];
+  if (!config) throw { status: 400, message: "Categoría de documento inválida." };
+
+  const existingRes = categoria !== "curso"
+    ? await client.query(
+        `SELECT id, s3_key, estado_revision FROM su_personal_archivos WHERE personal_id = $1 AND categoria = $2`,
+        [personalId, categoria]
+      )
+    : { rows: [] };
+  const existing = existingRes.rows[0] || null;
+
+  // Publico: no se puede reemplazar un documento ya validado. Interno: sin
+  // restriccion (RRHH puede corregir cualquier cosa).
+  if (origen === "publico" && existing?.estado_revision === "validado") {
+    throw { status: 409, message: "Este documento ya fue validado por RRHH y no se puede reemplazar. Si hay un error, avisale a tu contacto de RRHH." };
+  }
+
+  const ext = contentType === "application/pdf" ? "pdf" : "jpg";
+  const key = `${organizationId}/personal/${personalId}/${categoria}/${crypto.randomUUID()}.${ext}`;
+  await s3ClientDocumentos.send(new PutObjectCommand({
+    Bucket: S3_BUCKET_DOCUMENTOS,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType
+  }));
+
+  let entidadTipo = null;
+  let entidadId = null;
+  if (config.entidadTipo === "habilitacion") {
+    const current = await client.query(
+      `SELECT id FROM su_personal_habilitaciones WHERE personal_id = $1 AND organization_id = $2 AND tipo = $3 LIMIT 1`,
+      [personalId, organizationId, categoria]
+    );
+    const payload = {
+      tipo: categoria,
+      numero: metadata.numero ?? null,
+      fecha_vencimiento: metadata.fechaVencimiento ?? null
+    };
+    const row = current.rows[0]
+      ? await updateOrganizationRow(client, "su_personal_habilitaciones", current.rows[0].id, payload, organizationId)
+      : await insertOrganizationRow(client, "su_personal_habilitaciones", { ...payload, personal_id: personalId }, organizationId);
+    entidadTipo = "habilitacion";
+    entidadId = row.id;
+  } else if (config.entidadTipo === "carnet_salud") {
+    const current = await client.query(
+      `SELECT id FROM su_personal_carnet_salud WHERE personal_id = $1 AND organization_id = $2 ORDER BY created_at DESC LIMIT 1`,
+      [personalId, organizationId]
+    );
+    const payload = { fecha_vencimiento: metadata.fechaVencimiento ?? null };
+    const row = current.rows[0]
+      ? await updateOrganizationRow(client, "su_personal_carnet_salud", current.rows[0].id, payload, organizationId)
+      : await insertOrganizationRow(client, "su_personal_carnet_salud", { ...payload, personal_id: personalId }, organizationId);
+    entidadTipo = "carnet_salud";
+    entidadId = row.id;
+  } else if (config.entidadTipo === "capacitacion") {
+    const row = await insertOrganizationRow(client, "su_personal_capacitaciones", {
+      personal_id: personalId,
+      tipo_capacitacion: metadata.cursoNombre || "Curso",
+      institucion: metadata.cursoInstitucion ?? null,
+      fecha_emision: metadata.fechaEmision ?? null,
+      fecha_vencimiento: metadata.fechaVencimiento ?? null
+    }, organizationId);
+    entidadTipo = "capacitacion";
+    entidadId = row.id;
+  }
+
+  const estadoRevision = origen === "interno" ? "validado" : "pendiente";
+  const revisadoAt = origen === "interno" ? new Date().toISOString() : null;
+  const revisadoPorFinal = origen === "interno" ? (revisadoPor || null) : null;
+
+  let archivo;
+  if (existing) {
+    const result = await client.query(
+      `UPDATE su_personal_archivos SET
+         entidad_tipo = $1, entidad_id = $2, nombre_archivo = $3, s3_key = $4, content_type = $5,
+         tamano = $6, origen = $7, estado_revision = $8, motivo_rechazo = NULL,
+         revisado_por = $9, revisado_at = $10
+       WHERE id = $11
+       RETURNING *`,
+      [entidadTipo, entidadId, nombreArchivo, key, contentType, buffer.length, origen, estadoRevision, revisadoPorFinal, revisadoAt, existing.id]
+    );
+    archivo = result.rows[0];
+  } else {
+    const result = await client.query(
+      `INSERT INTO su_personal_archivos
+         (organization_id, personal_id, categoria, entidad_tipo, entidad_id, nombre_archivo, s3_key, content_type, tamano, origen, estado_revision, revisado_por, revisado_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING *`,
+      [organizationId, personalId, categoria, entidadTipo, entidadId, nombreArchivo, key, contentType, buffer.length, origen, estadoRevision, revisadoPorFinal, revisadoAt]
+    );
+    archivo = result.rows[0];
+  }
+
+  // Se borra el archivo viejo de S3 DESPUES de confirmar la fila nueva en
+  // la base -- si el borrado falla (ya no estaba, etc.) no se pierde el
+  // registro nuevo. Mismo criterio que uploadPersonalFoto.
+  if (existing?.s3_key && existing.s3_key !== key) {
+    try {
+      await s3ClientDocumentos.send(new DeleteObjectCommand({ Bucket: S3_BUCKET_DOCUMENTOS, Key: existing.s3_key }));
+    } catch {}
+  }
+
+  if (origen === "publico") {
+    await registrarCambioPublico(client, {
+      organizationId, personalId, campo: categoria, valorAnterior: existing ? "reemplazado" : null, valorNuevo: nombreArchivo, ip
+    });
+  }
+
+  return archivo;
+}
+
+// Checklist resuelta (categoria x estado) para una persona: la usan tanto
+// el endpoint publico como el interno -- misma funcion, mismos datos.
+async function buildDocumentosChecklist(client, { organizationId, personalId }) {
+  const rolesRes = await client.query(`SELECT rol FROM su_personal_roles WHERE personal_id = $1`, [personalId]);
+  const roles = rolesRes.rows.map((row) => row.rol);
+  const categoriasRequeridas = getCategoriasRequeridas(roles);
+
+  const archivosRes = await client.query(
+    `SELECT id, categoria, nombre_archivo, estado_revision, motivo_rechazo, entidad_tipo, entidad_id
+     FROM su_personal_archivos WHERE personal_id = $1 AND organization_id = $2`,
+    [personalId, organizationId]
+  );
+  const archivosPorCategoria = new Map();
+  const cursoArchivos = [];
+  for (const row of archivosRes.rows) {
+    if (row.categoria === "curso") cursoArchivos.push(row);
+    else archivosPorCategoria.set(row.categoria, row);
+  }
+
+  const habilitacionesRes = await client.query(
+    `SELECT tipo, numero, fecha_vencimiento FROM su_personal_habilitaciones
+     WHERE personal_id = $1 AND organization_id = $2 AND tipo IN ('titulo','registro_msp','libreta_conducir')`,
+    [personalId, organizationId]
+  );
+  const habilitacionPorTipo = new Map(habilitacionesRes.rows.map((row) => [row.tipo, row]));
+
+  const carnetRes = await client.query(
+    `SELECT fecha_vencimiento FROM su_personal_carnet_salud
+     WHERE personal_id = $1 AND organization_id = $2 ORDER BY created_at DESC LIMIT 1`,
+    [personalId, organizationId]
+  );
+  const carnet = carnetRes.rows[0] || null;
+
+  const checklist = categoriasRequeridas.map((categoria) => {
+    const archivo = archivosPorCategoria.get(categoria) || null;
+    const entidad = categoria === "carne_salud" ? carnet : habilitacionPorTipo.get(categoria) || null;
+    return {
+      categoria,
+      label: DOCUMENTO_CATEGORIA_LABELS[categoria],
+      estado: archivo ? archivo.estado_revision : "falta",
+      archivo_id: archivo?.id || null,
+      nombre_archivo: archivo?.nombre_archivo || null,
+      motivo_rechazo: archivo?.estado_revision === "rechazado" ? archivo.motivo_rechazo : null,
+      numero: entidad?.numero ?? null,
+      fecha_vencimiento: dateColumnToDateOnly(entidad?.fecha_vencimiento ?? null)
+    };
+  });
+
+  let capacitacionesPorId = new Map();
+  const idsCursos = cursoArchivos.map((archivo) => archivo.entidad_id).filter(Boolean);
+  if (idsCursos.length) {
+    const capRes = await client.query(
+      `SELECT id, tipo_capacitacion, institucion, fecha_emision, fecha_vencimiento FROM su_personal_capacitaciones WHERE id = ANY($1::uuid[])`,
+      [idsCursos]
+    );
+    capacitacionesPorId = new Map(capRes.rows.map((row) => [row.id, row]));
+  }
+  const cursos = cursoArchivos.map((archivo) => {
+    const cap = capacitacionesPorId.get(archivo.entidad_id) || null;
+    return {
+      archivo_id: archivo.id,
+      nombre_archivo: archivo.nombre_archivo,
+      estado: archivo.estado_revision,
+      motivo_rechazo: archivo.estado_revision === "rechazado" ? archivo.motivo_rechazo : null,
+      tipo_capacitacion: cap?.tipo_capacitacion ?? null,
+      institucion: cap?.institucion ?? null,
+      fecha_emision: dateColumnToDateOnly(cap?.fecha_emision ?? null),
+      fecha_vencimiento: dateColumnToDateOnly(cap?.fecha_vencimiento ?? null)
+    };
+  });
+
+  return { checklist, cursos };
+}
+
+// Resumen de turno de solo lectura para la seccion "Tu turno" del link
+// publico -- mismos datos que ya arma getPersonalDetail (vehiculo via join
+// aparte, bases via su_personal_bases) para la ficha interna.
+async function getTurnoResumen(client, { organizationId, personalId }) {
+  const personaRes = await client.query(
+    `SELECT regimen_turno, vehiculo_id, franja_turno, fecha_ref_descanso FROM su_personal WHERE id = $1 AND organization_id = $2`,
+    [personalId, organizationId]
+  );
+  const persona = personaRes.rows[0];
+  if (!persona) return null;
+
+  let vehiculoNumeroInterno = null;
+  if (persona.vehiculo_id) {
+    const vehiculoRes = await client.query(
+      `SELECT numero_interno FROM su_vehiculos WHERE id = $1 AND organization_id = $2`,
+      [persona.vehiculo_id, organizationId]
+    ).catch(() => ({ rows: [] }));
+    vehiculoNumeroInterno = vehiculoRes.rows[0]?.numero_interno || null;
+  }
+
+  const basesRes = await client.query(
+    `SELECT spb.base_id, b.nombre, spb.es_principal
+     FROM su_personal_bases spb JOIN su_bases b ON b.id = spb.base_id
+     WHERE spb.organization_id = $1 AND spb.personal_id = $2
+     ORDER BY spb.es_principal DESC, b.nombre ASC`,
+    [organizationId, personalId]
+  ).catch(() => ({ rows: [] }));
+
+  return {
+    regimen_turno: persona.regimen_turno,
+    vehiculo_numero_interno: vehiculoNumeroInterno,
+    franja_turno: persona.franja_turno,
+    fecha_ref_descanso: dateColumnToDateOnly(persona.fecha_ref_descanso),
+    bases: basesRes.rows
+  };
 }
 
 const OPERACIONES_HISTORIA_CLINICA_ENABLED = false;
@@ -15276,6 +15643,170 @@ async function routeRequest(event) {
       return json(200, { ok: true, foto_url: fotoUrl, persona: projectFichaPublicaPersona(result.rows[0]) });
     } catch (error) {
       return operationsErrorResponse(error, "No se pudo subir la foto.");
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
+  // GET /publico/ficha-personal/documentos — header X-Ficha-Session.
+  // Checklist resuelta por rol + turno de solo lectura.
+  if (method === "GET" && path.endsWith("/publico/ficha-personal/documentos")) {
+    const sessionCheck = verifyFichaPublicaSessionToken(getFichaSessionToken(event));
+    if (!sessionCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_SESION });
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      const persona = await getFichaPublicaPersonaActiva(client, sessionCheck.organizationId, sessionCheck.personalId);
+      if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+
+      const { checklist, cursos } = await buildDocumentosChecklist(client, {
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId
+      });
+      const turno = await getTurnoResumen(client, {
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId
+      });
+
+      return json(200, { ok: true, checklist, cursos, turno });
+    } catch (error) {
+      return operationsErrorResponse(error, "No se pudo cargar la documentación.");
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
+  // POST /publico/ficha-personal/documentos — header X-Ficha-Session, body:
+  // bytes crudos (JPEG o PDF). Metadata del documento por header (nunca en
+  // query string, para no dejar datos en logs de acceso):
+  //   X-Doc-Categoria (obligatorio), X-Doc-Nombre-Archivo (obligatorio,
+  //   encodeURIComponent del lado del cliente), X-Doc-Numero,
+  //   X-Doc-Fecha-Vencimiento, X-Doc-Fecha-Emision, X-Doc-Curso-Nombre,
+  //   X-Doc-Curso-Institucion (estos 6 opcionales, segun la categoria).
+  if (method === "POST" && path.endsWith("/publico/ficha-personal/documentos")) {
+    const sessionCheck = verifyFichaPublicaSessionToken(getFichaSessionToken(event));
+    if (!sessionCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_SESION });
+
+    const categoria = getRequestHeader(event, "x-doc-categoria");
+    if (!DOCUMENTO_CATEGORIAS_VALIDAS.has(categoria)) {
+      return json(400, { ok: false, message: "Categoría de documento inválida." });
+    }
+    let nombreArchivo = getRequestHeader(event, "x-doc-nombre-archivo");
+    try {
+      nombreArchivo = nombreArchivo ? decodeURIComponent(nombreArchivo) : "";
+    } catch {
+      nombreArchivo = "";
+    }
+    if (!nombreArchivo) return json(400, { ok: false, message: "Falta el nombre del archivo." });
+
+    const fechaVencimientoRaw = getRequestHeader(event, "x-doc-fecha-vencimiento");
+    const fechaEmisionRaw = getRequestHeader(event, "x-doc-fecha-emision");
+    if (fechaVencimientoRaw && !isValidDateString(fechaVencimientoRaw)) {
+      return json(422, { ok: false, message: "La fecha de vencimiento no es válida." });
+    }
+    if (fechaEmisionRaw && !isValidDateString(fechaEmisionRaw)) {
+      return json(422, { ok: false, message: "La fecha de emisión no es válida." });
+    }
+
+    const rawContentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
+    const buffer = event.isBase64Encoded
+      ? Buffer.from(event.body || "", "base64")
+      : Buffer.from(event.body || "", "binary");
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      const contentType = validateDocumentoBuffer(buffer, rawContentType);
+
+      const ip = getFichaPublicaClientIp(event);
+      if (await isFichaPublicaIpBlocked(client, ip)) {
+        return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
+      }
+
+      const persona = await getFichaPublicaPersonaActiva(client, sessionCheck.organizationId, sessionCheck.personalId);
+      if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+
+      // La categoria tiene que aplicarle a esta persona segun su rol (mas
+      // 'curso', que es opcional para todos) -- evita que alguien suba
+      // basura bajo una categoria que no le corresponde.
+      const rolesRes = await client.query(`SELECT rol FROM su_personal_roles WHERE personal_id = $1`, [persona.id]);
+      const categoriasPermitidas = new Set([...getCategoriasRequeridas(rolesRes.rows.map((row) => row.rol)), "curso"]);
+      if (!categoriasPermitidas.has(categoria)) {
+        return json(400, { ok: false, message: "Esta categoría de documento no aplica a tu rol." });
+      }
+
+      const archivo = await confirmarDocumento(client, {
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId,
+        categoria,
+        buffer,
+        contentType,
+        nombreArchivo,
+        metadata: {
+          numero: getRequestHeader(event, "x-doc-numero") || null,
+          fechaVencimiento: fechaVencimientoRaw || null,
+          fechaEmision: fechaEmisionRaw || null,
+          cursoNombre: (() => {
+            const raw = getRequestHeader(event, "x-doc-curso-nombre");
+            try { return raw ? decodeURIComponent(raw) : null; } catch { return null; }
+          })(),
+          cursoInstitucion: (() => {
+            const raw = getRequestHeader(event, "x-doc-curso-institucion");
+            try { return raw ? decodeURIComponent(raw) : null; } catch { return null; }
+          })()
+        },
+        origen: "publico",
+        ip
+      });
+
+      const { checklist, cursos } = await buildDocumentosChecklist(client, {
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId
+      });
+
+      return json(200, { ok: true, archivo_id: archivo.id, checklist, cursos });
+    } catch (error) {
+      return operationsErrorResponse(error, "No se pudo subir el documento.");
+    } finally {
+      try { await client.end(); } catch {}
+    }
+  }
+
+  // POST /publico/ficha-personal/turno/aviso — header X-Ficha-Session,
+  // body: { comentario? }. Queda registrado en su_personal_cambios_publicos
+  // (campo='aviso_turno') para que RRHH lo vea -- no cambia ningun dato de
+  // su_personal, es solo un aviso.
+  if (method === "POST" && path.endsWith("/publico/ficha-personal/turno/aviso")) {
+    const sessionCheck = verifyFichaPublicaSessionToken(getFichaSessionToken(event));
+    if (!sessionCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_SESION });
+
+    const body = safeParseBody(event) || {};
+    const comentario = normalizeText(body.comentario || "") || null;
+
+    const client = createDbClient();
+    await client.connect();
+    try {
+      const ip = getFichaPublicaClientIp(event);
+      if (await isFichaPublicaIpBlocked(client, ip)) {
+        return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
+      }
+
+      const persona = await getFichaPublicaPersonaActiva(client, sessionCheck.organizationId, sessionCheck.personalId);
+      if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+
+      await registrarCambioPublico(client, {
+        organizationId: sessionCheck.organizationId,
+        personalId: sessionCheck.personalId,
+        campo: "aviso_turno",
+        valorAnterior: null,
+        valorNuevo: comentario || "(sin comentario)",
+        ip
+      });
+
+      return json(200, { ok: true });
+    } catch (error) {
+      return operationsErrorResponse(error, "No se pudo registrar el aviso.");
     } finally {
       try { await client.end(); } catch {}
     }
@@ -40450,6 +40981,196 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         return json(200, { ok: true, items: result.rows });
       } catch (error) {
         return operationsErrorResponse(error, "Failed to list cambios publicos");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // GET /operaciones/personal/:id/documentos — checklist completa
+    // (misma funcion que usa el endpoint publico).
+    if (method === "GET" && path.match(/\/operaciones\/personal\/([^/]+)\/documentos$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/documentos$/);
+      const personalId = match?.[1];
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        const { checklist, cursos } = await buildDocumentosChecklist(client, {
+          organizationId: access.organizationId,
+          personalId
+        });
+        return json(200, { ok: true, checklist, cursos });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load documentos");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // POST /operaciones/personal/:id/documentos — mismo contrato que el
+    // endpoint publico (bytes crudos + headers X-Doc-*), pero autenticado:
+    // origen='interno', queda validado directo (RRHH ya lo reviso al
+    // subirlo) y sin la restriccion de "no reemplazar lo ya validado".
+    if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/documentos$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/documentos$/);
+      const personalId = match?.[1];
+      const categoria = getRequestHeader(event, "x-doc-categoria");
+      let nombreArchivo = getRequestHeader(event, "x-doc-nombre-archivo");
+      try {
+        nombreArchivo = nombreArchivo ? decodeURIComponent(nombreArchivo) : "";
+      } catch {
+        nombreArchivo = "";
+      }
+      const fechaVencimientoRaw = getRequestHeader(event, "x-doc-fecha-vencimiento");
+      const fechaEmisionRaw = getRequestHeader(event, "x-doc-fecha-emision");
+      const rawContentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
+      const buffer = event.isBase64Encoded
+        ? Buffer.from(event.body || "", "base64")
+        : Buffer.from(event.body || "", "binary");
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        if (!DOCUMENTO_CATEGORIAS_VALIDAS.has(categoria)) {
+          throw { status: 400, message: "Categoría de documento inválida." };
+        }
+        if (!nombreArchivo) throw { status: 400, message: "Falta el nombre del archivo." };
+        if (fechaVencimientoRaw && !isValidDateString(fechaVencimientoRaw)) {
+          throw { status: 422, message: "La fecha de vencimiento no es válida." };
+        }
+        if (fechaEmisionRaw && !isValidDateString(fechaEmisionRaw)) {
+          throw { status: 422, message: "La fecha de emisión no es válida." };
+        }
+        const contentType = validateDocumentoBuffer(buffer, rawContentType);
+
+        const archivo = await confirmarDocumento(client, {
+          organizationId: access.organizationId,
+          personalId,
+          categoria,
+          buffer,
+          contentType,
+          nombreArchivo,
+          metadata: {
+            numero: getRequestHeader(event, "x-doc-numero") || null,
+            fechaVencimiento: fechaVencimientoRaw || null,
+            fechaEmision: fechaEmisionRaw || null,
+            cursoNombre: (() => {
+              const raw = getRequestHeader(event, "x-doc-curso-nombre");
+              try { return raw ? decodeURIComponent(raw) : null; } catch { return null; }
+            })(),
+            cursoInstitucion: (() => {
+              const raw = getRequestHeader(event, "x-doc-curso-institucion");
+              try { return raw ? decodeURIComponent(raw) : null; } catch { return null; }
+            })()
+          },
+          origen: "interno",
+          revisadoPor: access.dbUser?.id || null
+        });
+
+        const { checklist, cursos } = await buildDocumentosChecklist(client, {
+          organizationId: access.organizationId,
+          personalId
+        });
+        return json(200, { ok: true, archivo_id: archivo.id, checklist, cursos });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to upload documento");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // GET /operaciones/personal/:id/documentos/:archivoId/contenido — lee
+    // el archivo del bucket privado y lo devuelve con su Content-Type real
+    // y Content-Disposition: inline. Nunca una URL -- el archivo viaja
+    // dentro de la respuesta (base64), autenticado end-to-end.
+    if (method === "GET" && path.match(/\/operaciones\/personal\/([^/]+)\/documentos\/([^/]+)\/contenido$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/documentos\/([^/]+)\/contenido$/);
+      const [, personalId, archivoId] = match;
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        const archivoRes = await client.query(
+          `SELECT s3_key, content_type, nombre_archivo FROM su_personal_archivos
+           WHERE id = $1 AND personal_id = $2 AND organization_id = $3`,
+          [archivoId, personalId, access.organizationId]
+        );
+        const archivo = archivoRes.rows[0];
+        if (!archivo) return json(404, { ok: false, message: "Documento no encontrado" });
+
+        const s3Res = await s3ClientDocumentos.send(new GetObjectCommand({
+          Bucket: S3_BUCKET_DOCUMENTOS,
+          Key: archivo.s3_key
+        }));
+        const buffer = await streamToBuffer(s3Res.Body);
+
+        return {
+          statusCode: 200,
+          headers: {
+            ...CORS_HEADERS,
+            "Access-Control-Allow-Origin": getCurrentCorsOrigin(),
+            "Content-Type": archivo.content_type,
+            "Content-Disposition": buildContentDisposition(archivo.nombre_archivo)
+          },
+          body: buffer.toString("base64"),
+          isBase64Encoded: true
+        };
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load documento");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // PATCH /operaciones/personal/:id/documentos/:archivoId — body:
+    // { estado_revision: 'validado'|'rechazado', motivo_rechazo? }
+    // (motivo_rechazo obligatorio si se rechaza).
+    if (method === "PATCH" && path.match(/\/operaciones\/personal\/([^/]+)\/documentos\/([^/]+)$/)) {
+      const match = path.match(/\/operaciones\/personal\/([^/]+)\/documentos\/([^/]+)$/);
+      const [, personalId, archivoId] = match;
+      const body = safeParseBody(event);
+      if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
+
+      const estadoRevision = body.estado_revision;
+      if (!["validado", "rechazado"].includes(estadoRevision)) {
+        return json(400, { ok: false, message: "estado_revision tiene que ser 'validado' o 'rechazado'" });
+      }
+      const motivoRechazo = normalizeText(body.motivo_rechazo || "") || null;
+      if (estadoRevision === "rechazado" && !motivoRechazo) {
+        return json(400, { ok: false, message: "El motivo de rechazo es obligatorio." });
+      }
+
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        await ensureParentRow(client, "su_personal", personalId, access.organizationId);
+
+        const result = await client.query(
+          `UPDATE su_personal_archivos
+           SET estado_revision = $1, motivo_rechazo = $2, revisado_por = $3, revisado_at = now()
+           WHERE id = $4 AND personal_id = $5 AND organization_id = $6
+           RETURNING *`,
+          [estadoRevision, estadoRevision === "rechazado" ? motivoRechazo : null, access.dbUser?.id || null, archivoId, personalId, access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Documento no encontrado" });
+
+        return json(200, { ok: true, item: result.rows[0] });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update documento revision");
       } finally {
         await client.end();
       }
