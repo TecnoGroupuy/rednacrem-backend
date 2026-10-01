@@ -11228,17 +11228,20 @@ const DOCUMENTO_CATEGORIA_CONFIG = {
   curso: { entidadTipo: "capacitacion" }
 };
 const DOCUMENTO_CATEGORIAS_VALIDAS = new Set(Object.keys(DOCUMENTO_CATEGORIA_CONFIG));
-// La subida es mediada por el backend (sin presigned URL): el archivo viaja
-// en base64 dentro del body de API Gateway, que tiene un techo DURO de
-// 10MB de payload (no configurable) para integracion Lambda-proxy. Base64
-// infla ~33% -- un PDF de 10MB (lo que pedia la spec original) ocuparia
-// ~13.3MB en base64 y API Gateway lo rechazaria con 413 antes de que la
-// Lambda lo vea. 7MB de PDF crudo (~9.3MB en base64) deja margen real bajo
-// ese techo. Las imagenes comprimidas del lado del cliente (lado mayor
-// 1600px, JPEG 0.85) nunca se acercan a esto -- 4MB es solo una red de
-// seguridad.
-const DOCUMENTO_MAX_BYTES_IMAGE = 4 * 1024 * 1024;
-const DOCUMENTO_MAX_BYTES_PDF = 7 * 1024 * 1024;
+// El techo real NO es el de API Gateway (10MB) -- es el de Lambda: una
+// invocacion sincrona (RequestResponse, que es como corre esta Lambda detras
+// de API Gateway) tiene un limite de 6MB de payload, tanto en el REQUEST
+// como en la RESPONSE. Esto pega dos veces: al subir (POST .../documentos,
+// el archivo viaja en base64 en el body) y al ver desde RRHH (GET
+// .../contenido tambien devuelve el archivo en base64 en la respuesta). Con
+// el ~33% que infla base64, 4MB crudos ocupan ~5.33MB codificados -- deja
+// margen real bajo el limite de 6MB en los dos sentidos. 7MB (el numero
+// anterior, pensado solo contra el techo de API Gateway) habria ocupado
+// ~9.3MB en base64 y la Lambda lo habria rechazado igual, aunque API Gateway
+// lo dejara pasar. Mismo limite para JPEG y PDF -- no hay margen para
+// distinguirlos.
+const DOCUMENTO_MAX_BYTES = 4 * 1024 * 1024;
+const DOCUMENTO_MAX_BYTES_MESSAGE = "El archivo supera 4 MB. Si es un PDF escaneado, probá sacarle una foto al documento.";
 
 function getCategoriasRequeridas(roles) {
   const set = new Set(DOCUMENTO_CATEGORIAS_BASE);
@@ -11265,9 +11268,8 @@ function validateDocumentoBuffer(buffer, contentTypeHeader) {
   if (!buffer || !buffer.length) {
     throw { status: 400, message: "No llegó ningún archivo." };
   }
-  const maxBytes = contentType === "application/pdf" ? DOCUMENTO_MAX_BYTES_PDF : DOCUMENTO_MAX_BYTES_IMAGE;
-  if (buffer.length > maxBytes) {
-    throw { status: 422, message: `El archivo supera el tamaño máximo de ${Math.round(maxBytes / (1024 * 1024))} MB.` };
+  if (buffer.length > DOCUMENTO_MAX_BYTES) {
+    throw { status: 422, message: DOCUMENTO_MAX_BYTES_MESSAGE };
   }
   if (contentType === "image/jpeg" && !isJpegMagicBytes(buffer)) {
     throw { status: 422, message: "El archivo no es una imagen JPG válida." };
