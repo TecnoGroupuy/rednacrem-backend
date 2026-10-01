@@ -27,10 +27,13 @@ const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
 // carne de salud, etc.) -- Block Public Access activado, sin CORS (la
 // subida y la descarga estan mediadas por el backend, el navegador nunca
 // habla directo con este bucket). Cliente S3 aparte porque vive en una
-// region distinta (us-east-2, misma que la Lambda) de rednacrem-assets
-// (us-east-1).
-const s3ClientDocumentos = new S3Client({ region: "us-east-2" });
-const S3_BUCKET_DOCUMENTOS = "rednacrem-documentos-personal";
+// region distinta (misma que la Lambda) de rednacrem-assets (us-east-1).
+// Nombre y region por variable de entorno (con default) y no hardcodeados
+// como rednacrem-assets: "Tri" es el sistema, Rednacrem es solo una de las
+// cuatro organizaciones que sirve -- el bucket nuevo no lleva ese nombre.
+const DOCUMENTOS_BUCKET_REGION = process.env.DOCUMENTOS_BUCKET_REGION || "us-east-2";
+const s3ClientDocumentos = new S3Client({ region: DOCUMENTOS_BUCKET_REGION });
+const S3_BUCKET_DOCUMENTOS = process.env.DOCUMENTOS_BUCKET || "tri-documentos-personal";
 const BATCH_TIPOS = ["recupero", "captacion", "guia_telefonica", "guia_procesada", "solicitud_tarjeta"];
 
 function getRequestId(event) {

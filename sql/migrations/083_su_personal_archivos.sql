@@ -4,9 +4,10 @@
 --
 -- Los archivos en si NUNCA viven en este repo ni en Postgres -- esta tabla
 -- solo guarda la referencia (s3_key) al bucket PRIVADO nuevo
--- (rednacrem-documentos-personal, creado a mano por Damian en AWS, sin
--- CORS porque la subida/descarga esta mediada por el backend, nunca habla
--- el navegador directo con S3). Los datos "de negocio" de cada documento
+-- (tri-documentos-personal, nombre configurable por DOCUMENTOS_BUCKET, ver
+-- index.mjs -- creado a mano por Damian en AWS, sin CORS porque la
+-- subida/descarga esta mediada por el backend, nunca habla el navegador
+-- directo con S3). Los datos "de negocio" de cada documento
 -- (numero, fecha_vencimiento, etc.) siguen viviendo en las tablas
 -- existentes su_personal_habilitaciones / su_personal_carnet_salud /
 -- su_personal_capacitaciones -- esta tabla solo agrega la revision y el
