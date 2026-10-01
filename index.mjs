@@ -40320,6 +40320,34 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     }
 
+    // GET /operaciones/personal/documentos-pendientes -- lista de
+    // personal_id con al menos un documento 'pendiente' de revision, para
+    // el icono chico de la tarjeta de la jerarquia (mismo lugar que las
+    // alertas de vencimiento, ver getAlertMeta en RrhhScreen.jsx). Gateado
+    // por metadata: si la tabla todavia no existe en este entorno, items: [].
+    if (method === "GET" && path.endsWith("/operaciones/personal/documentos-pendientes")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+
+        const cols = await getTableColumns(client, "su_personal_archivos");
+        if (!cols.size) return json(200, { ok: true, personal_ids: [] });
+
+        const result = await client.query(
+          `SELECT DISTINCT personal_id FROM su_personal_archivos
+           WHERE organization_id = $1 AND estado_revision = 'pendiente'`,
+          [access.organizationId]
+        );
+        return json(200, { ok: true, personal_ids: result.rows.map((row) => row.personal_id) });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to load pending documentos");
+      } finally {
+        await client.end();
+      }
+    }
+
     if (method === "GET" && path.endsWith("/operaciones/turnos/actual")) {
       const client = createDbClient();
       await client.connect();
