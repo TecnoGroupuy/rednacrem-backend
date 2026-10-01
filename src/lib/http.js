@@ -5,6 +5,7 @@ export const ALLOWED_ORIGINS = [
   "https://rednacrem.tri.uy",
   "https://globalassist.tri.uy",
   "https://callcenter.tri.uy",
+  "https://suemergencia.tri.uy",
 ];
 
 // Solo se aceptan ademas de ALLOWED_ORIGINS cuando LOCAL_DEV_AUTH=true (el
