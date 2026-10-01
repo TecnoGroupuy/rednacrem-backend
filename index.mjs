@@ -10822,7 +10822,10 @@ function requireRole(event, dbUser, allowedRoles) {
 //     una session).
 // ---------------------------------------------------------------------
 
-const FICHA_PUBLICA_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24hs
+// 24hs -- vigencia tanto del codigo corto (ficha_links, mecanismo actual)
+// como la que ya tenian los tokens largos JWT-like (mecanismo viejo, solo
+// de lectura ahora, ver verifyFichaPublicaToken).
+const FICHA_LINK_TTL_MS = 24 * 60 * 60 * 1000;
 const FICHA_PUBLICA_SESSION_TTL_MS = 30 * 60 * 1000; // 30min
 // Umbral de intentos fallidos de verificacion por IP: 5 en 15 minutos: poca
 // entropia si alguien probara documentos al voleo, y el uso legitimo real es
@@ -10857,12 +10860,10 @@ function getFichaPublicaSecret() {
   return secret && secret.length >= 16 ? secret : null;
 }
 
-// Firma generica de un payload de ficha publica (usada tanto para el token
-// de link como el de session -- misma mecanica de firma, distinto contenido
-// de payload). Tira el mismo error 500 claro que ya devolvia
-// generateFichaPublicaToken si falta la env var: POST
-// /operaciones/personal/link-autocompletado (el unico lugar donde se genera
-// un token de link) ya propaga ese throw tal cual via operationsErrorResponse.
+// Firma generica de un payload de ficha publica (la usa el token de
+// session -- el de link YA NO SE GENERA, ver nota en verifyFichaPublicaToken
+// mas abajo, pero la firma de session sigue siendo HMAC por el mismo
+// motivo). Tira un error 500 claro si falta la env var.
 function signFichaPublicaPayload(payload) {
   const secret = getFichaPublicaSecret();
   if (!secret) {
@@ -10913,25 +10914,95 @@ function verifyFichaPublicaSignedPayload(token) {
   }
 }
 
-// Token de link (24hs): lo genera un admin de RRHH, scoped a
-// organization_id para que el link de una organizacion no sirva para
-// buscar/verificar personal de OTRA -- exactamente el tipo de bug de
-// aislamiento multi-tenant que ya paso antes en este proyecto (GET
-// /clients, upsertContact()).
-function generateFichaPublicaToken(organizationId) {
-  const exp = Date.now() + FICHA_PUBLICA_TOKEN_TTL_MS;
-  const token = signFichaPublicaPayload({ typ: "link", exp, organizationId });
-  return { token, expiresAt: exp };
-}
-
-// Mensaje generico de token invalido/vencido: no distingue "secreto no
-// configurado" de "firma adulterada" de "vencido" de "es un session token,
-// no un link token" -- para no darle pistas a quien intente forjar uno.
+// Token de link JWT-like (24hs) -- MECANISMO VIEJO (migracion 084 lo
+// reemplaza por un codigo corto de 8 caracteres en ficha_links, ver
+// createFichaLink/resolveFichaLinkCodigo mas abajo). Ya no se genera
+// ningun token nuevo (POST /operaciones/personal/link-autocompletado
+// genera un codigo corto desde la 084) -- esta funcion de VERIFICACION se
+// deja intacta a proposito para que los links largos ya enviados antes de
+// ese cambio sigan funcionando hasta que venzan (24hs desde que se
+// generaron). Se puede borrar con tranquilidad una vez que pase ese plazo
+// contado desde el deploy de la 084.
 function verifyFichaPublicaToken(token) {
   const payload = verifyFichaPublicaSignedPayload(token);
   if (!payload || payload.typ !== "link") return { valid: false };
   if (!payload.organizationId || !isValidUuid(payload.organizationId)) return { valid: false };
   return { valid: true, organizationId: payload.organizationId, exp: payload.exp };
+}
+
+// Codigo corto de 8 caracteres (migracion 084) -- MECANISMO ACTUAL para
+// generar links de autocompletado. A diferencia del token JWT-like viejo,
+// no es autocontenido/firmado: es un string opaco cuya unica fuente de
+// validez es la fila en ficha_links (organization_id, expires_at,
+// revoked_at). Alfabeto base62 SIN caracteres ambiguos (se excluyen '0'/'O',
+// '1'/'l'/'I') para que se pueda tipear a mano o leer en voz alta sin
+// confundir caracteres -- 57 simbolos posibles por caracter.
+const FICHA_LINK_CODIGO_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const FICHA_LINK_CODIGO_LENGTH = 8;
+
+// crypto.randomBytes (nunca Math.random, que no es criptograficamente
+// seguro) + rejection sampling: 256 no es multiplo de 57 (el tamaño del
+// alfabeto), asi que tomar byte % 57 directo sesgaria los primeros
+// simbolos del alfabeto -- se descartan los bytes >= al mayor multiplo de
+// 57 que entra en 256 (255 no sirve: 256/57 = 4.49, 4*57 = 228) y se pide
+// mas bytes hasta completar el codigo.
+function generateFichaLinkCodigo() {
+  const alphabet = FICHA_LINK_CODIGO_ALPHABET;
+  const alphabetLen = alphabet.length;
+  const maxValid = Math.floor(256 / alphabetLen) * alphabetLen;
+  let result = "";
+  while (result.length < FICHA_LINK_CODIGO_LENGTH) {
+    const bytes = crypto.randomBytes(FICHA_LINK_CODIGO_LENGTH);
+    for (const byte of bytes) {
+      if (byte < maxValid) {
+        result += alphabet[byte % alphabetLen];
+        if (result.length === FICHA_LINK_CODIGO_LENGTH) break;
+      }
+    }
+  }
+  return result;
+}
+
+// Inserta la fila de ficha_links con un codigo unico, reintentando ante una
+// colision (23505 = unique_violation). Con 57^8 (~1.1*10^14) combinaciones
+// posibles una colision real es virtualmente imposible, pero el reintento
+// es gratis y evita que una coincidencia en un millon tire el alta entera.
+async function createFichaLink(client, { organizationId, createdBy }) {
+  const expiresAt = new Date(Date.now() + FICHA_LINK_TTL_MS);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const codigo = generateFichaLinkCodigo();
+    try {
+      const result = await client.query(
+        `INSERT INTO ficha_links (organization_id, codigo, expires_at, created_by)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, codigo, expires_at`,
+        [organizationId, codigo, expiresAt, createdBy]
+      );
+      return result.rows[0];
+    } catch (error) {
+      if (error?.code === "23505") continue;
+      throw error;
+    }
+  }
+  throw { status: 500, message: "No se pudo generar un código único para el link." };
+}
+
+// Resuelve un codigo corto a { valid, organizationId, exp } -- no vencido
+// (expires_at > now(), chequeado en SQL para no depender del reloj del
+// proceso), no revocado (revoked_at IS NULL). exp en epoch ms, mismo
+// formato que devuelve verifyFichaPublicaToken, para que el resto del
+// flujo de /verificar no tenga que bifurcar segun el mecanismo de link.
+async function resolveFichaLinkCodigo(client, codigo) {
+  if (!codigo || typeof codigo !== "string") return { valid: false };
+  const result = await client.query(
+    `SELECT organization_id, expires_at FROM ficha_links
+     WHERE codigo = $1 AND revoked_at IS NULL AND expires_at > now()
+     LIMIT 1`,
+    [codigo]
+  );
+  const row = result.rows[0];
+  if (!row) return { valid: false };
+  return { valid: true, organizationId: row.organization_id, exp: new Date(row.expires_at).getTime() };
 }
 
 // Token de session (30min): lo devuelve POST /publico/ficha-personal/verificar
@@ -15474,25 +15545,50 @@ async function routeRequest(event) {
   const FICHA_PUBLICA_MSG_SESION = "Tu sesión venció, volvé a ingresar tu documento.";
   const FICHA_PUBLICA_MSG_RATE_LIMIT = "Demasiados intentos, probá más tarde.";
 
-  // POST /publico/ficha-personal/verificar — body: { token, documento, fecha_nacimiento }
+  // POST /publico/ficha-personal/verificar — body: { codigo?, token?, documento, fecha_nacimiento }
+  // codigo es el mecanismo ACTUAL (link corto, migracion 084); token es el
+  // JWT-like viejo, que se sigue aceptando para los links ya enviados antes
+  // del cambio. Si viene codigo, tiene prioridad sobre token.
   if (method === "POST" && path.endsWith("/publico/ficha-personal/verificar")) {
     const body = safeParseBody(event);
     if (body === null) return json(400, { ok: false, message: "Invalid JSON body" });
-
-    const tokenCheck = verifyFichaPublicaToken(body.token);
-    if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
-
-    const documento = normalizeText(body.documento || "");
-    const fechaNacimiento = normalizeText(body.fecha_nacimiento || "");
-    if (!documento || !isValidPastDateString(fechaNacimiento)) {
-      return json(400, { ok: false, message: "Ingresá tu documento y tu fecha de nacimiento (AAAA-MM-DD)." });
-    }
 
     const client = createDbClient();
     await client.connect();
     try {
       const ip = getFichaPublicaClientIp(event);
-      if ((await isFichaPublicaIpBlocked(client, ip)) || (await isFichaPublicaDocumentoBlocked(client, documento))) {
+      if (await isFichaPublicaIpBlocked(client, ip)) {
+        return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
+      }
+
+      // Resolucion del link: codigo corto (actual) o token largo (viejo,
+      // solo para compatibilidad). Un codigo invalido/vencido/revocado
+      // cuenta como intento fallido por IP -- a diferencia de un token
+      // invalido (JWT, criptograficamente infactible de adivinar), un
+      // codigo de 8 caracteres SI es forzable por fuerza bruta si no se
+      // penaliza cada intento fallido. documento=null: la falla es del
+      // codigo en si, no de un documento puntual, asi que no suma al
+      // limite por documento (isFichaPublicaDocumentoBlocked).
+      let linkContext;
+      if (body.codigo) {
+        linkContext = await resolveFichaLinkCodigo(client, normalizeText(body.codigo));
+        if (!linkContext.valid) {
+          await registerFichaPublicaIntentoFallido(client, ip, null);
+          return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
+        }
+      } else {
+        const tokenCheck = verifyFichaPublicaToken(body.token);
+        if (!tokenCheck.valid) return json(401, { ok: false, message: FICHA_PUBLICA_MSG_TOKEN });
+        linkContext = tokenCheck;
+      }
+
+      const documento = normalizeText(body.documento || "");
+      const fechaNacimiento = normalizeText(body.fecha_nacimiento || "");
+      if (!documento || !isValidPastDateString(fechaNacimiento)) {
+        return json(400, { ok: false, message: "Ingresá tu documento y tu fecha de nacimiento (AAAA-MM-DD)." });
+      }
+
+      if (await isFichaPublicaDocumentoBlocked(client, documento)) {
         return json(429, { ok: false, message: FICHA_PUBLICA_MSG_RATE_LIMIT });
       }
 
@@ -15504,7 +15600,7 @@ async function routeRequest(event) {
          FROM su_personal
          WHERE organization_id = $1 AND documento = $2 AND fecha_nacimiento = $3::date AND estado <> 'baja'
          LIMIT 1`,
-        [tokenCheck.organizationId, documento, fechaNacimiento]
+        [linkContext.organizationId, documento, fechaNacimiento]
       );
 
       if (!result.rows.length) {
@@ -15513,7 +15609,7 @@ async function routeRequest(event) {
       }
 
       const persona = result.rows[0];
-      const session = generateFichaPublicaSessionToken(tokenCheck.organizationId, persona.id, tokenCheck.exp);
+      const session = generateFichaPublicaSessionToken(linkContext.organizationId, persona.id, linkContext.exp);
       return json(200, {
         ok: true,
         persona: projectFichaPublicaPersona(persona),
@@ -40687,7 +40783,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     }
 
-    if (method === "GET" && operacionesPersonalMatch && operacionesPersonalMatch[1] !== "vencimientos") {
+    if (
+      method === "GET" &&
+      operacionesPersonalMatch &&
+      operacionesPersonalMatch[1] !== "vencimientos" &&
+      operacionesPersonalMatch[1] !== "documentos-pendientes" &&
+      operacionesPersonalMatch[1] !== "links-autocompletado"
+    ) {
       const client = createDbClient();
       await client.connect();
       try {
@@ -41483,8 +41585,8 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
     }
 
     // POST /operaciones/personal/link-autocompletado -- genera un link
-    // publico (sin Cognito, valido 24hs) para que el personal autocomplete
-    // su propia ficha. Ademas del chequeo generico de
+    // publico corto (sin Cognito, valido 24hs, migracion 084) para que el
+    // personal autocomplete su propia ficha. Ademas del chequeo generico de
     // getOperationsAccessContext (autenticado + aprobado + organizacion
     // resuelta, igual que el resto de /operaciones/personal), este endpoint
     // puntual exige un rol especifico via requireRole: a diferencia de los
@@ -41504,18 +41606,83 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         const roleError = requireRole(event, access.dbUser, ["superadministrador", "director", "operaciones"]);
         if (roleError) return roleError;
 
-        const { token, expiresAt } = generateFichaPublicaToken(access.organizationId);
+        const link = await createFichaLink(client, {
+          organizationId: access.organizationId,
+          createdBy: access.dbUser?.id || null
+        });
         // Se arma la url con el origin del propio request (ya resuelto y
         // whitelisteado por resolveAllowedOrigin/getCurrentCorsOrigin para
         // CORS) en vez de una env var nueva -- distintas organizaciones de
         // esta app pueden usar distintos dominios (rednacrem.tri.uy,
-        // globalassist.tri.uy, etc.), y este ya es el dominio real desde el
+        // suemergencia.tri.uy, etc.), y este ya es el dominio real desde el
         // que el admin esta generando el link.
-        const url = `${getCurrentCorsOrigin()}/completar-ficha?token=${encodeURIComponent(token)}`;
+        const expiresAt = new Date(link.expires_at).getTime();
+        const url = `${getCurrentCorsOrigin()}/f/${link.codigo}`;
 
-        return json(200, { ok: true, token, expiresAt, url });
+        return json(200, { ok: true, codigo: link.codigo, expiresAt, url });
       } catch (error) {
         return operationsErrorResponse(error, "Failed to generate ficha publica link");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // GET /operaciones/personal/links-autocompletado -- links vigentes (no
+    // vencidos, no revocados) de la organizacion activa, para el listado del
+    // modal "Link para completar fichas" con boton Desactivar.
+    if (method === "GET" && path.endsWith("/operaciones/personal/links-autocompletado")) {
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const roleError = requireRole(event, access.dbUser, ["superadministrador", "director", "operaciones"]);
+        if (roleError) return roleError;
+
+        const result = await client.query(
+          `SELECT id, codigo, expires_at, created_at
+           FROM ficha_links
+           WHERE organization_id = $1 AND revoked_at IS NULL AND expires_at > now()
+           ORDER BY created_at DESC`,
+          [access.organizationId]
+        );
+        const items = result.rows.map((row) => ({
+          id: row.id,
+          codigo: row.codigo,
+          url: `${getCurrentCorsOrigin()}/f/${row.codigo}`,
+          expires_at: row.expires_at,
+          created_at: row.created_at
+        }));
+        return json(200, { ok: true, items });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to list ficha publica links");
+      } finally {
+        await client.end();
+      }
+    }
+
+    // POST /operaciones/personal/links-autocompletado/:id/revocar
+    if (method === "POST" && path.match(/\/operaciones\/personal\/links-autocompletado\/([^/]+)\/revocar$/)) {
+      const match = path.match(/\/operaciones\/personal\/links-autocompletado\/([^/]+)\/revocar$/);
+      const linkId = match?.[1];
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const roleError = requireRole(event, access.dbUser, ["superadministrador", "director", "operaciones"]);
+        if (roleError) return roleError;
+
+        const result = await client.query(
+          `UPDATE ficha_links SET revoked_at = now()
+           WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL
+           RETURNING id`,
+          [linkId, access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Link no encontrado o ya estaba desactivado" });
+        return json(200, { ok: true });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to revoke ficha publica link");
       } finally {
         await client.end();
       }
