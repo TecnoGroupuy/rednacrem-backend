@@ -83,6 +83,14 @@ test("comercial.cuenta_como_vendedor = exactamente vendedor + backoffice", () =>
   );
 });
 
+test("retencion.supervisar = exactamente supervisor, NADIE más (ni backoffice -- tab Cerrados de Retención, 2026-10)", () => {
+  assertExactRoleSet(
+    getRolesWithPermission(PERMISSIONS.RETENCION_SUPERVISAR),
+    ["supervisor"],
+    "retencion.supervisar"
+  );
+});
+
 test("ningún rol EXISTENTE gana una capacidad que no tenía antes (solo backoffice es nuevo en todas)", () => {
   // Para cada capacidad, todo rol presente salvo 'backoffice' ya la tenía
   // en el gate viejo -- si esto falla, alguno de los 6 roles existentes
@@ -105,17 +113,27 @@ test("ningún rol EXISTENTE gana una capacidad que no tenía antes (solo backoff
       // Estas dos NO le dan la capacidad a backoffice -- newRoles (sin
       // 'backoffice') tiene que coincidir con el set completo de hoy.
       [PERMISSIONS.CLIENTES_ALTA]: ["superadministrador", "director", "operaciones", "supervisor"],
-      [PERMISSIONS.CLIENTES_BAJA_MASIVA]: ["superadministrador", "director", "operaciones", "supervisor"]
+      [PERMISSIONS.CLIENTES_BAJA_MASIVA]: ["superadministrador", "director", "operaciones", "supervisor"],
+      // Capacidad nueva 2026-10 (tab "Cerrados" de Retención) -- tampoco
+      // le da nada a backoffice, solo a supervisor (ya era el único con la
+      // vista supervisor de Retención).
+      [PERMISSIONS.RETENCION_SUPERVISAR]: ["supervisor"]
     };
     assertExactRoleSet(newRoles, expectedByPermission[permission], `${permission}: roles pre-existentes`);
   }
 });
 
-test("backoffice tiene las 11 capacidades que le corresponden, NO clientes.alta/clientes.baja_masiva", () => {
-  const sinBoton = Object.values(PERMISSIONS).filter(
-    (p) => p !== PERMISSIONS.CLIENTES_ALTA && p !== PERMISSIONS.CLIENTES_BAJA_MASIVA
-  );
-  assertExactRoleSet(ROLE_PERMISSIONS.backoffice, sinBoton, "backoffice");
+test("backoffice tiene las 11 capacidades que le corresponden, NO clientes.alta/clientes.baja_masiva/retencion.supervisar", () => {
+  const excluidasDeBackoffice = [
+    PERMISSIONS.CLIENTES_ALTA,
+    PERMISSIONS.CLIENTES_BAJA_MASIVA,
+    // retencion.supervisar (2026-10): backoffice tiene su propia vista
+    // "mis tickets" en Retención, no la vista supervisor -- no le
+    // corresponde esta capacidad.
+    PERMISSIONS.RETENCION_SUPERVISAR
+  ];
+  const esperadas = Object.values(PERMISSIONS).filter((p) => !excluidasDeBackoffice.includes(p));
+  assertExactRoleSet(ROLE_PERMISSIONS.backoffice, esperadas, "backoffice");
 });
 
 test("requirePermission: 403 si el rol no tiene la capacidad, null si la tiene", () => {
@@ -149,10 +167,17 @@ test("roleHasPermission: casos puntuales de los 7 roles (snapshot manual de la t
   assert.equal(roleHasPermission("vendedor", PERMISSIONS.CLIENTES_BAJA_DIRECTA), false, "vendedor clientes.baja_directa");
   assert.equal(roleHasPermission("vendedor", PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS), true, "vendedor recupero.gestionar_propios");
   assert.equal(roleHasPermission("vendedor", PERMISSIONS.TICKETS_CERRAR_BAJA_PROPIA), true, "vendedor tickets.cerrar_baja_propia");
-  // backoffice: todo salvo los 2 botones de Clientes (alta/baja masiva).
+  // backoffice: todo salvo los 2 botones de Clientes (alta/baja masiva) y
+  // retencion.supervisar (vista supervisor de Retención -- no es la suya).
+  const sinBackofficeTampoco = [PERMISSIONS.CLIENTES_ALTA, PERMISSIONS.CLIENTES_BAJA_MASIVA, PERMISSIONS.RETENCION_SUPERVISAR];
   for (const permission of Object.values(PERMISSIONS)) {
-    const expected = permission !== PERMISSIONS.CLIENTES_ALTA && permission !== PERMISSIONS.CLIENTES_BAJA_MASIVA;
+    const expected = !sinBackofficeTampoco.includes(permission);
     assert.equal(roleHasPermission("backoffice", permission), expected, `backoffice ${permission}`);
+  }
+  // retencion.supervisar: SOLO supervisor -- el resto de los 7 roles no.
+  for (const role of ALL_SEVEN_ROLES) {
+    const expected = role === "supervisor";
+    assert.equal(roleHasPermission(role, PERMISSIONS.RETENCION_SUPERVISAR), expected, `${role} retencion.supervisar`);
   }
 });
 

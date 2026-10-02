@@ -49,7 +49,13 @@ export const PERMISSIONS = {
   // pantalla.clientes), SIN backoffice (punto 3 de la ficha de negocio: no
   // alta de clientes, no baja masiva).
   CLIENTES_ALTA: "clientes.alta",
-  CLIENTES_BAJA_MASIVA: "clientes.baja_masiva"
+  CLIENTES_BAJA_MASIVA: "clientes.baja_masiva",
+  // Tab "Cerrados" de Retención (auditoría 2026-10, bug de las tabs
+  // Sin asignar/En gestión mostrando tickets ya cerrados): la ve
+  // exactamente quien hoy ve la vista supervisor de Retención en
+  // RetencionModule (main.jsx, `isSupervisor = rolEfectivo === 'supervisor'`)
+  // -- vendedor y backoffice tienen su propia vista "mis tickets", no esta.
+  RETENCION_SUPERVISAR: "retencion.supervisar"
 };
 
 // rol -> capacidades. Reconstruido desde el acceso REAL de cada
@@ -78,7 +84,8 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.PANTALLA_RETENCION,
     PERMISSIONS.PANTALLA_CLIENTES,
     PERMISSIONS.CLIENTES_ALTA,
-    PERMISSIONS.CLIENTES_BAJA_MASIVA
+    PERMISSIONS.CLIENTES_BAJA_MASIVA,
+    PERMISSIONS.RETENCION_SUPERVISAR
   ],
   operaciones: [
     PERMISSIONS.INTERNO_BASE,

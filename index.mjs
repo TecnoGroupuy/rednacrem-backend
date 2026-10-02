@@ -10082,20 +10082,28 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
     }
     // Cola del supervisor (Retención): tickets de baja todavía sin asignar
     // a nadie. Solo tiene sentido para solicitud_baja — el resto de los
-    // tipos de ticket no pasan por asignación.
+    // tipos de ticket no pasan por asignación. estado <> 'finalizada':
+    // bug 2026-10 -- un ticket cerrado sin asignar (ej. backoffice cierra
+    // directo una solicitud que nadie había asignado) quedaba con
+    // assigned_to NULL para siempre, así que seguía apareciendo acá con el
+    // botón "Asignar" aunque ya estuviera resuelto.
     if (unassigned) {
       conditions.push(`mt.assigned_to IS NULL`);
       conditions.push(`mt.tipo_solicitud = 'solicitud_baja'`);
+      conditions.push(`mt.estado <> 'finalizada'`);
     }
     // Vista "en gestión" del supervisor (Retención): todos los solicitud_baja
     // ya asignados, sea al vendedor que sea — no confundir con assignedTo
     // (un vendedor puntual). El nombre del vendedor no se resuelve acá: el
     // frontend ya tiene el roster completo de vendedores de la organización
     // (mismo que usa el modal de asignar, /api/supervisor/agents) y lo
-    // resuelve ahí, sin necesidad de otro JOIN.
+    // resuelve ahí, sin necesidad de otro JOIN. estado <> 'finalizada':
+    // mismo bug que unassigned -- un ticket asignado y después cerrado
+    // tiene que pasar a la tab "Cerrados", no quedarse acá.
     if (assigned) {
       conditions.push(`mt.assigned_to IS NOT NULL`);
       conditions.push(`mt.tipo_solicitud = 'solicitud_baja'`);
+      conditions.push(`mt.estado <> 'finalizada'`);
     }
     // Vista del vendedor (Retención): solo lo que el supervisor le asignó
     // a él específicamente.
@@ -10182,6 +10190,122 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
       notas: notesByTicket.get(item.id) || [],
       cierreHistory: closuresByTicket.get(item.id) || []
     }));
+  } finally {
+    await client.end();
+  }
+}
+
+// Tab "Cerrados" de Retención (auditoría 2026-10): operación de lectura
+// distinta de listManualTickets -- necesita paginación real y filtros sobre
+// el cierre (closed_by/fechas/resultado), que las otras vistas (cola sin
+// asignar, en gestión, ficha de cliente) no usan. Si un ticket tiene más de
+// un cierre en manual_ticket_closures (reapertura, reintento), se usa
+// SIEMPRE el último por created_at -- `last_closure` abajo -- y el ticket
+// aparece una sola vez, con los filtros de fecha/resultado aplicados sobre
+// ese último cierre.
+async function listClosedManualTickets({
+  organizationId,
+  page = 1,
+  limit = 20,
+  closedBy,
+  dateFrom,
+  dateTo,
+  resultado
+} = {}) {
+  const client = createDbClient();
+  try {
+    await client.connect();
+
+    const values = [];
+    const conditions = [`mt.tipo_solicitud = 'solicitud_baja'`, `mt.estado = 'finalizada'`];
+
+    if (organizationId) {
+      values.push(organizationId);
+      conditions.push(`mt.organization_id = $${values.length}`);
+    }
+    // closedBy = 'unidentified' -- cierres sin closed_by resuelto (texto
+    // histórico no backfillado, ej. "Marcos"/"Agente" en el backfill de la
+    // migración 086). Se puede filtrar explícitamente por ese estado.
+    if (closedBy === "unidentified") {
+      conditions.push(`lc.closed_by IS NULL`);
+    } else if (closedBy) {
+      values.push(closedBy);
+      conditions.push(`lc.closed_by = $${values.length}`);
+    }
+    if (dateFrom) {
+      values.push(dateFrom);
+      conditions.push(`lc.created_at >= $${values.length}::date`);
+    }
+    if (dateTo) {
+      values.push(dateTo);
+      conditions.push(`lc.created_at < ($${values.length}::date + interval '1 day')`);
+    }
+    if (resultado) {
+      values.push(resultado);
+      conditions.push(`lc.resultado = $${values.length}`);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const lastClosureCte = `
+      WITH last_closure AS (
+        SELECT DISTINCT ON (ticket_id)
+          ticket_id, resultado, usuario, note, closed_by, created_at
+        FROM manual_ticket_closures
+        ORDER BY ticket_id, created_at DESC, id DESC
+      )
+    `;
+
+    const countResult = await client.query(
+      `
+      ${lastClosureCte}
+      SELECT count(*)::int AS total
+      FROM manual_tickets mt
+      JOIN last_closure lc ON lc.ticket_id = mt.id
+      ${where}
+      `,
+      values
+    );
+    const total = countResult.rows[0]?.total || 0;
+
+    const limitVal = Math.max(1, Math.min(200, Number(limit) || 20));
+    const pageVal = Math.max(1, Number(page) || 1);
+    const offset = (pageVal - 1) * limitVal;
+
+    const result = await client.query(
+      `
+      ${lastClosureCte}
+      SELECT
+        mt.*,
+        lc.resultado AS cierre_resultado,
+        lc.usuario AS cierre_usuario,
+        lc.note AS cierre_note,
+        lc.closed_by AS cierre_closed_by,
+        lc.created_at AS cierre_fecha,
+        u.nombre AS closed_by_nombre,
+        u.apellido AS closed_by_apellido,
+        u.email AS closed_by_email
+      FROM manual_tickets mt
+      JOIN last_closure lc ON lc.ticket_id = mt.id
+      LEFT JOIN users u ON u.id = lc.closed_by
+      ${where}
+      ORDER BY lc.created_at DESC
+      LIMIT $${values.length + 1} OFFSET $${values.length + 2}
+      `,
+      [...values, limitVal, offset]
+    );
+
+    const items = result.rows.map((row) => ({
+      ...mapManualTicketRowToApi(row),
+      cierreResultado: row.cierre_resultado,
+      cierreFecha: row.cierre_fecha,
+      cierreNota: row.cierre_note,
+      closedBy: row.cierre_closed_by || null,
+      closedByNombre: row.cierre_closed_by
+        ? ([row.closed_by_nombre, row.closed_by_apellido].filter(Boolean).join(" ").trim() || row.closed_by_email || row.cierre_usuario || null)
+        : null
+    }));
+
+    return { items, total, page: pageVal, limit: limitVal };
   } finally {
     await client.end();
   }
@@ -10453,23 +10577,34 @@ async function closeManualTicket({ ticketId, outcome, note, actorName, actorId, 
       }
     }
 
+    // Todo ticket cerrado tiene que quedar con responsable (decisión
+    // 2026-10, auditoría de la tab "Cerrados" de Retención): si no tenía
+    // assigned_to, se le asigna quien lo cierra, en la misma transacción.
+    // Los que ya estaban asignados no se tocan (COALESCE).
+    const closeValues = [ticketId, actorId || null];
+    let closeOrgClause = "";
+    if (organizationId) {
+      closeValues.push(organizationId);
+      closeOrgClause = `AND organization_id = $3`;
+    }
     await client.query(
       `
       UPDATE manual_tickets
       SET estado = 'finalizada',
+          assigned_to = COALESCE(assigned_to, $2),
           updated_at = now()
       WHERE id = $1
-      ${organizationId ? "AND organization_id = $2" : ""}
+      ${closeOrgClause}
       `,
-      organizationId ? [ticketId, organizationId] : [ticketId]
+      closeValues
     );
 
     await client.query(
       `
-      INSERT INTO manual_ticket_closures (ticket_id, resultado, usuario, note)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO manual_ticket_closures (ticket_id, resultado, usuario, note, closed_by)
+      VALUES ($1, $2, $3, $4, $5)
       `,
-      [ticketId, outcome || "cerrado", actorName || null, note || null]
+      [ticketId, outcome || "cerrado", actorName || null, note || null, actorId || null]
     );
 
     if (note && note.trim()) {
@@ -13829,6 +13964,7 @@ async function routeRequest(event) {
     path.match(/\/api\/sms-templates\/([^/]+)$/) ||
     path.match(/\/sms-templates\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
+  const manualTicketsCerradosPath = path.endsWith("/manual-tickets/cerrados");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
   const manualTicketCloseMatch = path.match(/\/manual-tickets\/([^/]+)\/close$/);
@@ -19116,11 +19252,17 @@ async function routeRequest(event) {
         throw error;
       }
 
+      // actorName SIEMPRE sale del dbUser logueado, nunca del body -- antes
+      // confiaba en body.actorName/actor_name y un cierre sin ese campo
+      // quedaba con el texto genérico "Agente" en manual_ticket_closures.usuario
+      // (detectado en la auditoría de la tab "Cerrados" de Retención,
+      // 2026-10). Mismo patrón que `autor` en POST .../notes, arriba.
+      const actorName = [dbUser?.nombre, dbUser?.apellido].filter(Boolean).join(" ").trim() || dbUser?.email || "Usuario";
       const result = await closeManualTicket({
         ticketId: manualTicketCloseMatch[1],
         outcome: normalizeText(body.outcome || ""),
         note: normalizeText(body.note || ""),
-        actorName: body.actorName || body.actor_name || dbUser?.nombre || "",
+        actorName,
         actorId: dbUser?.id || null,
         actorRoleKey: dbUser?.role_key || null,
         organizationId
@@ -19144,6 +19286,70 @@ async function routeRequest(event) {
       return json(500, {
         ok: false,
         message: "Failed to close manual ticket",
+        error: error.message
+      });
+    }
+  }
+
+  // Va ANTES de GET + manualTicketMatch a propósito: ese match genérico es
+  // /manual-tickets/([^/]+)$ y "cerrados" matchearía como si fuera un :id
+  // de ticket si este bloque estuviera después.
+  if (method === "GET" && manualTicketsCerradosPath) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      // Solo quien hoy ve la vista supervisor de Retención (main.jsx,
+      // RetencionModule: isSupervisor = rolEfectivo === 'supervisor') --
+      // vendedor y backoffice tienen su propia vista "mis tickets", no la
+      // cola de cerrados de toda la organización.
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.RETENCION_SUPERVISAR);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const closedByParam = normalizeText(getQueryParam(event, "closed_by"));
+      const dateFromParam = normalizeText(getQueryParam(event, "date_from"));
+      const dateToParam = normalizeText(getQueryParam(event, "date_to"));
+      const resultadoParam = normalizeText(getQueryParam(event, "resultado"));
+      if (resultadoParam && !["retenido", "baja_confirmada"].includes(resultadoParam)) {
+        return json(400, { ok: false, message: "resultado inválido" });
+      }
+      if (closedByParam && closedByParam !== "unidentified" && !isValidUuid(closedByParam)) {
+        return json(400, { ok: false, message: "closed_by inválido" });
+      }
+
+      const { items, total, page, limit } = await listClosedManualTickets({
+        organizationId,
+        page: getQueryParam(event, "page"),
+        limit: getQueryParam(event, "limit"),
+        closedBy: closedByParam || null,
+        dateFrom: dateFromParam || null,
+        dateTo: dateToParam || null,
+        resultado: resultadoParam || null
+      });
+
+      return json(200, { ok: true, items, total, page, limit });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list closed manual tickets",
         error: error.message
       });
     }
