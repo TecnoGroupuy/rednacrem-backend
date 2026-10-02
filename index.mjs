@@ -11595,6 +11595,75 @@ async function buildDocumentosChecklist(client, { organizationId, personalId }) 
   return { checklist, cursos };
 }
 
+// Registros de su_personal_habilitaciones/carnet_salud/capacitaciones que NO
+// tienen ninguna fila vinculada en su_personal_archivos (entidad_tipo +
+// entidad_id) -- en la practica, datos cargados por las pestañas viejas de
+// "Habilitaciones"/"Capacitaciones"/"Carné de salud" (POST directo a esas
+// tablas, sin pasar por confirmarDocumento ni subir ningun archivo a S3),
+// tipicamente de antes de que existiera la pestaña Documentación. Solo
+// lectura -- no hay forma de "completar" un archivo para estos desde aca,
+// eso requeriria resubir el documento entero por Documentación. Usado SOLO
+// por el endpoint interno (GET /operaciones/personal/:id/documentos): la
+// ficha publica no tiene estas pestañas viejas, asi que no le hace falta.
+async function getRegistrosDocumentalesAnteriores(client, { organizationId, personalId }) {
+  const [habilitacionesRes, carnetRes, capacitacionesRes] = await Promise.all([
+    client.query(
+      `SELECT h.id, h.tipo, h.numero, h.fecha_vencimiento, h.created_at
+       FROM su_personal_habilitaciones h
+       WHERE h.personal_id = $1 AND h.organization_id = $2
+         AND NOT EXISTS (
+           SELECT 1 FROM su_personal_archivos a
+           WHERE a.entidad_tipo = 'habilitacion' AND a.entidad_id = h.id
+         )
+       ORDER BY h.created_at DESC`,
+      [personalId, organizationId]
+    ),
+    client.query(
+      `SELECT c.id, c.fecha_vencimiento, c.created_at
+       FROM su_personal_carnet_salud c
+       WHERE c.personal_id = $1 AND c.organization_id = $2
+         AND NOT EXISTS (
+           SELECT 1 FROM su_personal_archivos a
+           WHERE a.entidad_tipo = 'carnet_salud' AND a.entidad_id = c.id
+         )
+       ORDER BY c.created_at DESC`,
+      [personalId, organizationId]
+    ),
+    client.query(
+      `SELECT cap.id, cap.tipo_capacitacion, cap.institucion, cap.fecha_emision, cap.fecha_vencimiento, cap.created_at
+       FROM su_personal_capacitaciones cap
+       WHERE cap.personal_id = $1 AND cap.organization_id = $2
+         AND NOT EXISTS (
+           SELECT 1 FROM su_personal_archivos a
+           WHERE a.entidad_tipo = 'capacitacion' AND a.entidad_id = cap.id
+         )
+       ORDER BY cap.created_at DESC`,
+      [personalId, organizationId]
+    )
+  ]);
+
+  return {
+    habilitaciones: habilitacionesRes.rows.map((row) => ({
+      id: row.id,
+      tipo: row.tipo,
+      label: DOCUMENTO_CATEGORIA_LABELS[row.tipo] || row.tipo,
+      numero: row.numero,
+      fecha_vencimiento: dateColumnToDateOnly(row.fecha_vencimiento)
+    })),
+    carnet_salud: carnetRes.rows.map((row) => ({
+      id: row.id,
+      fecha_vencimiento: dateColumnToDateOnly(row.fecha_vencimiento)
+    })),
+    capacitaciones: capacitacionesRes.rows.map((row) => ({
+      id: row.id,
+      tipo_capacitacion: row.tipo_capacitacion,
+      institucion: row.institucion,
+      fecha_emision: dateColumnToDateOnly(row.fecha_emision),
+      fecha_vencimiento: dateColumnToDateOnly(row.fecha_vencimiento)
+    }))
+  };
+}
+
 // Resumen de turno de solo lectura para la seccion "Tu turno" del link
 // publico -- mismos datos que ya arma getPersonalDetail (vehiculo via join
 // aparte, bases via su_personal_bases) para la ficha interna.
@@ -41162,7 +41231,11 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           organizationId: access.organizationId,
           personalId
         });
-        return json(200, { ok: true, checklist, cursos });
+        const registrosAnteriores = await getRegistrosDocumentalesAnteriores(client, {
+          organizationId: access.organizationId,
+          personalId
+        });
+        return json(200, { ok: true, checklist, cursos, registros_anteriores: registrosAnteriores });
       } catch (error) {
         return operationsErrorResponse(error, "Failed to load documentos");
       } finally {
