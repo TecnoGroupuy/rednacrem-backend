@@ -265,3 +265,78 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
   caracteres dañados por mojibake (ej. `"vï¿½lido"`, `"telï¿½fono"` en
   mensajes de validación — encontrado de pasada en la auditoría de roles de
   2026-10, sin tocar). Son mensajes que ve el usuario final, no solo logs.
+
+## Alta de un usuario con un rol nuevo (ej. backoffice) en producción
+
+Runbook verificado contra el código actual (`src/services/cognitoService.js`,
+`src/services/userService.js`, `index.mjs`, y los `services/*.js` del
+frontend) al auditar el alta del rol `backoffice` (2026-10). Vale para
+`backoffice` y para cualquier rol nuevo que se agregue después a
+`ROLE_KEYS` (`src/lib/constants.js`).
+
+1. **Crear el grupo en Cognito (paso manual, una sola vez por rol)**.
+   `syncUserGroup` (`src/services/cognitoService.js`) llama
+   `AdminAddUserToGroupCommand`, que **falla si el grupo no existe** — no
+   hay ningún `CreateGroupCommand` en el código, crear el grupo nunca es
+   automático. Antes de dar de alta el primer usuario `backoffice`, crear el
+   grupo `backoffice` en el User Pool `us-east-2_Jy8mPM6NJ`:
+   - Consola: Cognito → User Pools → el pool de Tri → pestaña *Groups* →
+     *Create group* → nombre `backoffice` (sin precedencia/IAM role, igual
+     que los grupos de rol existentes).
+   - o CLI: `aws cognito-idp create-group --group-name backoffice --user-pool-id us-east-2_Jy8mPM6NJ --region us-east-2`.
+   - Si se salta este paso, el alta del punto 2 falla a mitad de camino: el
+     usuario de Cognito ya se creó pero `createManualUser` lo borra en el
+     `catch` (`deleteCognitoUser`) al fallar el `syncUserGroup` siguiente,
+     así que no queda un usuario a medias — simplemente hay que crear el
+     grupo y reintentar el alta.
+
+2. **Crear el usuario**: logueado como superadministrador, pantalla
+   *Usuarios y roles* → alta de usuario, rol **Backoffice**. Esto dispara
+   `POST /superadmin/users`, que en una sola operación:
+   - crea el usuario en Cognito (`AdminCreateUserCommand`, con contraseña
+     temporal — Cognito le manda el mail de invitación),
+   - sincroniza el grupo de Cognito al rol elegido (paso 1 ya hecho),
+   - inserta la fila en `users` (`role_key='backoffice'`, el `status`
+     elegido en el formulario).
+
+3. **Asignar la organización — ESTE PASO NO ES AUTOMÁTICO**. Confirmado en
+   código: `POST /superadmin/users` solo inserta en `organization_users` si
+   se le pasa `organization_id` como **query param** en la URL, y el
+   frontend actual (`src/services/superadminUsersService.js`,
+   `createSuperadminUser`) nunca lo manda — la "auto-asignación" que tiene
+   el endpoint es efectivamente código muerto hoy. Sin esta fila, el
+   usuario recién creado da **403 "Usuario no asociado a una organización
+   activa"** en cualquier pantalla apenas intenta usar el sistema (es
+   exactamente el gap que bloqueó las pruebas locales de este rol).
+   Para asignarlo manualmente, en la misma pantalla *Usuarios y roles*:
+   con una organización activa seleccionada (selector de organización
+   arriba de la pantalla), abrir el panel *Asignar usuario* → elegir el
+   usuario recién creado de la lista de "usuarios existentes" → "Rol en la
+   organización" (campo `role_in_org` — es solo descriptivo, no gatea
+   ningún permiso; cualquier valor sirve, usar `backoffice` por prolijidad)
+   → confirmar. Esto llama `POST /organizations/:id/users`
+   (`assignUserToOrganization` en `src/services/organizationsService.js`),
+   que hace el `INSERT ... ON CONFLICT DO UPDATE SET activo = true` en
+   `organization_users`.
+   (La otra vía de alta de usuarios que existe, `POST /org/users` —
+   pantalla *Mi equipo* del supervisor — no sirve para esto: rechaza
+   cualquier rol que no sea `vendedor` o `atencion_cliente`.)
+
+4. **Verificar**:
+   - El usuario recibe el mail de Cognito, puede loguearse y le pide
+     cambiar la contraseña temporal.
+   - Al loguearse, el menú muestra exactamente 5 ítems (Atención al
+     cliente, Recupero, Retención, Clientes, Agenda) — nada de Lotes,
+     Mercado Abierto, Contacto/captación, Codificaciones, Panel de control.
+   - Chequeo cruzado en `psql` contra RDS producción (lo corre Damián, ver
+     regla de base de datos arriba):
+     ```sql
+     SELECT u.email, u.role_key, u.status, ou.organization_id, ou.activo
+     FROM users u
+     LEFT JOIN organization_users ou ON ou.user_id = u.id
+     WHERE u.email = '<email del usuario nuevo>';
+     ```
+     Tiene que devolver una fila con `role_key='backoffice'`,
+     `status='approved'`, y una fila de `organization_users` con
+     `activo=true` y el `organization_id` correcto. Si `ou.organization_id`
+     es `NULL`, falta el paso 3.
