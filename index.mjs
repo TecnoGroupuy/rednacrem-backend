@@ -15893,10 +15893,20 @@ async function routeRequest(event) {
       // estado <> 'baja': una persona dada de baja no puede verificarse ni
       // editar su ficha via el link publico -- mismo mensaje generico que
       // documento inexistente o fecha equivocada, no se revela el motivo.
+      //
+      // fecha_nacimiento IS NULL: alta "liviana" (ej. carga masiva de
+      // facturadores SU Emergencia 2026-10, solo nombre/apellido/documento)
+      // -- sin esta rama, `fecha_nacimiento = $3::date` contra una columna
+      // NULL nunca es TRUE en SQL (NULL = valor es NULL, no FALSE), así que
+      // la ficha queda inaccesible para siempre, sin importar qué fecha
+      // ingrese la persona. Decisión de negocio: el primer ingreso exitoso
+      // GRABA esa fecha como dato de control (ver UPDATE debajo) -- de ahí
+      // en más, esa ficha exige la fecha real como cualquier otra.
       const result = await client.query(
         `SELECT id, nombre, apellido, documento, fecha_nacimiento, telefono, email, domicilio, foto_url
          FROM su_personal
-         WHERE organization_id = $1 AND documento = $2 AND fecha_nacimiento = $3::date AND estado <> 'baja'
+         WHERE organization_id = $1 AND documento = $2 AND estado <> 'baja'
+           AND (fecha_nacimiento = $3::date OR fecha_nacimiento IS NULL)
          LIMIT 1`,
         [linkContext.organizationId, documento, fechaNacimiento]
       );
@@ -15907,6 +15917,30 @@ async function routeRequest(event) {
       }
 
       const persona = result.rows[0];
+
+      // Graba la fecha ingresada como dato de control ANTES de abrir la
+      // sesión -- si se esperara al PATCH, alguien podría re-verificar mas
+      // tarde con OTRA fecha inventada (seguiría matcheando NULL) y nunca
+      // quedaría fijada. Pasa por el mismo log de auditoría que cualquier
+      // otro cambio vía ficha pública (su_personal_cambios_publicos), con
+      // valor_anterior NULL -- RRHH puede ver desde qué IP y cuándo se fijó,
+      // y resetearla a NULL a mano si hace falta reabrir el "primer ingreso".
+      if (persona.fecha_nacimiento === null) {
+        await client.query(
+          `UPDATE su_personal SET fecha_nacimiento = $1::date, updated_at = now() WHERE id = $2`,
+          [fechaNacimiento, persona.id]
+        );
+        await registrarCambioPublico(client, {
+          organizationId: linkContext.organizationId,
+          personalId: persona.id,
+          campo: "fecha_nacimiento",
+          valorAnterior: null,
+          valorNuevo: fechaNacimiento,
+          ip
+        });
+        persona.fecha_nacimiento = fechaNacimiento;
+      }
+
       const session = generateFichaPublicaSessionToken(linkContext.organizationId, persona.id, linkContext.exp);
       return json(200, {
         ok: true,
@@ -41240,10 +41274,13 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             message: "empresa_contratista_id es obligatorio cuando tipo_personal es externo"
           };
         }
-        if (tipoPersonal === "interno" && empresaContratistaId) {
+        // 'facturador' (médicos que facturan por cuenta propia, 2026-10):
+        // igual que 'interno' respecto a empresa_contratista_id -- nunca
+        // lleva una, mismo chk_personal_tipo_empresa de la migración 087.
+        if ((tipoPersonal === "interno" || tipoPersonal === "facturador") && empresaContratistaId) {
           throw {
             status: 400,
-            message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno"
+            message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno o facturador"
           };
         }
         await validatePersonalRegimenFijoFields(client, payload, access.organizationId);
@@ -41302,10 +41339,10 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             message: "empresa_contratista_id es obligatorio cuando tipo_personal es externo"
           });
         }
-        if (finalTipoPersonal === "interno" && finalEmpresaContratistaId) {
+        if ((finalTipoPersonal === "interno" || finalTipoPersonal === "facturador") && finalEmpresaContratistaId) {
           return json(400, {
             ok: false,
-            message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno"
+            message: "empresa_contratista_id debe quedar vacío cuando tipo_personal es interno o facturador"
           });
         }
         await validatePersonalRegimenFijoFields(client, payload, access.organizationId);
