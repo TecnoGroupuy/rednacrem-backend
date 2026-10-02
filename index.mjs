@@ -14,6 +14,7 @@ import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS, withCorsOrigin, getCurrentCorsOrigin } from "./src/lib/http.js";
 import { normalizePhone as normalizePhoneValidation } from "./src/lib/validation.js";
 import { ROLE_KEYS } from "./src/lib/constants.js";
+import { PERMISSIONS, roleHasPermission, getRolesWithPermission, ROLE_PERMISSIONS } from "./src/lib/permissions.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
 import { deleteUser as deleteCognitoUser } from "./src/services/cognitoService.js";
 import { emitRealtime } from "./src/monitoring/realtimeBus.js";
@@ -2669,13 +2670,13 @@ async function validateRecuperoSellerIds(client, organizationId, sellerIds) {
     JOIN organization_users ou ON ou.user_id = u.id
     WHERE ou.organization_id = $1
       AND ou.activo = true
-      AND u.role_key = 'vendedor'
+      AND u.role_key = ANY($2::text[])
       AND u.status = 'approved'
       AND (u.is_test IS NULL OR u.is_test = false)
-      AND u.id = ANY($2::uuid[])
+      AND u.id = ANY($3::uuid[])
     ORDER BY u.nombre ASC, u.apellido ASC, u.id ASC
     `,
-    [organizationId, normalizedSellerIds]
+    [organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_ASIGNABLE), normalizedSellerIds]
   );
   if (sellersRes.rows.length !== normalizedSellerIds.length) {
     const error = new Error("Uno o más seller_ids no pertenecen a vendedores activos de la organización");
@@ -3909,7 +3910,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     `
     SELECT u.id, u.nombre, u.apellido
     FROM users u
-    WHERE u.role_key = 'vendedor'
+    WHERE u.role_key = ANY($2::text[])
       AND u.status = 'approved'
       AND (u.is_test IS NULL OR u.is_test = false)
       AND (
@@ -3924,7 +3925,7 @@ async function getTeamSummary(client, fecha, now = new Date(), organizationId = 
     ORDER BY u.nombre
     `
     ,
-    [organizationId]
+    [organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)]
   );
   const sellers = sellersRes.rows;
   const sellerIds = sellers.map((u) => u.id);
@@ -4327,7 +4328,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
     LEFT JOIN durations d ON d.agente_id = u.id
     LEFT JOIN jornada_span js ON js.agente_id = u.id
     LEFT JOIN session_count sc ON sc.agente_id = u.id
-    WHERE u.role_key = 'vendedor'
+    WHERE u.role_key = ANY($6::text[])
       AND u.status != 'baja'
       AND (u.is_test IS NULL OR u.is_test = false)
       AND ($4::uuid IS NULL OR u.id = $4::uuid)
@@ -4339,7 +4340,7 @@ async function getDailyWorkReport(client, fecha, timezone = LOCAL_TZ, now = new 
       )
     ORDER BY u.nombre
     `,
-    [fecha, timezone, now, filterUserId, organizationId]
+    [fecha, timezone, now, filterUserId, organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)]
   );
 
   return result.rows.map((row) => {
@@ -4396,7 +4397,7 @@ async function getWorkReportRange(client, fechaDesde, fechaHasta, timezone = LOC
         u.nombre,
         u.apellido
       FROM users u
-      WHERE u.role_key = 'vendedor'
+      WHERE u.role_key = ANY($7::text[])
         AND (u.is_test IS NULL OR u.is_test = false)
         AND ($5::uuid IS NULL OR u.id = $5::uuid)
         AND EXISTS (
@@ -4484,7 +4485,7 @@ async function getWorkReportRange(client, fechaDesde, fechaHasta, timezone = LOC
     JOIN vendedores u ON u.id = i.agente_id
     ORDER BY i.fecha_local ASC, u.nombre ASC, i.inicio ASC
     `,
-    [fechaDesde, fechaHasta, timezone, now, filterUserId, organizationId]
+    [fechaDesde, fechaHasta, timezone, now, filterUserId, organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)]
   );
 
   const porDia = new Map();
@@ -10393,13 +10394,18 @@ async function closeManualTicket({ ticketId, outcome, note, actorName, actorId, 
       return { forbidden: "Atención al cliente no puede cerrar una solicitud de baja — la gestiona Retención." };
     }
 
-    // Retención: un vendedor solo puede cerrar el ticket que el supervisor
-    // le asignó a él. Tickets sin asignar (assigned_to NULL — incluye todo
-    // lo creado antes de que existiera esta columna) mantienen el
+    // Retención: un vendedor (y, desde la auditoría 2026-10, backoffice --
+    // misma regla exacta) solo puede cerrar el ticket que el supervisor le
+    // asignó a él. Tickets sin asignar (assigned_to NULL — incluye todo lo
+    // creado antes de que existiera esta columna) mantienen el
     // comportamiento de siempre, sin restricción, para no romper nada
     // retroactivo. Supervisor/director/superadministrador/operaciones
     // siguen pudiendo cerrar cualquiera, igual que hoy.
-    if (actorRoleKey === "vendedor" && ticket.assigned_to && ticket.assigned_to !== actorId) {
+    if (
+      roleHasPermission(actorRoleKey, PERMISSIONS.TICKETS_CERRAR_BAJA_PROPIA) &&
+      ticket.assigned_to &&
+      ticket.assigned_to !== actorId
+    ) {
       await client.query("ROLLBACK");
       return { forbidden: "Este ticket está asignado a otro vendedor." };
     }
@@ -10804,6 +10810,22 @@ function requireRole(event, dbUser, allowedRoles) {
     });
   }
 
+  return null;
+}
+
+// Analogo a requireRole, pero resuelve contra el mapa de capacidades
+// (src/lib/permissions.js) en vez de una lista de roles hardcodeada en el
+// call site -- usado SOLO en los endpoints que el rol backoffice necesita
+// (auditoría 2026-10); el resto del archivo sigue con requireRole/listas
+// de roles tal cual estaba, sin tocar.
+function requirePermission(event, dbUser, permission) {
+  if (!dbUser || !roleHasPermission(dbUser.role_key, permission)) {
+    return json(403, {
+      ok: false,
+      message: "Insufficient role permissions",
+      requiredPermission: permission
+    });
+  }
   return null;
 }
 
@@ -16058,7 +16080,10 @@ async function routeRequest(event) {
           email: dbUser.email,
           role: dbUser.role_key || authUser.fallbackRole,
           status: dbUser.status,
-          permissions: [],
+          // Capacidades resueltas del mapa central (src/lib/permissions.js,
+          // auditoría "rol backoffice" 2026-10) -- el frontend las usa para
+          // gatear pantallas/botones de backoffice sin comparar role==='x'.
+          permissions: ROLE_PERMISSIONS[dbUser.role_key || authUser.fallbackRole] || [],
           groups: authUser.groups,
           last_login_at: dbUser.last_login_at
         },
@@ -18372,7 +18397,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -18842,7 +18867,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -18879,7 +18904,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -18945,7 +18970,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -18969,13 +18994,13 @@ async function routeRequest(event) {
             FROM users u
             JOIN organization_users ou ON ou.user_id = u.id
             WHERE u.id = $1
-              AND u.role_key = 'vendedor'
+              AND u.role_key = ANY($3::text[])
               AND u.status = 'approved'
               AND ou.organization_id = $2
               AND ou.activo = true
             LIMIT 1
             `,
-            [validation.data.assignedTo, organizationId]
+            [validation.data.assignedTo, organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_ASIGNABLE)]
           );
           assigneeValid = assigneeRes.rows.length > 0;
         } finally {
@@ -19034,7 +19059,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -19078,7 +19103,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -19137,7 +19162,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -19181,7 +19206,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -19626,9 +19651,8 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      if (!["supervisor", "superadministrador"].includes(dbUser?.role_key)) {
-        return json(403, { ok: false, message: "Forbidden" });
-      }
+      const permissionError = requirePermission(event, dbUser, PERMISSIONS.CLIENTES_BAJA_DIRECTA);
+      if (permissionError) return permissionError;
 
       let organizationId = null;
       try {
@@ -20004,7 +20028,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -20110,7 +20134,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -20363,7 +20387,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -20377,7 +20401,7 @@ async function routeRequest(event) {
       }
 
       let sellerId = null;
-      if (dbUser?.role_key === "vendedor") {
+      if (roleHasPermission(dbUser?.role_key, PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS)) {
         sellerId = dbUser.id;
       }
       console.log("[recupero-seller] dbUser.role_key:", dbUser?.role_key);
@@ -20529,7 +20553,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       const body = safeParseBody(event);
@@ -20579,7 +20603,7 @@ async function routeRequest(event) {
       }
 
       let sellerId = null;
-      if (dbUser?.role_key === "vendedor") {
+      if (roleHasPermission(dbUser?.role_key, PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS)) {
         sellerId = dbUser.id;
       }
 
@@ -21054,7 +21078,7 @@ async function routeRequest(event) {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -21547,7 +21571,7 @@ async function routeRequest(event) {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -21770,7 +21794,7 @@ async function routeRequest(event) {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -21889,7 +21913,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -22391,7 +22415,7 @@ async function routeRequest(event) {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -22455,7 +22479,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, LEAD_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       const page = parseInt(getQueryParam(event, "page") || "1", 10);
@@ -23853,7 +23877,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       let organizationId = null;
@@ -25806,13 +25830,13 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
-      if (roleError) return roleError;
+      const permissionError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
+      if (permissionError) return permissionError;
 
       const sellerIdParam = getQueryParam(event, "seller_id");
       const dateParam = getQueryParam(event, "fecha");
       const incluirCumplidas = getQueryParam(event, "incluir_cumplidas") === "true";
-      const sellerId = dbUser?.role_key === "vendedor" ? dbUser.id : (sellerIdParam || dbUser.id);
+      const sellerId = roleHasPermission(dbUser?.role_key, PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS) ? dbUser.id : (sellerIdParam || dbUser.id);
       console.log("[agenda] dbUser.id:", dbUser?.id);
       console.log("[agenda] dbUser.role_key:", dbUser?.role_key);
       console.log("[agenda] sellerIdParam:", sellerIdParam);
@@ -26036,7 +26060,7 @@ async function routeRequest(event) {
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
 
-      let roleError = requireRole(event, dbUser, INTERNAL_CONTACT_ACCESS_ROLES);
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.INTERNO_BASE);
       if (roleError) return roleError;
 
       const client = createDbClient();
@@ -35584,14 +35608,14 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           SELECT u.id, u.nombre, u.apellido
           FROM users u
           JOIN organization_users ou ON ou.user_id = u.id
-          WHERE u.role_key = 'vendedor'
+          WHERE u.role_key = ANY($2::text[])
             AND u.status = 'approved'
             AND (u.is_test IS NULL OR u.is_test = false)
             AND ou.organization_id = $1
             AND ou.activo = true
           ORDER BY u.nombre
           `,
-          [organizationId]
+          [organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)]
         );
         const sellers = sellersRes.rows || [];
         const sellerIds = sellers.map((row) => row.id);
@@ -35962,14 +35986,14 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
           SELECT u.id, u.nombre, u.apellido
           FROM users u
           JOIN organization_users ou ON ou.user_id = u.id
-          WHERE u.role_key = 'vendedor'
+          WHERE u.role_key = ANY($2::text[])
             AND u.status = 'approved'
             AND (u.is_test IS NULL OR u.is_test = false)
             AND ou.organization_id = $1
             AND ou.activo = true
           ORDER BY u.nombre
           `,
-          [organizationId]
+          [organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)]
         );
         const sellers = sellersRes.rows || [];
         const sellerIds = sellers.map((row) => row.id);
@@ -36556,9 +36580,9 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       try {
         const organizationId = await resolveOrganizationId(client, dbUser, event);
 
-        const values = [organizationId];
+        const values = [organizationId, getRolesWithPermission(PERMISSIONS.COMERCIAL_ASIGNABLE)];
         const whereParts = [
-          "u.role_key = 'vendedor'",
+          "u.role_key = ANY($2::text[])",
           "u.status = 'approved'",
           "(u.is_test IS NULL OR u.is_test = false)",
           "ou.organization_id = $1",
@@ -38115,7 +38139,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, ["vendedor", "supervisor", "superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["vendedor", "supervisor", "superadministrador", "backoffice"]);
       if (roleError) return roleError;
 
       const now = new Date();
@@ -38142,7 +38166,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       if (sellerParam && !isValidUuid(sellerParam)) {
         return json(400, { ok: false, message: "seller_id inválido" });
       }
-      const sellerId = dbUser?.role_key === "vendedor"
+      const sellerId = roleHasPermission(dbUser?.role_key, PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)
         ? dbUser.id
         : (sellerParam || dbUser.id);
       if (!sellerId || !isValidUuid(sellerId)) {
@@ -38232,14 +38256,14 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       if (dbError) return dbError;
       let statusError = requireApproved(event, dbUser);
       if (statusError) return statusError;
-      let roleError = requireRole(event, dbUser, ["vendedor", "supervisor", "superadministrador"]);
+      let roleError = requireRole(event, dbUser, ["vendedor", "supervisor", "superadministrador", "backoffice"]);
       if (roleError) return roleError;
 
       const sellerParam = getQueryParam(event, "seller_id");
       if (sellerParam && !isValidUuid(sellerParam)) {
         return json(400, { ok: false, message: "seller_id inválido" });
       }
-      const sellerId = dbUser?.role_key === "vendedor"
+      const sellerId = roleHasPermission(dbUser?.role_key, PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR)
         ? dbUser.id
         : (sellerParam || dbUser.id);
       if (!sellerId || !isValidUuid(sellerId)) {
@@ -39461,7 +39485,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
         }
 
         if (hasPendingContacts && redistribucionMode === "specific_seller") {
-          const sellerCheckParams = [redistribucionSellerId];
+          const sellerCheckParams = [redistribucionSellerId, getRolesWithPermission(PERMISSIONS.COMERCIAL_ASIGNABLE)];
           let sellerCheckOrgClause = "";
           if (organizationId) {
             sellerCheckParams.push(organizationId);
@@ -39470,7 +39494,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
                 SELECT 1
                 FROM organization_users ou
                 WHERE ou.user_id = u.id
-                  AND ou.organization_id = $2
+                  AND ou.organization_id = $3
                   AND ou.activo = true
               )
             `;
@@ -39480,7 +39504,7 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
             SELECT u.id
             FROM users u
             WHERE u.id = $1
-              AND u.role_key = 'vendedor'
+              AND u.role_key = ANY($2::text[])
               AND u.status != 'baja'
               ${sellerCheckOrgClause}
             `,
@@ -42635,7 +42659,8 @@ export const __testables = {
   mapUserRowToApi,
   validateSuperadminUserPayload,
   requireRole,
-  getPrimaryRole
+  getPrimaryRole,
+  requirePermission
 };
 
 export {
