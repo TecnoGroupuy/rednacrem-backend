@@ -31,26 +31,75 @@ export const PERMISSIONS = {
   CLIENTES_BAJA_DIRECTA: "clientes.baja_directa",
   RECUPERO_GESTIONAR_PROPIOS: "recupero.gestionar_propios",
   COMERCIAL_ASIGNABLE: "comercial.asignable",
-  COMERCIAL_CUENTA_COMO_VENDEDOR: "comercial.cuenta_como_vendedor"
+  COMERCIAL_CUENTA_COMO_VENDEDOR: "comercial.cuenta_como_vendedor",
+  // Capacidades de PANTALLA (menú/rutas del frontend, main.jsx) -- no
+  // gatean ningún endpoint, solo viajan en /me -> permissions para que el
+  // front decida qué ítems de ROLE_NAV/ramas de renderRoute mostrar sin
+  // comparar role==='x'. Cada una tiene EXACTAMENTE los roles que hoy ven
+  // ese ítem (su `roles` array actual en ROLE_NAV) + backoffice donde
+  // corresponde -- ver la tabla de la auditoría.
+  PANTALLA_SOPORTE: "pantalla.soporte",
+  PANTALLA_RETENCION: "pantalla.retencion",
+  PANTALLA_RECUPERO_VENDEDOR: "pantalla.recupero_vendedor",
+  PANTALLA_CLIENTES: "pantalla.clientes",
+  PANTALLA_AGENDA: "pantalla.agenda",
+  // Capacidades de BOTÓN (Clientes): hoy "Nuevo cliente"/"Baja masiva" no
+  // tienen ningún gate, se muestran a cualquiera que vea la pantalla
+  // Clientes -- se les da ese mismo gate explícito (los 4 roles que ya ven
+  // pantalla.clientes), SIN backoffice (punto 3 de la ficha de negocio: no
+  // alta de clientes, no baja masiva).
+  CLIENTES_ALTA: "clientes.alta",
+  CLIENTES_BAJA_MASIVA: "clientes.baja_masiva"
 };
 
-// rol -> capacidades. Reconstruido desde el acceso REAL de cada endpoint
-// tocado (ver tabla endpoint -> gate viejo -> capacidad en la auditoría),
-// no inventado -- por eso superadministrador/director/operaciones NO
-// tienen tickets.cerrar_baja_propia/clientes.baja_directa/comercial.* salvo
-// donde ya las tenían hoy.
+// rol -> capacidades. Reconstruido desde el acceso REAL de cada
+// endpoint/ítem de menú tocado (ver tabla endpoint -> gate viejo ->
+// capacidad de la auditoría), no inventado -- por eso
+// superadministrador/director/operaciones no tienen
+// tickets.cerrar_baja_propia/comercial.* salvo donde ya las tenían hoy, y
+// clientes.alta/clientes.baja_masiva nunca incluyen a backoffice.
 export const ROLE_PERMISSIONS = {
-  superadministrador: [PERMISSIONS.INTERNO_BASE, PERMISSIONS.CLIENTES_BAJA_DIRECTA],
-  director: [PERMISSIONS.INTERNO_BASE],
-  supervisor: [PERMISSIONS.INTERNO_BASE, PERMISSIONS.CLIENTES_BAJA_DIRECTA],
-  operaciones: [PERMISSIONS.INTERNO_BASE],
-  atencion_cliente: [PERMISSIONS.INTERNO_BASE],
+  superadministrador: [
+    PERMISSIONS.INTERNO_BASE,
+    PERMISSIONS.CLIENTES_BAJA_DIRECTA,
+    PERMISSIONS.PANTALLA_CLIENTES,
+    PERMISSIONS.CLIENTES_ALTA,
+    PERMISSIONS.CLIENTES_BAJA_MASIVA
+  ],
+  director: [
+    PERMISSIONS.INTERNO_BASE,
+    PERMISSIONS.PANTALLA_CLIENTES,
+    PERMISSIONS.CLIENTES_ALTA,
+    PERMISSIONS.CLIENTES_BAJA_MASIVA
+  ],
+  supervisor: [
+    PERMISSIONS.INTERNO_BASE,
+    PERMISSIONS.CLIENTES_BAJA_DIRECTA,
+    PERMISSIONS.PANTALLA_RETENCION,
+    PERMISSIONS.PANTALLA_CLIENTES,
+    PERMISSIONS.CLIENTES_ALTA,
+    PERMISSIONS.CLIENTES_BAJA_MASIVA
+  ],
+  operaciones: [
+    PERMISSIONS.INTERNO_BASE,
+    PERMISSIONS.PANTALLA_CLIENTES,
+    PERMISSIONS.CLIENTES_ALTA,
+    PERMISSIONS.CLIENTES_BAJA_MASIVA
+  ],
+  atencion_cliente: [
+    PERMISSIONS.INTERNO_BASE,
+    PERMISSIONS.PANTALLA_SOPORTE,
+    PERMISSIONS.PANTALLA_RECUPERO_VENDEDOR
+  ],
   vendedor: [
     PERMISSIONS.INTERNO_BASE,
     PERMISSIONS.TICKETS_CERRAR_BAJA_PROPIA,
     PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS,
     PERMISSIONS.COMERCIAL_ASIGNABLE,
-    PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR
+    PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR,
+    PERMISSIONS.PANTALLA_RETENCION,
+    PERMISSIONS.PANTALLA_RECUPERO_VENDEDOR,
+    PERMISSIONS.PANTALLA_AGENDA
   ],
   backoffice: [
     PERMISSIONS.INTERNO_BASE,
@@ -58,7 +107,13 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.CLIENTES_BAJA_DIRECTA,
     PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS,
     PERMISSIONS.COMERCIAL_ASIGNABLE,
-    PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR
+    PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR,
+    PERMISSIONS.PANTALLA_SOPORTE,
+    PERMISSIONS.PANTALLA_RETENCION,
+    PERMISSIONS.PANTALLA_RECUPERO_VENDEDOR,
+    PERMISSIONS.PANTALLA_CLIENTES,
+    PERMISSIONS.PANTALLA_AGENDA
+    // SIN clientes.alta / clientes.baja_masiva -- a propósito.
   ]
 };
 

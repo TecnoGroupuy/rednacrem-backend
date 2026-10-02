@@ -96,14 +96,26 @@ test("ningún rol EXISTENTE gana una capacidad que no tenía antes (solo backoff
       [PERMISSIONS.TICKETS_CERRAR_BAJA_PROPIA]: ["vendedor"],
       [PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS]: ["vendedor"],
       [PERMISSIONS.COMERCIAL_ASIGNABLE]: ["vendedor"],
-      [PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR]: ["vendedor"]
+      [PERMISSIONS.COMERCIAL_CUENTA_COMO_VENDEDOR]: ["vendedor"],
+      [PERMISSIONS.PANTALLA_SOPORTE]: ["atencion_cliente"],
+      [PERMISSIONS.PANTALLA_RETENCION]: ["supervisor", "vendedor"],
+      [PERMISSIONS.PANTALLA_RECUPERO_VENDEDOR]: ["vendedor", "atencion_cliente"],
+      [PERMISSIONS.PANTALLA_CLIENTES]: ["superadministrador", "director", "operaciones", "supervisor"],
+      [PERMISSIONS.PANTALLA_AGENDA]: ["vendedor"],
+      // Estas dos NO le dan la capacidad a backoffice -- newRoles (sin
+      // 'backoffice') tiene que coincidir con el set completo de hoy.
+      [PERMISSIONS.CLIENTES_ALTA]: ["superadministrador", "director", "operaciones", "supervisor"],
+      [PERMISSIONS.CLIENTES_BAJA_MASIVA]: ["superadministrador", "director", "operaciones", "supervisor"]
     };
     assertExactRoleSet(newRoles, expectedByPermission[permission], `${permission}: roles pre-existentes`);
   }
 });
 
-test("backoffice tiene las 6 capacidades (todo lo que pidió el negocio)", () => {
-  assertExactRoleSet(ROLE_PERMISSIONS.backoffice, Object.values(PERMISSIONS), "backoffice");
+test("backoffice tiene las 11 capacidades que le corresponden, NO clientes.alta/clientes.baja_masiva", () => {
+  const sinBoton = Object.values(PERMISSIONS).filter(
+    (p) => p !== PERMISSIONS.CLIENTES_ALTA && p !== PERMISSIONS.CLIENTES_BAJA_MASIVA
+  );
+  assertExactRoleSet(ROLE_PERMISSIONS.backoffice, sinBoton, "backoffice");
 });
 
 test("requirePermission: 403 si el rol no tiene la capacidad, null si la tiene", () => {
@@ -137,12 +149,63 @@ test("roleHasPermission: casos puntuales de los 7 roles (snapshot manual de la t
   assert.equal(roleHasPermission("vendedor", PERMISSIONS.CLIENTES_BAJA_DIRECTA), false, "vendedor clientes.baja_directa");
   assert.equal(roleHasPermission("vendedor", PERMISSIONS.RECUPERO_GESTIONAR_PROPIOS), true, "vendedor recupero.gestionar_propios");
   assert.equal(roleHasPermission("vendedor", PERMISSIONS.TICKETS_CERRAR_BAJA_PROPIA), true, "vendedor tickets.cerrar_baja_propia");
-  // backoffice: las 6.
+  // backoffice: todo salvo los 2 botones de Clientes (alta/baja masiva).
   for (const permission of Object.values(PERMISSIONS)) {
-    assert.equal(roleHasPermission("backoffice", permission), true, `backoffice ${permission}`);
+    const expected = permission !== PERMISSIONS.CLIENTES_ALTA && permission !== PERMISSIONS.CLIENTES_BAJA_MASIVA;
+    assert.equal(roleHasPermission("backoffice", permission), expected, `backoffice ${permission}`);
   }
 });
 
 test("ALL_SEVEN_ROLES cubre exactamente los roles presentes en ROLE_PERMISSIONS (sin huérfanos)", () => {
   assertExactRoleSet(Object.keys(ROLE_PERMISSIONS), ALL_SEVEN_ROLES, "roles del mapa");
+});
+
+// --- Capacidades de pantalla (menú/rutas del frontend) y de botón ---
+// Snapshot exacto del estado hoy de cada ítem de ROLE_NAV (roles.js) + 1
+// (backoffice, donde corresponde) -- si esto cambia para algún rol
+// EXISTENTE, es una regresión real de menú.
+
+test("pantalla.soporte = atencion_cliente + backoffice (nav 'soporte', hoy roles:['atencion_cliente'])", () => {
+  assertExactRoleSet(getRolesWithPermission(PERMISSIONS.PANTALLA_SOPORTE), ["atencion_cliente", "backoffice"], "pantalla.soporte");
+});
+
+test("pantalla.retencion = supervisor, vendedor + backoffice (nav 'retencion', hoy roles:['supervisor','vendedor'])", () => {
+  assertExactRoleSet(getRolesWithPermission(PERMISSIONS.PANTALLA_RETENCION), ["supervisor", "vendedor", "backoffice"], "pantalla.retencion");
+});
+
+test("pantalla.recupero_vendedor = vendedor, atencion_cliente + backoffice (nav 'recupero', hoy roles:['vendedor','atencion_cliente'])", () => {
+  assertExactRoleSet(getRolesWithPermission(PERMISSIONS.PANTALLA_RECUPERO_VENDEDOR), ["vendedor", "atencion_cliente", "backoffice"], "pantalla.recupero_vendedor");
+});
+
+test("pantalla.clientes = superadministrador, director, operaciones, supervisor + backoffice (nav 'clientes' cartera)", () => {
+  assertExactRoleSet(
+    getRolesWithPermission(PERMISSIONS.PANTALLA_CLIENTES),
+    ["superadministrador", "director", "operaciones", "supervisor", "backoffice"],
+    "pantalla.clientes"
+  );
+});
+
+test("pantalla.agenda = vendedor + backoffice (nav 'agenda', hoy roles:['vendedor'])", () => {
+  assertExactRoleSet(getRolesWithPermission(PERMISSIONS.PANTALLA_AGENDA), ["vendedor", "backoffice"], "pantalla.agenda");
+});
+
+test("clientes.alta / clientes.baja_masiva = los mismos 4 roles de pantalla.clientes, SIN backoffice", () => {
+  const sinBackoffice = ["superadministrador", "director", "operaciones", "supervisor"];
+  assertExactRoleSet(getRolesWithPermission(PERMISSIONS.CLIENTES_ALTA), sinBackoffice, "clientes.alta");
+  assertExactRoleSet(getRolesWithPermission(PERMISSIONS.CLIENTES_BAJA_MASIVA), sinBackoffice, "clientes.baja_masiva");
+  assert.equal(roleHasPermission("backoffice", PERMISSIONS.CLIENTES_ALTA), false, "backoffice NO clientes.alta");
+  assert.equal(roleHasPermission("backoffice", PERMISSIONS.CLIENTES_BAJA_MASIVA), false, "backoffice NO clientes.baja_masiva");
+});
+
+test("backoffice tiene las 5 capacidades de pantalla, ningún otro rol gana una que no tenía", () => {
+  const pantallas = [
+    PERMISSIONS.PANTALLA_SOPORTE,
+    PERMISSIONS.PANTALLA_RETENCION,
+    PERMISSIONS.PANTALLA_RECUPERO_VENDEDOR,
+    PERMISSIONS.PANTALLA_CLIENTES,
+    PERMISSIONS.PANTALLA_AGENDA
+  ];
+  for (const p of pantallas) {
+    assert.equal(roleHasPermission("backoffice", p), true, `backoffice ${p}`);
+  }
 });
