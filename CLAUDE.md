@@ -340,3 +340,14 @@ frontend) al auditar el alta del rol `backoffice` (2026-10). Vale para
      `status='approved'`, y una fila de `organization_users` con
      `activo=true` y el `organization_id` correcto. Si `ou.organization_id`
      es `NULL`, falta el paso 3.
+
+## Scripts de datos ya aplicados en producción (no volver a correr)
+
+- `sql/data/2026-10_su_emergencia_medicos_facturadores.sql` — carga de 26
+  médicos facturadores de SU Emergencia. **Aplicado en prod en 2026-10**
+  (COMMIT confirmado por Damián, con un INSERT equivalente corrido a mano,
+  no este archivo literal). Volver a correrlo duplicaría las 26 filas. Se
+  mantiene en el repo como referencia de qué se cargó y cómo se validó
+  (dígito verificador uruguayo, formato de `documento`, la excepción
+  documentada de Ramón Ávila). Depende de la migración `087` (tipo_personal
+  `'facturador'`), también ya aplicada.

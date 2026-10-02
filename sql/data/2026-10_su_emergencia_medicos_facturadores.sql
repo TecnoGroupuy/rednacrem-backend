@@ -1,3 +1,14 @@
+-- ============================================================
+-- YA APLICADO EN PRODUCCIÓN (2026-10, COMMIT confirmado por Damián) --
+-- los 26 médicos ya están cargados en su_personal/su_personal_roles,
+-- con un INSERT equivalente al de este archivo (corrido a mano, no este
+-- script literal). NO VOLVER A CORRER: reinsertaría los 26 duplicados,
+-- la query de duplicados de la auditoría original ya no aplica (ahora SÍ
+-- existen en su_personal). Se deja el archivo como referencia histórica
+-- de qué se cargó y cómo se validó (dígito verificador, formato de
+-- documento, la excepción de Ramón Ávila).
+-- ============================================================
+--
 -- Carga de 26 médicos facturadores de SU Emergencia (2026-10).
 --
 -- Solo nombre, apellido, documento, tipo_personal='facturador' (requiere
