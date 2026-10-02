@@ -299,6 +299,14 @@ function json(statusCode, payload) {
     statusCode,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      // Esta es una API dinamica (CRM): sin esto, un GET sin Cache-Control
+      // explicito queda a merced de la heuristica de cualquier cache
+      // intermedio (CDN, proxy, o el propio navegador) -- un ejemplo real
+      // fue la foto de perfil, donde la ficha podia mostrar una version
+      // vieja de /operaciones/personal/:id mientras el listado ya traia la
+      // nueva. no-store es mas fuerte que no-cache: ni siquiera guarda una
+      // copia para revalidar.
+      "Cache-Control": "no-store",
       ...CORS_HEADERS,
       "Access-Control-Allow-Origin": getCurrentCorsOrigin()
     },
