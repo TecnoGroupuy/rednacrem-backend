@@ -11273,9 +11273,14 @@ const DOCUMENTOS_POR_ROL = {
   Direccion_tecnica: ["titulo", "registro_msp"],
   Enfermero: ["titulo", "registro_msp"],
   Jefe_de_enfermeria: ["titulo", "registro_msp"],
+  Quimica: ["titulo", "registro_msp"],
   Chofer: ["libreta_conducir"],
   Jefe_de_choferes: ["libreta_conducir"]
 };
+// Administrativo, Backoffice, Auxiliar_de_servicio, Mantenimiento,
+// Economato y sin rol asignado: solo la base (DOCUMENTO_CATEGORIAS_BASE),
+// a proposito ausentes de este mapa -- getCategoriasRequeridas ya trata
+// cualquier rol sin entrada aca como "sin categorias extra".
 
 const DOCUMENTO_CATEGORIA_LABELS = {
   ci_frente: "Cédula (frente)",
