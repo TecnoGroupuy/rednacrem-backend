@@ -261,3 +261,7 @@ Claude Code es el agente de código principal (ya no se usa Codex). Claude se en
     — son datos históricos, no un cliente que churnea ahora; mandarlos a
     Recupero inundaría la cola con candidatos viejos no accionables. Para
     bajas históricas existe el importador propio de Recupero.
+- **Pendiente (no urgente)**: relevar cuántos strings de `index.mjs` tienen
+  caracteres dañados por mojibake (ej. `"vï¿½lido"`, `"telï¿½fono"` en
+  mensajes de validación — encontrado de pasada en la auditoría de roles de
+  2026-10, sin tocar). Son mensajes que ve el usuario final, no solo logs.
