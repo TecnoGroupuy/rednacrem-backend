@@ -13,6 +13,7 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } fro
 import { AppError } from "./src/lib/errors.js";
 import { handleOptions, getMethod as getMethodFromHttp, CORS_HEADERS, withCorsOrigin, getCurrentCorsOrigin } from "./src/lib/http.js";
 import { normalizePhone as normalizePhoneValidation } from "./src/lib/validation.js";
+import { ROLE_KEYS } from "./src/lib/constants.js";
 import { createManualUser, updateUser, listUsers as listUsersService } from "./src/services/userService.js";
 import { deleteUser as deleteCognitoUser } from "./src/services/cognitoService.js";
 import { emitRealtime } from "./src/monitoring/realtimeBus.js";
@@ -208,14 +209,11 @@ const VALID_VENDOR_REQUEST_STATUSES = [
   "rejected"
 ];
 
-const VALID_ROLES = [
-  "superadministrador",
-  "director",
-  "supervisor",
-  "operaciones",
-  "atencion_cliente",
-  "vendedor"
-];
+// VALID_ROLES vivía acá hardcodeado, desincronizado de getPrimaryRole mas
+// abajo y de pickRoleFromGroups/ROLE_KEYS en userService.js/constants.js --
+// unificado en ROLE_KEYS (src/lib/constants.js, importado arriba), fuente
+// única del vocabulario de roles (ver comentario ahí).
+const VALID_ROLES = ROLE_KEYS;
 
 // Motivos de baja para gestión de contactos/clientes (endpoint
 // /clients/baja-motivos). Distinto del vocabulario de
@@ -387,19 +385,16 @@ function normalizeGroups(groups) {
   return [];
 }
 
+// Precedencia tomada de ROLE_KEYS (src/lib/constants.js) -- antes era una
+// lista local propia, desincronizada de la de pickRoleFromGroups en
+// userService.js (que hace exactamente lo mismo para el flujo real de
+// login/sync de rol). Esta función solo se usa para el fallback de
+// desarrollo local (authUser.fallbackRole, ver getCurrentDbUserFromEvent
+// más abajo) -- producción pasa siempre por pickRoleFromGroups.
 function getPrimaryRole(groups) {
   const normalized = normalizeGroups(groups);
 
-  const precedence = [
-    "superadministrador",
-    "director",
-    "supervisor",
-    "operaciones",
-    "vendedor",
-    "atencion_cliente"
-  ];
-
-  for (const role of precedence) {
+  for (const role of ROLE_KEYS) {
     if (normalized.includes(role)) return role;
   }
 
@@ -42639,7 +42634,8 @@ export const __testables = {
   statusFromActivo,
   mapUserRowToApi,
   validateSuperadminUserPayload,
-  requireRole
+  requireRole,
+  getPrimaryRole
 };
 
 export {

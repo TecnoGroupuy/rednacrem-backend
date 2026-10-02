@@ -1,6 +1,6 @@
 import { withTransaction } from "../lib/db.js";
 import { conflict, forbidden, notFound } from "../lib/errors.js";
-import { isValidRole, isValidUserStatus } from "../lib/constants.js";
+import { isValidRole, isValidUserStatus, ROLE_KEYS } from "../lib/constants.js";
 import {
   findUserByCognitoSub,
   findUserByEmail,
@@ -31,19 +31,25 @@ function normalizeGroups(claims) {
   return [];
 }
 
-function pickRoleFromGroups(groups) {
-  const priority = [
-    "superadministrador",
-    "director",
-    "supervisor",
-    "operaciones",
-    "atencion_cliente",
-    "vendedor"
-  ];
-  for (const role of priority) {
+// Precedencia tomada de ROLE_KEYS (../lib/constants.js) -- antes era una
+// lista local propia (con 'backoffice' habría quedado desincronizada igual
+// que ya estaba de getPrimaryRole en index.mjs, que hace lo mismo para el
+// fallback de dev local). Esta es la que corre de verdad en producción:
+// ensureUserRole la usa para sincronizar users.role_key en cada login.
+//
+// Antes, si ningún grupo de Cognito matcheaba un rol conocido, devolvía
+// "vendedor" sin más -- un typo en el nombre del grupo, o un usuario sacado
+// de todos los grupos de rol sin borrar su fila de `users`, terminaba
+// reescribiendo silenciosamente su role_key real en cada login. Ahora
+// devuelve null ("sin cambio"): ensureUserRole ya trataba null como
+// no-op (if (!desiredRole) return user), así que esto no reescribe nada --
+// solo se agregó el log de advertencia ahí (ver abajo) para que el caso
+// quede visible en vez de desaparecer.
+export function pickRoleFromGroups(groups) {
+  for (const role of ROLE_KEYS) {
     if (groups.includes(role)) return role;
   }
-  return "vendedor";
+  return null;
 }
 
 function splitName(fullName) {
@@ -54,8 +60,22 @@ function splitName(fullName) {
   return { nombre: parts.slice(0, -1).join(" "), apellido: parts.slice(-1).join(" ") };
 }
 
-async function ensureUserRole(user, desiredRole) {
-  if (!desiredRole || user.role_key === desiredRole) return user;
+// Exportada para test (ver test/role-mapping.test.mjs): la rama
+// desiredRole=null es puramente sincrónica, sin tocar la DB, así que se
+// puede probar pasando un `user` cualquiera sin mockear nada.
+export async function ensureUserRole(user, desiredRole) {
+  if (!desiredRole) {
+    // pickRoleFromGroups no encontró ningún grupo de Cognito reconocido --
+    // se mantiene el role_key que ya tenía en vez de pisarlo (ver
+    // pickRoleFromGroups), pero queda logueado: esto puede ser un typo en
+    // el nombre del grupo o un usuario al que le sacaron todos los grupos
+    // de rol sin desactivar su cuenta.
+    console.warn(
+      `[role-sync] usuario ${user.email || user.id} sin grupo de Cognito reconocido -- se mantiene role_key actual (${user.role_key ?? "null"})`
+    );
+    return user;
+  }
+  if (user.role_key === desiredRole) return user;
   if (!isValidRole(desiredRole)) return user;
   const updated = await updateUserById(user.id, { role_key: desiredRole });
   await insertRoleHistory({
