@@ -16,6 +16,20 @@
 //      vez en "Cerrados", con los datos del ÚLTIMO cierre (por created_at).
 //   5) Los filtros de /manual-tickets/cerrados (closed_by, date_from/
 //      date_to, resultado) funcionan.
+//   6) GET /manual-tickets/cerrados/usuarios lista a quien efectivamente
+//      cerró, no al roster de /api/supervisor/agents (eso no incluye
+//      supervisores).
+//   7) clienteNombre/telefono: listManualTickets, listClosedManualTickets
+//      y getManualTicketById ahora resuelven el nombre/teléfono del
+//      cliente con un JOIN a contacts, en vez de depender de que el
+//      frontend lo encuentre en la primera página de /clients. Se prueba
+//      con un contacto SIN contact_products -- ni siquiera aparece en
+//      /clients (esa lista exige al menos un producto), el caso más
+//      fuerte de "no está en la página 1" posible.
+//   8) cierreHistory (getManualTicketById): cuando el cierre tiene
+//      closed_by, el campo `user` es el nombre REAL resuelto en vivo, no
+//      el texto libre `usuario` -- y cae a ese texto para cierres
+//      históricos sin closed_by.
 //
 // Cada corrida genera su propio documento/celular (RUN_ID), no depende de
 // datos fijos. Al terminar borra todo lo que creó -- se puede correr las
@@ -265,6 +279,78 @@ async function run() {
 
     const closersComoBackoffice = await get(`/manual-tickets/cerrados/usuarios`, backofficeHeaders);
     expect("closers: backoffice -> 403 (misma capacidad retencion.supervisar que la lista)", closersComoBackoffice.status === 403, `status=${closersComoBackoffice.status}`);
+
+    // ---------------------------------------------------------------
+    // 7) clienteNombre/telefono resueltos por JOIN a contacts, no por la
+    // hidratación del frontend contra /clients. El contacto de este caso
+    // deliberadamente NO tiene contact_products -- /clients exige
+    // s.productos_total > 0, así que este contacto no puede aparecer ahí
+    // bajo ninguna página: es el caso más fuerte de "no está en la
+    // primera página" (no está en NINGUNA).
+    // ---------------------------------------------------------------
+    console.log("\n--- Caso 3: clienteNombre/telefono (contacto ausente de /clients) ---");
+    const doc3 = `53${RUN_ID}3`;
+    const contact3 = await client.query(
+      `INSERT INTO contacts (nombre, apellido, documento, celular, organization_id, status)
+       VALUES ('SinProducto', 'AusenteDeClients', $1, $2, $3, 'activo') RETURNING id, nombre, apellido, celular`,
+      [doc3, `098${RUN_ID}3`, ORG_REDNACREM]
+    );
+    createdContactIds.push(contact3.rows[0].id);
+    const nombreEsperado3 = `${contact3.rows[0].nombre} ${contact3.rows[0].apellido}`;
+    const telefonoEsperado3 = contact3.rows[0].celular;
+
+    // Confirma la premisa: este contacto NO aparece en /clients.
+    const clientsDirResp = await get(`/clients?limit=200`, supervisorHeaders);
+    const apareceEnClients = (clientsDirResp.json?.items || clientsDirResp.json?.table || []).some((c) => c.id === contact3.rows[0].id);
+    expect("caso 3 premisa: el contacto NO aparece en /clients (sin contact_products)", !apareceEnClients, `status=${clientsDirResp.status}`);
+
+    const ticket3 = await client.query(
+      `INSERT INTO manual_tickets (cliente_id, tipo_solicitud, resumen, prioridad, estado, organization_id)
+       VALUES ($1, 'solicitud_baja', 'voluntaria', 'media', 'en_proceso', $2) RETURNING id`,
+      [contact3.rows[0].id, ORG_REDNACREM]
+    );
+    const ticket3Id = ticket3.rows[0].id;
+
+    const unassignedConCliente = await get(`/manual-tickets?unassigned=true`, supervisorHeaders);
+    const item3Unassigned = (unassignedConCliente.json?.items || []).find((t) => t.id === ticket3Id);
+    expect("7a) Sin asignar: clienteNombre resuelto por JOIN", item3Unassigned?.clienteNombre === nombreEsperado3, item3Unassigned?.clienteNombre);
+    expect("7b) Sin asignar: telefono resuelto por JOIN", item3Unassigned?.telefono === telefonoEsperado3, item3Unassigned?.telefono);
+
+    const closeTicket3 = await post(`/manual-tickets/${ticket3Id}/close`, { outcome: "retenido", note: "Cierre caso 3" }, backofficeHeaders);
+    expect("7c) cerrar ticket del caso 3: 200", closeTicket3.status === 200, `status=${closeTicket3.status}`);
+
+    const cerradosConCliente = await get(`/manual-tickets/cerrados`, supervisorHeaders);
+    const item3Cerrados = (cerradosConCliente.json?.items || []).find((t) => t.id === ticket3Id);
+    expect("7d) Cerrados: clienteNombre resuelto por JOIN", item3Cerrados?.clienteNombre === nombreEsperado3, item3Cerrados?.clienteNombre);
+    expect("7e) Cerrados: telefono resuelto por JOIN", item3Cerrados?.telefono === telefonoEsperado3, item3Cerrados?.telefono);
+
+    const detalleTicket3 = await get(`/manual-tickets/${ticket3Id}`, supervisorHeaders);
+    expect("7f) Detalle (getManualTicketById): clienteNombre resuelto por JOIN", detalleTicket3.json?.item?.clienteNombre === nombreEsperado3, detalleTicket3.json?.item?.clienteNombre);
+
+    // ---------------------------------------------------------------
+    // 8) cierreHistory: con closed_by, `user` es el nombre REAL resuelto
+    // en vivo (no el texto `usuario` guardado en su momento). Se agrega
+    // una segunda fila de cierre SIN closed_by (simula un cierre
+    // histórico pre-migración 086) para confirmar que esa sí cae al
+    // texto libre.
+    // ---------------------------------------------------------------
+    console.log("\n--- Caso 3 (cont.): cierreHistory con closed_by resuelto ---");
+    const cierreHistory3 = detalleTicket3.json?.item?.cierreHistory || [];
+    expect("8a) cierreHistory tiene el cierre real (closed_by = backoffice)", cierreHistory3.length === 1, JSON.stringify(cierreHistory3));
+    expect("8b) cierreHistory: user = nombre REAL de backoffice (no el texto usuario guardado)", cierreHistory3[0]?.user === backofficeNombreReal, cierreHistory3[0]?.user);
+
+    await client.query(
+      `INSERT INTO manual_ticket_closures (ticket_id, resultado, usuario, created_at)
+       VALUES ($1, 'retenido', 'Texto Historico Sin Closed By', NOW() - interval '30 days')`,
+      [ticket3Id]
+    );
+    const detalleTicket3Historico = await get(`/manual-tickets/${ticket3Id}`, supervisorHeaders);
+    const cierreHistory3b = detalleTicket3Historico.json?.item?.cierreHistory || [];
+    expect("8c) cierreHistory ahora tiene 2 cierres", cierreHistory3b.length === 2, JSON.stringify(cierreHistory3b));
+    const cierreSinClosedBy = cierreHistory3b.find((c) => c.user === "Texto Historico Sin Closed By");
+    expect("8d) cierre histórico SIN closed_by: user cae al texto libre `usuario`", Boolean(cierreSinClosedBy), JSON.stringify(cierreHistory3b));
+    const cierreConClosedBy = cierreHistory3b.find((c) => c.user === backofficeNombreReal);
+    expect("8e) el cierre real sigue mostrando el nombre resuelto (no se rompió con el segundo insert)", Boolean(cierreConClosedBy), JSON.stringify(cierreHistory3b));
 
     console.log(`\n=== Resultado: ${results.pass} OK / ${results.fail} FAIL ===`);
   } finally {

@@ -9993,10 +9993,21 @@ async function updateProductRecord(productId, payload, organizationId) {
 // antes, sin romper otros llamadores de este mapper).
 function mapManualTicketRowToApi(row) {
   const hasProduct = row.producto_nombre !== undefined && row.producto_nombre !== null;
+  // cliente_nombre solo viene presente cuando el SELECT hizo JOIN a
+  // contacts (listManualTickets, listClosedManualTickets,
+  // getManualTicketById) -- cuando está, clienteNombre/telefono quedan
+  // resueltos de una, sin depender de hydrateTicketsWithDirectory en el
+  // frontend (que sigue existiendo como respaldo para lo que no resuelva
+  // acá, ej. el contacto fue borrado). Nombres de campo elegidos a
+  // propósito iguales a los que mapBackendManualTicket (ticketsService.js)
+  // ya priorizaba antes de esta columna existir.
+  const hasCliente = row.cliente_nombre !== undefined && row.cliente_nombre !== null;
   return {
     id: row.id,
     numero: row.numero,
     clienteId: row.cliente_id,
+    clienteNombre: hasCliente ? [row.cliente_nombre, row.cliente_apellido].filter(Boolean).join(" ").trim() : undefined,
+    telefono: hasCliente ? (row.cliente_celular || row.cliente_telefono || "") : undefined,
     tipoSolicitud: row.tipo_solicitud,
     tipoSolicitudManual: row.tipo_solicitud_manual || "",
     resumen: row.resumen,
@@ -10065,6 +10076,46 @@ async function createManualTicket(payload, organizationId) {
   }
 }
 
+// Historial de cierre de uno o más tickets, con el usuario resuelto en
+// vivo contra closed_by (uuid, migración 086) cuando existe -- el texto
+// libre `usuario` (nombre tal cual lo mandó quien cerró en su momento)
+// queda como respaldo SOLO para cierres históricos sin closed_by (antes
+// de la migración, o los que el backfill no pudo resolver). Compartida
+// entre listManualTickets y getManualTicketById -- misma lectura, dos
+// formas de pedirla (CLAUDE.md regla 4).
+async function fetchManualTicketClosuresByTicketIds(client, ticketIds) {
+  const result = await client.query(
+    `
+    SELECT
+      mc.ticket_id,
+      mc.resultado,
+      mc.usuario,
+      mc.closed_by,
+      mc.created_at,
+      u.nombre AS closed_by_nombre,
+      u.apellido AS closed_by_apellido,
+      u.email AS closed_by_email
+    FROM manual_ticket_closures mc
+    LEFT JOIN users u ON u.id = mc.closed_by
+    WHERE mc.ticket_id = ANY($1::uuid[])
+    ORDER BY mc.created_at DESC
+    `,
+    [ticketIds]
+  );
+  const byTicket = new Map();
+  for (const row of result.rows) {
+    if (!byTicket.has(row.ticket_id)) byTicket.set(row.ticket_id, []);
+    byTicket.get(row.ticket_id).push({
+      at: row.created_at,
+      user: row.closed_by
+        ? ([row.closed_by_nombre, row.closed_by_apellido].filter(Boolean).join(" ").trim() || row.closed_by_email || row.usuario || "Usuario")
+        : (row.usuario || "Usuario"),
+      resultado: row.resultado
+    });
+  }
+  return byTicket;
+}
+
 async function listManualTickets({ clienteId, organizationId, unassigned, assigned, assignedTo } = {}) {
   const client = createDbClient();
 
@@ -10124,10 +10175,15 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
         cp.seller_origin AS producto_vendedor_origen,
         cp.seller_name_snapshot AS producto_vendedor_snapshot,
         su.nombre AS producto_vendedor_nombre,
-        su.apellido AS producto_vendedor_apellido
+        su.apellido AS producto_vendedor_apellido,
+        c.nombre AS cliente_nombre,
+        c.apellido AS cliente_apellido,
+        c.celular AS cliente_celular,
+        c.telefono AS cliente_telefono
       FROM manual_tickets mt
       LEFT JOIN contact_products cp ON cp.id = mt.producto_contrato_id
       LEFT JOIN users su ON su.id = cp.seller_user_id
+      LEFT JOIN contacts c ON c.id = mt.cliente_id AND c.organization_id = mt.organization_id
       ${where}
       ORDER BY mt.created_at DESC
       `,
@@ -10162,28 +10218,7 @@ async function listManualTickets({ clienteId, organizationId, unassigned, assign
       });
     }
 
-    const closuresResult = await client.query(
-      `
-      SELECT
-        ticket_id,
-        resultado,
-        usuario,
-        created_at
-      FROM manual_ticket_closures
-      WHERE ticket_id = ANY($1::uuid[])
-      ORDER BY created_at DESC
-      `,
-      [ids]
-    );
-    const closuresByTicket = new Map();
-    for (const row of closuresResult.rows) {
-      if (!closuresByTicket.has(row.ticket_id)) closuresByTicket.set(row.ticket_id, []);
-      closuresByTicket.get(row.ticket_id).push({
-        at: row.created_at,
-        user: row.usuario || "Usuario",
-        resultado: row.resultado
-      });
-    }
+    const closuresByTicket = await fetchManualTicketClosuresByTicketIds(client, ids);
 
     return items.map((item) => ({
       ...item,
@@ -10283,10 +10318,15 @@ async function listClosedManualTickets({
         lc.created_at AS cierre_fecha,
         u.nombre AS closed_by_nombre,
         u.apellido AS closed_by_apellido,
-        u.email AS closed_by_email
+        u.email AS closed_by_email,
+        c.nombre AS cliente_nombre,
+        c.apellido AS cliente_apellido,
+        c.celular AS cliente_celular,
+        c.telefono AS cliente_telefono
       FROM manual_tickets mt
       JOIN last_closure lc ON lc.ticket_id = mt.id
       LEFT JOIN users u ON u.id = lc.closed_by
+      LEFT JOIN contacts c ON c.id = mt.cliente_id AND c.organization_id = mt.organization_id
       ${where}
       ORDER BY lc.created_at DESC
       LIMIT $${values.length + 1} OFFSET $${values.length + 2}
@@ -10365,10 +10405,15 @@ async function getManualTicketById(ticketId, organizationId) {
         cp.seller_origin AS producto_vendedor_origen,
         cp.seller_name_snapshot AS producto_vendedor_snapshot,
         su.nombre AS producto_vendedor_nombre,
-        su.apellido AS producto_vendedor_apellido
+        su.apellido AS producto_vendedor_apellido,
+        c.nombre AS cliente_nombre,
+        c.apellido AS cliente_apellido,
+        c.celular AS cliente_celular,
+        c.telefono AS cliente_telefono
       FROM manual_tickets mt
       LEFT JOIN contact_products cp ON cp.id = mt.producto_contrato_id
       LEFT JOIN users su ON su.id = cp.seller_user_id
+      LEFT JOIN contacts c ON c.id = mt.cliente_id AND c.organization_id = mt.organization_id
       WHERE mt.id = $1
       ${orgClause}
       LIMIT 1
@@ -10392,18 +10437,7 @@ async function getManualTicketById(ticketId, organizationId) {
       [ticketId]
     );
 
-    const closuresResult = await client.query(
-      `
-      SELECT
-        resultado,
-        usuario,
-        created_at
-      FROM manual_ticket_closures
-      WHERE ticket_id = $1
-      ORDER BY created_at DESC
-      `,
-      [ticketId]
-    );
+    const closuresByTicket = await fetchManualTicketClosuresByTicketIds(client, [ticketId]);
 
     const item = mapManualTicketRowToApi(row);
     return {
@@ -10413,11 +10447,7 @@ async function getManualTicketById(ticketId, organizationId) {
         texto: note.texto,
         createdAt: note.created_at
       })),
-      cierreHistory: closuresResult.rows.map((row) => ({
-        at: row.created_at,
-        user: row.usuario || "Usuario",
-        resultado: row.resultado
-      }))
+      cierreHistory: closuresByTicket.get(ticketId) || []
     };
   } finally {
     await client.end();
