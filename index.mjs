@@ -41449,6 +41449,46 @@ function buildDatosParaTrabajarWhere(params, organizationId, startIdx = 1) {
       }
     }
 
+    // Endpoint minimo (no habia PATCH de roles -- solo POST/DELETE) para que
+    // el rediseño de PersonalForm pueda cambiar cual rol YA guardado es el
+    // principal sin borrar y recrear la fila (eso le cambiaria el id y
+    // rompería cualquier referencia futura). Unico campo aceptado:
+    // rol_principal=true -- no se usa para desmarcar (mandar false no tiene
+    // sentido solo, siempre hay que dejar otro como principal en su lugar).
+    // Mismo patron que syncPersonalBaseIdToBasesTable: desmarca cualquier
+    // otro rol_principal de la misma persona antes de marcar el elegido.
+    if (method === "PATCH" && operacionesPersonalRoleMatch) {
+      const body = safeParseBody(event);
+      if (body === null || body.rol_principal !== true) {
+        return json(400, { ok: false, message: "Solo se admite rol_principal=true" });
+      }
+      const client = createDbClient();
+      await client.connect();
+      try {
+        const access = await getOperationsAccessContext(event, client);
+        if (access.error) return access.error;
+        const personalId = operacionesPersonalRoleMatch[1];
+        const roleId = operacionesPersonalRoleMatch[2];
+        await client.query(
+          `UPDATE su_personal_roles SET rol_principal = false
+           WHERE personal_id = $1 AND organization_id = $2 AND id <> $3 AND rol_principal`,
+          [personalId, access.organizationId, roleId]
+        );
+        const result = await client.query(
+          `UPDATE su_personal_roles SET rol_principal = true
+           WHERE id = $1 AND personal_id = $2 AND organization_id = $3
+           RETURNING *`,
+          [roleId, personalId, access.organizationId]
+        );
+        if (!result.rows.length) return json(404, { ok: false, message: "Rol no encontrado" });
+        return json(200, { ok: true, item: result.rows[0] });
+      } catch (error) {
+        return operationsErrorResponse(error, "Failed to update personal role");
+      } finally {
+        await client.end();
+      }
+    }
+
     if (method === "POST" && path.match(/\/operaciones\/personal\/([^/]+)\/habilitaciones$/)) {
       const match = path.match(/\/operaciones\/personal\/([^/]+)\/habilitaciones$/);
       const body = safeParseBody(event);
