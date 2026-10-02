@@ -10311,6 +10311,38 @@ async function listClosedManualTickets({
   }
 }
 
+// Filtro "usuario que cerró" de la tab "Cerrados" (2026-10): tiene que
+// salir de quienes EFECTIVAMENTE cerraron solicitud_baja en la
+// organización -- /api/supervisor/agents no sirve acá, solo trae
+// comercial.asignable (vendedor/backoffice), y los supervisores también
+// cierran tickets (ej. casos excepcionales, ver closeManualTicket). DISTINCT
+// sobre closed_by real, no sobre un roster de rol.
+async function listManualTicketClosers(organizationId) {
+  const client = createDbClient();
+  try {
+    await client.connect();
+    const result = await client.query(
+      `
+      SELECT DISTINCT u.id, u.nombre, u.apellido, u.email
+      FROM manual_ticket_closures mc
+      JOIN manual_tickets mt ON mt.id = mc.ticket_id
+      JOIN users u ON u.id = mc.closed_by
+      WHERE mt.tipo_solicitud = 'solicitud_baja'
+        AND mt.estado = 'finalizada'
+        AND mt.organization_id = $1
+      ORDER BY u.nombre ASC
+      `,
+      [organizationId]
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      nombre: [row.nombre, row.apellido].filter(Boolean).join(" ").trim() || row.email || "Usuario"
+    }));
+  } finally {
+    await client.end();
+  }
+}
+
 async function getManualTicketById(ticketId, organizationId) {
   const client = createDbClient();
 
@@ -13965,6 +13997,7 @@ async function routeRequest(event) {
     path.match(/\/sms-templates\/([^/]+)$/);
   const manualTicketsPath = path.endsWith("/manual-tickets");
   const manualTicketsCerradosPath = path.endsWith("/manual-tickets/cerrados");
+  const manualTicketsCerradosUsuariosPath = path.endsWith("/manual-tickets/cerrados/usuarios");
   const manualTicketMatch = path.match(/\/manual-tickets\/([^/]+)$/);
   const manualTicketNotesMatch = path.match(/\/manual-tickets\/([^/]+)\/notes$/);
   const manualTicketCloseMatch = path.match(/\/manual-tickets\/([^/]+)\/close$/);
@@ -19350,6 +19383,47 @@ async function routeRequest(event) {
       return json(500, {
         ok: false,
         message: "Failed to list closed manual tickets",
+        error: error.message
+      });
+    }
+  }
+
+  // Va ANTES de GET + manualTicketMatch por la misma razón que
+  // manualTicketsCerradosPath arriba (aunque acá no colisionaría: el
+  // match genérico exige que no haya más "/" después del primer segmento,
+  // y "cerrados/usuarios" tiene uno -- se deja igual de explícito).
+  if (method === "GET" && manualTicketsCerradosUsuariosPath) {
+    try {
+      const { authUser, dbUser } = await getCurrentDbUserFromEvent(event);
+
+      let authError = requireAuthenticated(event, authUser);
+      if (authError) return authError;
+
+      let dbError = requireDbUser(event, dbUser);
+      if (dbError) return dbError;
+
+      let statusError = requireApproved(event, dbUser);
+      if (statusError) return statusError;
+
+      let roleError = requirePermission(event, dbUser, PERMISSIONS.RETENCION_SUPERVISAR);
+      if (roleError) return roleError;
+
+      let organizationId = null;
+      try {
+        organizationId = await resolveOrganizationIdForRequest(dbUser, event);
+      } catch (error) {
+        if (error?.status) {
+          return json(error.status, { ok: false, message: error.message });
+        }
+        throw error;
+      }
+
+      const items = await listManualTicketClosers(organizationId);
+      return json(200, { ok: true, items });
+    } catch (error) {
+      return json(500, {
+        ok: false,
+        message: "Failed to list manual ticket closers",
         error: error.message
       });
     }

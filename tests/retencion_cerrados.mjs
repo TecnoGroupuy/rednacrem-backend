@@ -246,6 +246,26 @@ async function run() {
     const idsFiltroFechaVieja = (filtroFechaVieja.json?.items || []).map((t) => t.id);
     expect("filtro date_from/date_to=hace 2 días: NO incluye ticket2 (su último cierre es de hace 1 hora, no de hace 2 días)", !idsFiltroFechaVieja.includes(ticket2Id), JSON.stringify(idsFiltroFechaVieja));
 
+    // ---------------------------------------------------------------
+    // 6) GET /manual-tickets/cerrados/usuarios: el filtro "usuario que
+    // cerró" tiene que salir de quienes EFECTIVAMENTE cerraron tickets --
+    // no de /api/supervisor/agents (que solo trae comercial.asignable,
+    // vendedor/backoffice). ticket2 lo cerró primero el supervisor (ver
+    // Caso 2 arriba) -- tiene que aparecer, aunque supervisor no sea un
+    // "agente" asignable.
+    // ---------------------------------------------------------------
+    console.log("\n--- GET /manual-tickets/cerrados/usuarios ---");
+    const closers = await get(`/manual-tickets/cerrados/usuarios`, supervisorHeaders);
+    expect("closers: 200", closers.status === 200, `status=${closers.status}`);
+    const closerIds = (closers.json?.items || []).map((u) => u.id);
+    expect("closers: incluye a backoffice (cerró ticket1 y el último cierre de ticket2)", closerIds.includes(backofficeId), JSON.stringify(closers.json?.items));
+    expect("closers: incluye a supervisor (cerró el PRIMER cierre de ticket2, aunque no sea el último)", closerIds.includes(supervisorId), JSON.stringify(closers.json?.items));
+    const supervisorCloser = (closers.json?.items || []).find((u) => u.id === supervisorId);
+    expect("closers: supervisor trae nombre resuelto, no solo el id", Boolean(supervisorCloser?.nombre), JSON.stringify(supervisorCloser));
+
+    const closersComoBackoffice = await get(`/manual-tickets/cerrados/usuarios`, backofficeHeaders);
+    expect("closers: backoffice -> 403 (misma capacidad retencion.supervisar que la lista)", closersComoBackoffice.status === 403, `status=${closersComoBackoffice.status}`);
+
     console.log(`\n=== Resultado: ${results.pass} OK / ${results.fail} FAIL ===`);
   } finally {
     console.log("\n--- Limpieza ---");
