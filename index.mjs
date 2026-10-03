@@ -15842,6 +15842,11 @@ async function routeRequest(event) {
   const FICHA_PUBLICA_MSG_TOKEN = "El enlace no es válido o venció. Pedí uno nuevo a tu contacto de RRHH.";
   const FICHA_PUBLICA_MSG_SESION = "Tu sesión venció, volvé a ingresar tu documento.";
   const FICHA_PUBLICA_MSG_RATE_LIMIT = "Demasiados intentos, probá más tarde.";
+  // Foto de perfil obligatoria (2026-10) -- este sí es específico a
+  // propósito (a diferencia de los de arriba, que son genéricos para no
+  // dar pistas): acá la persona ya está autenticada dentro de su propia
+  // sesión, decirle exactamente qué falta no revela nada a un tercero.
+  const FICHA_PUBLICA_MSG_FOTO_REQUERIDA = "Subí tu foto de perfil antes de continuar.";
 
   // POST /publico/ficha-personal/verificar — body: { codigo?, token?, documento, fecha_nacimiento }
   // codigo es el mecanismo ACTUAL (link corto, migracion 084); token es el
@@ -16170,6 +16175,17 @@ async function routeRequest(event) {
 
       const persona = await getFichaPublicaPersonaActiva(client, sessionCheck.organizationId, sessionCheck.personalId);
       if (!persona) return json(404, { ok: false, message: FICHA_PUBLICA_MSG_NO_MATCH });
+
+      // Foto de perfil obligatoria (2026-10) ANTES de cualquier documento/
+      // curso -- gate solo acá, NO en el GET de abajo ni en turno/aviso: el
+      // GET lo pide el frontend apenas hay sessionToken, antes de llegar al
+      // paso "foto" (para la barra de progreso), así que bloquearlo rompería
+      // la pantalla para cualquiera que todavía no subió la foto. Y
+      // turno/aviso es el canal para avisarle a RRHH que algo no coincide,
+      // tiene que funcionar siempre.
+      if (!persona.foto_url) {
+        return json(409, { ok: false, message: FICHA_PUBLICA_MSG_FOTO_REQUERIDA });
+      }
 
       // La categoria tiene que aplicarle a esta persona segun su rol (mas
       // 'curso', que es opcional para todos) -- evita que alguien suba
